@@ -186,6 +186,17 @@ Super Admin → `/admin/pedagogy` → pick a domain → click any cell in the 60
 - **Tech stack**: Hono 4 · Cloudflare D1 (SQLite) · Tailwind CDN · FontAwesome · bcryptjs · PM2 (dev) · Vite 6 · Wrangler 4
 - **Last Updated**: 2026-04-22
 
+## Guided Tour (role‑aware walkthrough)
+Every signed‑in account gets a built‑in, zero‑install tour that highlights the exact features they can use:
+- **Auto‑launches on first login** (per‑user, remembered in `localStorage`)
+- **Gold "Guided Tour" pill** in the top navigation on every page
+- **"Guided Tour" menu item** under the user's initials (upper‑right dropdown)
+- **"Start the tour" card** on the Profile page, plus a button to re‑enable auto‑launch on next login
+- **Five role‑specific tours** — Super Admin, Superintendent, Appraiser (Principal), Coach, Teacher
+- Auto‑navigates between pages (`/admin → /admin/users → /admin/assignments → …`) while keeping your place
+- Keyboard shortcuts: `→` Next, `←` Back, `Esc` close
+- Implementation: `src/lib/tour.ts` (role → steps) + `public/static/tour.js` (engine) + tour CSS in `public/static/styles.css`. No third‑party tour libraries — fully self‑hosted.
+
 ### Local development
 ```bash
 cd /home/user/webapp
