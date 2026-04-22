@@ -178,7 +178,11 @@ Super Admin → `/admin/pedagogy` → pick a domain → click any cell in the 60
 
 - **Platform**: Cloudflare Pages + Cloudflare Workers + Cloudflare D1
 - **Framework**: Hono 4 + TypeScript JSX (server‑rendered)
-- **Status**: ✅ Local build + full workflow verified; deployment to Cloudflare pending (requires `setup_cloudflare_api_key`)
+- **Status**: ✅ Deployed to Cloudflare Pages (edge worker live); ⚠️ Production D1 database binding pending (requires D1 write permission on the Cloudflare API token)
+- **Production URL**: https://alexander-marshall-growth.pages.dev
+- **Latest Deploy**: https://ff5e9bd7.alexander-marshall-growth.pages.dev
+- **Cloudflare project name**: `alexander-marshall-growth`
+- **Sandbox preview (local D1, fully seeded)**: https://3000-iz4zjax2wz4mwitsuv97o-b9b802c4.sandbox.novita.ai
 - **Tech stack**: Hono 4 · Cloudflare D1 (SQLite) · Tailwind CDN · FontAwesome · bcryptjs · PM2 (dev) · Vite 6 · Wrangler 4
 - **Last Updated**: 2026-04-22
 
@@ -205,8 +209,8 @@ npx wrangler pages deploy dist --project-name <project-name>
 ```
 
 ## Features NOT Yet Implemented (v1.1 roadmap)
-- Production D1 database creation + deployment to Cloudflare Pages (blocked on Cloudflare API key)
-- GitHub repository push (blocked on GitHub auth)
+- Production D1 database creation + binding to the deployed Pages project (the edge worker is live, but the current Cloudflare API token lacks D1 write permission — see "Finish production D1 setup" below)
+- GitHub repository push (blocked — `setup_github_environment` reported the GitHub session was not set up; user must authorize in the #github tab)
 - Full APS staff roster beyond the 7 seeded teachers (current migration seeds page 1 of the public directory; additional teachers can be added via `/admin/users/create` or by extending `seed/003_alexander_staff.sql`)
 - Annual rollover automation (manual via school_years table for now)
 - ND state teacher‑evaluation export format
@@ -214,10 +218,39 @@ npx wrangler pages deploy dist --project-name <project-name>
 - Offline queueing in the service worker
 - Superintendent pedagogy‑usage analytics (which library entries trigger most often)
 
+## Finish production D1 setup (required before prod login works)
+
+The worker is deployed, but it cannot read/write users until a production D1 database is bound. The current Cloudflare API token has Pages permission but not D1 permission.
+
+**Option A — fix the API token (recommended, fully CLI):**
+1. Go to https://dash.cloudflare.com/profile/api-tokens → edit the token used by this sandbox → add permissions:
+   - Account · D1 · Edit
+   - Account · Cloudflare Pages · Edit (already present)
+2. In the sandbox:
+   ```bash
+   cd /home/user/webapp
+   npx wrangler d1 create alexander-marshall-growth-production
+   # copy the database_id it prints
+   # paste it into wrangler.jsonc → d1_databases[0].database_id
+   npx wrangler d1 migrations apply alexander-marshall-growth-production
+   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/001_district_and_framework.sql
+   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/002_pedagogy_library.sql
+   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/003_alexander_staff.sql
+   npm run build
+   npx wrangler pages deploy dist --project-name alexander-marshall-growth --branch main
+   ```
+
+**Option B — via the Cloudflare dashboard (no CLI perms needed):**
+1. Workers & Pages → D1 → Create database `alexander-marshall-growth-production`
+2. Copy the `database_id`
+3. Workers & Pages → `alexander-marshall-growth` → Settings → Bindings → D1 → add binding name `DB` → database `alexander-marshall-growth-production`
+4. D1 → your DB → Console → paste the three seed files in order (`001_district_and_framework.sql`, `002_pedagogy_library.sql`, `003_alexander_staff.sql`), then apply `migrations/0001_initial_schema.sql` first (before seeds)
+5. Redeploy from the Pages dashboard so the new binding takes effect
+
 ## Recommended Next Steps
-1. Run `setup_cloudflare_api_key` and complete the production deployment above
-2. Run `setup_github_environment` and push to the user's selected GitHub repository
-3. In production, log in as super admin, force‑change the seeded password, then reset all other seeded accounts to fresh passwords the district can distribute in person
+1. Complete the production D1 setup above so `/login` works at https://alexander-marshall-growth.pages.dev
+2. Authorize GitHub in the #github tab, then the sandbox can push this repo for you
+3. In production, log in as super admin (`admin@alexanderschoolnd.us` / `Alexander2026!`), force‑change the seeded password, then reset all other seeded accounts to fresh passwords the district can distribute in person
 4. Import the rest of the APS staff via `/admin/users` and link appraiser + coach assignments via `/admin/assignments`
 5. Walk the superintendent through `/superintendent` for sign‑off
 6. Replace the default‑password pattern with a district‑chosen seed phrase in `seed/003_alexander_staff.sql` if you prefer
