@@ -186,6 +186,36 @@ Super Admin → `/admin/pedagogy` → pick a domain → click any cell in the 60
 - **Tech stack**: Hono 4 · Cloudflare D1 (SQLite) · Tailwind CDN · FontAwesome · bcryptjs · PM2 (dev) · Vite 6 · Wrangler 4
 - **Last Updated**: 2026-04-22
 
+## Mobile & PWA (Installable App)
+The platform is fully mobile‑responsive and installable as a Progressive Web App on iOS, Android, Windows, macOS, and Chromebooks.
+
+**Mobile responsiveness:**
+- Hamburger drawer menu on phones (replaces the overflowing horizontal nav)
+- Safe‑area insets for notched devices (iPhone, newer Android)
+- 44px+ touch targets on every button/link
+- 16px form inputs so iOS Safari never zooms on focus
+- Every data table is wrapped in an `overflow-x-auto` scroller
+- Filter grids (Reports, Admin) collapse to a single column below 640px
+- Guided Tour tooltip pins to the bottom on phones so it never covers content
+
+**PWA capabilities:**
+- Installable on iOS (Add to Home Screen), Android (Install app prompt + FAB), desktop Chrome/Edge
+- App shortcuts: *Dashboard*, *Reports*, *Guided Tour*
+- Service worker (`/static/sw.js`, v3):
+  - Cache‑first for `/static/*` (instant icons, CSS, JS)
+  - Stale‑while‑revalidate for Tailwind / FontAwesome CDN
+  - Network‑first for HTML with automatic fallback to `/static/offline`
+  - Never caches POST/PUT/DELETE — form submissions always hit the server
+- Offline page with auto‑retry on reconnect
+- "New version available" banner when the SW updates
+- Online/offline status banner
+- Icons: 16, 32, 180 (Apple), 192, 512 — all generated from a navy‑on‑gold "A" mark
+
+**How users install:**
+- **Android / Chrome desktop:** a gold "Install app" floating button appears in the corner — one tap to install
+- **iOS Safari:** one‑time hint card shows ("Tap ↑ Share, then *Add to Home Screen*")
+- **Windows / macOS Edge/Chrome:** install icon in the address bar
+
 ## Guided Tour (role‑aware walkthrough)
 Every signed‑in account gets a built‑in, zero‑install tour that highlights the exact features they can use:
 - **Auto‑launches on first login** (per‑user, remembered in `localStorage`)
