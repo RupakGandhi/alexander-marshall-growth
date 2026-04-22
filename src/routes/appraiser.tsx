@@ -5,7 +5,7 @@ import { requireRole } from '../lib/auth';
 import {
   getAssignedTeachers, getTeacherSummary, getObservation,
   getDomainsWithIndicators, getActiveFramework, getCurrentSchoolYear,
-  getPedagogy, logActivity,
+  getPedagogy, logActivity, getTeacherPerformanceSummary,
 } from '../lib/db';
 import {
   levelColor, levelLabels, formatDate, formatDateTime,
@@ -45,7 +45,8 @@ app.get('/teachers/:id', async (c) => {
   if (!assign && user.role !== 'super_admin') return c.text('Not assigned to this teacher', 403);
   const summary = await getTeacherSummary(c.env.DB, teacherId);
   if (!summary) return c.text('Teacher not found', 404);
-  return c.html(<AppraiserTeacherDetail user={user} summary={summary} />);
+  const performance = await getTeacherPerformanceSummary(c.env.DB, teacherId);
+  return c.html(<AppraiserTeacherDetail user={user} summary={summary} performance={performance} />);
 });
 
 // ---- Start a new observation
@@ -353,8 +354,16 @@ function AppraiserHome({ user, teachers, latest }: any) {
   );
 }
 
-function AppraiserTeacherDetail({ user, summary }: any) {
+function AppraiserTeacherDetail({ user, summary, performance }: any) {
   const { teacher, observations, focusAreas } = summary;
+  const perf = performance || { domains: [], latestPerIndicator: [], counts: {}, totals: {} };
+  const totalScores = Number(perf.totals?.total_scores || 0);
+  const overallAvg = perf.totals?.overall_avg ? Number(perf.totals.overall_avg) : null;
+  const pct = (n: number) => totalScores > 0 ? Math.round((n / totalScores) * 100) : 0;
+  const n4 = Number(perf.totals?.n4 || 0);
+  const n3 = Number(perf.totals?.n3 || 0);
+  const n2 = Number(perf.totals?.n2 || 0);
+  const n1 = Number(perf.totals?.n1 || 0);
   return (
     <Layout title={`${teacher.first_name} ${teacher.last_name}`} user={user} activeNav="ap-home">
       <div class="mb-4"><a href="/appraiser" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to my teachers</a></div>
@@ -380,6 +389,89 @@ function AppraiserTeacherDetail({ user, summary }: any) {
           </form>
         </div>
       </div>
+
+      {/* ---------- Performance Summary (pulled directly from DB scores) ---------- */}
+      <Card title="Performance Summary" icon="fas fa-chart-column" class="mb-4">
+        {totalScores === 0 ? (
+          <p class="text-slate-500 text-sm">No published observation scores yet. Once you sign and publish an observation, rubric-level averages, domain breakdowns, and a rating distribution will appear here — pulled directly from the indicators you scored, no AI summarization.</p>
+        ) : (
+          <div>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+              <div class="rounded-md border border-slate-200 p-3">
+                <div class="text-xs text-slate-500">Overall Avg</div>
+                <div class="text-2xl font-bold text-aps-navy">{overallAvg !== null ? overallAvg.toFixed(2) : '—'}<span class="text-sm text-slate-400"> / 4</span></div>
+                <div class="text-xs text-slate-500">{totalScores} indicator score{totalScores!==1?'s':''}</div>
+              </div>
+              <div class="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+                <div class="text-xs text-emerald-700">Highly Effective (4)</div>
+                <div class="text-2xl font-bold text-emerald-800">{n4}</div>
+                <div class="text-xs text-emerald-700">{pct(n4)}%</div>
+              </div>
+              <div class="rounded-md border border-sky-200 bg-sky-50 p-3">
+                <div class="text-xs text-sky-700">Effective (3)</div>
+                <div class="text-2xl font-bold text-sky-800">{n3}</div>
+                <div class="text-xs text-sky-700">{pct(n3)}%</div>
+              </div>
+              <div class="rounded-md border border-amber-200 bg-amber-50 p-3">
+                <div class="text-xs text-amber-700">Improvement Necessary (2)</div>
+                <div class="text-2xl font-bold text-amber-800">{n2}</div>
+                <div class="text-xs text-amber-700">{pct(n2)}%</div>
+              </div>
+              <div class="rounded-md border border-red-200 bg-red-50 p-3">
+                <div class="text-xs text-red-700">Does Not Meet (1)</div>
+                <div class="text-2xl font-bold text-red-800">{n1}</div>
+                <div class="text-xs text-red-700">{pct(n1)}%</div>
+              </div>
+            </div>
+
+            {/* Domain breakdown */}
+            <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">By Domain</div>
+            <div class="space-y-2">
+              {perf.domains.filter((d: any) => Number(d.score_count || 0) > 0).map((d: any) => {
+                const avg = d.avg_level ? Number(d.avg_level) : 0;
+                const count = Number(d.score_count || 0);
+                const pctBar = Math.max(0, Math.min(100, (avg / 4) * 100));
+                const tone = avg >= 3.5 ? 'bg-emerald-600' : avg >= 2.5 ? 'bg-sky-600' : avg >= 1.5 ? 'bg-amber-500' : 'bg-red-600';
+                return (
+                  <div class="border border-slate-200 rounded-md p-2">
+                    <div class="flex items-center justify-between text-sm">
+                      <div><span class="font-semibold text-aps-navy">Domain {d.domain_code}</span> <span class="text-slate-600">· {d.domain_name}</span></div>
+                      <div class="text-slate-600 text-xs">Avg <span class="font-semibold text-aps-navy">{avg.toFixed(2)}</span> · {count} score{count!==1?'s':''} (4:{d.n4 || 0} / 3:{d.n3 || 0} / 2:{d.n2 || 0} / 1:{d.n1 || 0})</div>
+                    </div>
+                    <div class="w-full h-2 bg-slate-100 rounded mt-1 overflow-hidden">
+                      <div class={`h-full ${tone}`} style={`width:${pctBar}%`}></div>
+                    </div>
+                  </div>
+                );
+              })}
+              {perf.domains.filter((d: any) => Number(d.score_count || 0) > 0).length === 0 && (
+                <p class="text-xs text-slate-500">No domain-level scores yet.</p>
+              )}
+            </div>
+
+            {/* Most recent indicator ratings */}
+            {perf.latestPerIndicator.length > 0 && (
+              <div class="mt-4">
+                <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Most Recent Indicator Ratings</div>
+                <div class="grid md:grid-cols-2 gap-2">
+                  {perf.latestPerIndicator.slice(0, 10).map((r: any) => (
+                    <div class="flex items-start gap-2 border border-slate-200 rounded-md p-2 text-sm">
+                      <span class={`inline-block w-8 h-8 rounded text-white font-bold flex items-center justify-center ${r.level === 4 ? 'bg-emerald-600' : r.level === 3 ? 'bg-sky-600' : r.level === 2 ? 'bg-amber-500' : 'bg-red-600'}`}>{r.level}</span>
+                      <div class="min-w-0">
+                        <div class="text-xs text-slate-500">{r.domain_code}.{(r.indicator_code || '').toUpperCase()} · {formatDate(r.observed_at)}</div>
+                        <div class="text-aps-navy font-medium truncate">{r.indicator_name}</div>
+                        {r.evidence_note && <div class="text-xs text-slate-600 truncate">{r.evidence_note}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <p class="text-[11px] text-slate-400 mt-3"><i class="fas fa-circle-info mr-1"></i>All numbers above are computed directly from published observation scores in the database — no AI summarization.</p>
+          </div>
+        )}
+      </Card>
 
       <div class="grid lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 space-y-4">
@@ -516,8 +608,9 @@ function ObservationEditor({ user, o, domains, msg }: any) {
         </Card>
 
         {editable && (
-          <div class="mt-4 flex items-center justify-end gap-2">
-            <button type="submit" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-save mr-1"></i>Save notes</button>
+          <div class="mt-4 flex items-center justify-between gap-2 bg-sky-50 border border-sky-200 rounded p-3">
+            <div class="text-xs text-sky-800"><i class="fas fa-floppy-disk mr-1"></i>You can save your work as a draft at any time and return to finish later. Your notes, scores, and feedback will be preserved. Nothing is shared with the teacher until you sign and publish below.</div>
+            <button type="submit" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm whitespace-nowrap"><i class="fas fa-save mr-1"></i>Save draft</button>
           </div>
         )}
       </form>
@@ -576,13 +669,17 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           </div>
         ) : (
           <form method="post" action={`/appraiser/observations/${o.id}/publish`} class="space-y-2" id="publish-form">
+            <div class="p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-xs mb-2">
+              <i class="fas fa-triangle-exclamation mr-1"></i>
+              <strong>Signature required only when you are ready to send to the teacher.</strong> If you're not finished, simply use <em>Save draft</em> above — your notes, scores, and feedback will be waiting for you next time you open this observation. Signing and publishing is final and makes the observation visible to the teacher.
+            </div>
             <p class="text-sm text-slate-600">Your signature confirms this observation is complete and ready for the teacher to view.</p>
             <canvas id="sig-pad" class="border border-slate-300 rounded w-full h-32 bg-white touch-none"></canvas>
             <input type="hidden" name="signature" id="sig-data" />
             <div class="flex items-center gap-2">
-              <button type="button" onclick="window.SigPad.clear('sig-pad','sig-data')" class="text-sm text-slate-600 hover:underline"><i class="fas fa-eraser"></i> Clear</button>
+              <button type="button" onclick="window.SigPad.clear('sig-pad','sig-data')" class="text-sm text-slate-600 hover:underline"><i class="fas fa-eraser"></i> Clear signature</button>
             </div>
-            <button type="submit" onclick="return window.SigPad.submit('sig-pad','sig-data')" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-paper-plane mr-1"></i>Sign & Publish to teacher</button>
+            <button type="submit" onclick="return window.SigPad.submit('sig-pad','sig-data')" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-paper-plane mr-1"></i>Sign &amp; Publish to teacher</button>
           </form>
         )}
       </Card>

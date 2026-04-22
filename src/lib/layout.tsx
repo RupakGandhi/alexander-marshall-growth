@@ -83,13 +83,17 @@ function navFor(user: User, active?: string) {
             <div class="text-sm font-medium">{user.first_name} {user.last_name}</div>
             <div class="text-xs text-aps-sky">{roleLabel(user.role)}</div>
           </div>
-          <div class="relative group">
-            <button class="w-9 h-9 rounded-full bg-aps-sky text-aps-navy font-bold flex items-center justify-center" aria-label="User menu">
+          <div class="relative" id="user-menu-root">
+            <button type="button" id="user-menu-btn" onclick="window.toggleUserMenu && window.toggleUserMenu(event)" class="w-9 h-9 rounded-full bg-aps-sky text-aps-navy font-bold flex items-center justify-center hover:ring-2 hover:ring-white focus:outline-none focus:ring-2 focus:ring-white" aria-label="User menu" aria-haspopup="true" aria-expanded="false">
               {user.first_name[0]}{user.last_name[0]}
             </button>
-            <div class="absolute right-0 mt-1 w-56 bg-white text-slate-800 rounded-md shadow-xl hidden group-hover:block z-50">
-              <a class="block px-4 py-2 hover:bg-slate-100" href="/profile"><i class="fas fa-user-gear mr-2"></i>Profile &amp; Password</a>
-              <form method="post" action="/logout"><button class="block w-full text-left px-4 py-2 hover:bg-slate-100"><i class="fas fa-sign-out-alt mr-2"></i>Sign out</button></form>
+            <div id="user-menu-panel" class="absolute right-0 mt-1 w-56 bg-white text-slate-800 rounded-md shadow-xl hidden z-50 border border-slate-200">
+              <div class="px-4 py-2 border-b border-slate-200">
+                <div class="text-sm font-semibold text-aps-navy">{user.first_name} {user.last_name}</div>
+                <div class="text-xs text-slate-500">{roleLabel(user.role)}</div>
+              </div>
+              <a class="block px-4 py-2 hover:bg-slate-100 text-sm" href="/profile"><i class="fas fa-user-gear mr-2"></i>Profile &amp; Password</a>
+              <form method="post" action="/logout"><button class="block w-full text-left px-4 py-2 hover:bg-slate-100 text-sm text-red-700"><i class="fas fa-sign-out-alt mr-2"></i>Sign out</button></form>
             </div>
           </div>
         </div>

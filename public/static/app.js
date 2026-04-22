@@ -103,4 +103,35 @@
       setTimeout(() => { el.remove(); }, 5500);
     });
   });
+
+  // -------------------------- User menu (click-to-toggle) --------------------------
+  window.toggleUserMenu = function (event) {
+    if (event) event.stopPropagation();
+    const panel = document.getElementById('user-menu-panel');
+    const btn = document.getElementById('user-menu-btn');
+    if (!panel || !btn) return;
+    const nowOpen = panel.classList.contains('hidden');
+    panel.classList.toggle('hidden');
+    btn.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
+  };
+  document.addEventListener('click', (e) => {
+    const panel = document.getElementById('user-menu-panel');
+    const root = document.getElementById('user-menu-root');
+    if (!panel || !root) return;
+    if (!root.contains(e.target)) {
+      panel.classList.add('hidden');
+      const btn = document.getElementById('user-menu-btn');
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const panel = document.getElementById('user-menu-panel');
+      if (panel && !panel.classList.contains('hidden')) {
+        panel.classList.add('hidden');
+        const btn = document.getElementById('user-menu-btn');
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      }
+    }
+  });
 })();

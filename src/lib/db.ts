@@ -98,6 +98,85 @@ export async function getObservation(db: D1Database, id: number) {
   return { ...o, scores: scores.results || [], feedback: feedback.results || [] };
 }
 
+/**
+ * Data-driven performance summary for a teacher.
+ * Pulls directly from observation_scores + framework tables — no AI summarization.
+ * Only scores from published or acknowledged observations count toward the averages,
+ * so drafts in progress never leak into leadership views.
+ */
+export async function getTeacherPerformanceSummary(db: D1Database, teacherId: number) {
+  // Per-domain averages and counts
+  const domains = await db.prepare(
+    `SELECT d.id AS domain_id, d.code AS domain_code, d.name AS domain_name, d.sort_order,
+            COUNT(s.id) AS score_count,
+            AVG(s.level) AS avg_level,
+            SUM(CASE WHEN s.level = 4 THEN 1 ELSE 0 END) AS n4,
+            SUM(CASE WHEN s.level = 3 THEN 1 ELSE 0 END) AS n3,
+            SUM(CASE WHEN s.level = 2 THEN 1 ELSE 0 END) AS n2,
+            SUM(CASE WHEN s.level = 1 THEN 1 ELSE 0 END) AS n1
+     FROM framework_domains d
+     LEFT JOIN framework_indicators i ON i.domain_id = d.id
+     LEFT JOIN observation_scores s ON s.indicator_id = i.id
+     LEFT JOIN observations o ON o.id = s.observation_id
+     WHERE (o.teacher_id = ? OR o.teacher_id IS NULL)
+       AND (o.status IN ('published','acknowledged') OR o.status IS NULL)
+     GROUP BY d.id, d.code, d.name, d.sort_order
+     ORDER BY d.sort_order`
+  ).bind(teacherId).all();
+
+  // Recent ratings: latest score per indicator (across published/acknowledged)
+  const recent = await db.prepare(
+    `SELECT i.id AS indicator_id, i.code AS indicator_code, i.name AS indicator_name,
+            d.code AS domain_code,
+            s.level, s.evidence_note, s.created_at, o.id AS observation_id, o.observed_at
+     FROM observation_scores s
+     JOIN framework_indicators i ON i.id = s.indicator_id
+     JOIN framework_domains d ON d.id = i.domain_id
+     JOIN observations o ON o.id = s.observation_id
+     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged')
+     ORDER BY o.observed_at DESC, d.sort_order, i.sort_order
+     LIMIT 200`
+  ).bind(teacherId).all();
+
+  // Observation counts for context
+  const counts = await db.prepare(
+    `SELECT
+       SUM(CASE WHEN status IN ('published','acknowledged') THEN 1 ELSE 0 END) AS published,
+       SUM(CASE WHEN status IN ('draft','scored','awaiting_signature') THEN 1 ELSE 0 END) AS in_progress,
+       MAX(CASE WHEN status IN ('published','acknowledged') THEN observed_at END) AS last_observed_at,
+       SUM(CASE WHEN status IN ('published','acknowledged') THEN 1 ELSE 0 END) AS total_published
+     FROM observations WHERE teacher_id = ?`
+  ).bind(teacherId).first<any>();
+
+  // Overall totals
+  const totals = await db.prepare(
+    `SELECT COUNT(s.id) AS total_scores, AVG(s.level) AS overall_avg,
+            SUM(CASE WHEN s.level=4 THEN 1 ELSE 0 END) AS n4,
+            SUM(CASE WHEN s.level=3 THEN 1 ELSE 0 END) AS n3,
+            SUM(CASE WHEN s.level=2 THEN 1 ELSE 0 END) AS n2,
+            SUM(CASE WHEN s.level=1 THEN 1 ELSE 0 END) AS n1
+     FROM observation_scores s
+     JOIN observations o ON o.id = s.observation_id
+     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged')`
+  ).bind(teacherId).first<any>();
+
+  // Keep latest rating per indicator for the "Most Recent Indicator Ratings" block
+  const seen = new Set<number>();
+  const latestPerIndicator: any[] = [];
+  for (const r of (recent.results as any[])) {
+    if (seen.has(r.indicator_id)) continue;
+    seen.add(r.indicator_id);
+    latestPerIndicator.push(r);
+  }
+
+  return {
+    domains: (domains.results as any[]) || [],
+    latestPerIndicator,
+    counts: counts || {},
+    totals: totals || {},
+  };
+}
+
 export async function getPedagogy(db: D1Database, indicatorId: number, level: number) {
   return db.prepare('SELECT * FROM pedagogy_library WHERE indicator_id = ? AND level = ?').bind(indicatorId, level).first<any>();
 }
