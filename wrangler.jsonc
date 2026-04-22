@@ -1,16 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "webapp",
+  "name": "alexander-marshall-growth",
   "compatibility_date": "2026-04-13",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": [
     "nodejs_compat"
-  ],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "webapp-production",
-      "database_id": "local-dev-placeholder"
-    }
   ]
+  // D1 binding "DB" must be attached to this Pages project via the Cloudflare dashboard
+  // (Workers & Pages → alexander-marshall-growth → Settings → Bindings → Add D1 database,
+  //  bind name "DB" to webapp-production). For local dev, wrangler auto-creates the D1 at .wrangler/state.
 }
