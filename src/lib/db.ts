@@ -181,6 +181,60 @@ export async function getPedagogy(db: D1Database, indicatorId: number, level: nu
   return db.prepare('SELECT * FROM pedagogy_library WHERE indicator_id = ? AND level = ?').bind(indicatorId, level).first<any>();
 }
 
+// ---------------------------------------------------------------------------
+// Multi-school helpers (user_schools junction table)
+// One user can be linked to many schools. users.school_id still holds the
+// "primary" school (used for display / single-row UI). The junction table is
+// the source of truth for "who belongs to school X" queries.
+// ---------------------------------------------------------------------------
+export async function getUserSchoolIds(db: D1Database, userId: number): Promise<number[]> {
+  const r = await db.prepare(
+    `SELECT school_id FROM user_schools WHERE user_id=? ORDER BY is_primary DESC, school_id`
+  ).bind(userId).all();
+  return (r.results as any[]).map(x => Number(x.school_id));
+}
+
+export async function getUserSchools(db: D1Database, userId: number) {
+  const r = await db.prepare(
+    `SELECT s.id, s.name, s.grade_span, us.is_primary
+       FROM user_schools us JOIN schools s ON s.id = us.school_id
+      WHERE us.user_id = ? ORDER BY us.is_primary DESC, s.name`
+  ).bind(userId).all();
+  return (r.results as any[]) || [];
+}
+
+/**
+ * Replace a user's school links with the provided ids.
+ * The first id in the array becomes the "primary" school and is also written
+ * back to users.school_id so every place that reads users.school_id keeps
+ * working unchanged.
+ */
+export async function setUserSchools(db: D1Database, userId: number, schoolIds: number[]) {
+  const clean = Array.from(new Set(schoolIds.filter(n => Number.isFinite(n) && n > 0)));
+  await db.prepare(`DELETE FROM user_schools WHERE user_id=?`).bind(userId).run();
+  for (let i = 0; i < clean.length; i++) {
+    await db.prepare(
+      `INSERT INTO user_schools (user_id, school_id, is_primary) VALUES (?,?,?)`
+    ).bind(userId, clean[i], i === 0 ? 1 : 0).run();
+  }
+  // Keep users.school_id in sync with the primary for legacy reads.
+  await db.prepare(
+    `UPDATE users SET school_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(clean[0] || null, userId).run();
+}
+
+/**
+ * Return school ids that should scope a user's multi-school view.
+ * Falls back to users.school_id when the junction row is missing (for very
+ * old seeded users). Empty array = district-wide (super_admin / supt).
+ */
+export async function schoolScopeForUser(db: D1Database, user: { id: number; role: string; school_id: number | null }): Promise<number[]> {
+  if (user.role === 'super_admin' || user.role === 'superintendent') return [];
+  const ids = await getUserSchoolIds(db, user.id);
+  if (ids.length) return ids;
+  return user.school_id ? [user.school_id] : [];
+}
+
 export async function logActivity(db: D1Database, userId: number | null, entity: string, entityId: number | null, action: string, detail?: any) {
   try {
     await db.prepare(

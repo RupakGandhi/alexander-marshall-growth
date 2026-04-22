@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Bindings, Variables, UserRole } from '../lib/types';
 import { Layout, Card, Button } from '../lib/layout';
 import { requireRole, hashPassword } from '../lib/auth';
-import { getDomainsWithIndicators, getActiveFramework, logActivity } from '../lib/db';
+import { getDomainsWithIndicators, getActiveFramework, logActivity, setUserSchools, getUserSchoolIds } from '../lib/db';
 import { formatDate, formatDateTime, levelLabels, levelColor } from '../lib/ui';
 import { parseCsvAsObjects, buildCsv } from '../lib/csv';
 
@@ -41,19 +41,34 @@ app.get('/users', async (c) => {
   sql += ` ORDER BY u.role, u.last_name, u.first_name`;
   const rows = await c.env.DB.prepare(sql).bind(...binds).all();
   const schools = await c.env.DB.prepare(`SELECT * FROM schools WHERE district_id=1 ORDER BY name`).all();
-  return c.html(<UsersPage user={user} rows={rows.results || []} schools={schools.results || []} q={q} roleFilter={roleFilter} msg={msg} />);
+
+  // Pull all school links in one query and group by user so the UI can show chips.
+  const links = await c.env.DB.prepare(
+    `SELECT us.user_id, us.school_id, us.is_primary, s.name
+       FROM user_schools us JOIN schools s ON s.id = us.school_id
+      ORDER BY us.is_primary DESC, s.name`
+  ).all();
+  const linksByUser = new Map<number, any[]>();
+  for (const l of (links.results as any[])) {
+    if (!linksByUser.has(l.user_id)) linksByUser.set(l.user_id, []);
+    linksByUser.get(l.user_id)!.push(l);
+  }
+  const rowsWithSchools = (rows.results as any[]).map((u: any) => ({
+    ...u, schools: linksByUser.get(u.id) || [],
+  }));
+  return c.html(<UsersPage user={user} rows={rowsWithSchools} schools={schools.results || []} q={q} roleFilter={roleFilter} msg={msg} />);
 });
 
 app.post('/users/create', async (c) => {
   const user = c.get('user')!;
-  const body = await c.req.parseBody();
+  const body = await c.req.parseBody({ all: true });
   const email = String(body.email || '').trim().toLowerCase();
   const first = String(body.first_name || '').trim();
   const last = String(body.last_name || '').trim();
   const role = String(body.role || '') as UserRole;
   const title = String(body.title || '').trim() || null;
   const phone = String(body.phone || '').trim() || null;
-  const school_id = body.school_id ? Number(body.school_id) : null;
+  const schoolIds = parseMultiIds(body.school_ids);
   const pw = String(body.password || 'Alexander2026!');
   if (!email || !first || !last || !role) return c.redirect('/admin/users?msg=Missing+fields');
   const hash = await hashPassword(pw);
@@ -61,8 +76,10 @@ app.post('/users/create', async (c) => {
     const res = await c.env.DB.prepare(
       `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password)
        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
-    ).bind(school_id, email, hash, first, last, role, title, phone).run();
-    await logActivity(c.env.DB, user.id, 'user', Number((res.meta as any)?.last_row_id), 'create_user', { email, role });
+    ).bind(schoolIds[0] || null, email, hash, first, last, role, title, phone).run();
+    const newId = Number((res.meta as any)?.last_row_id);
+    if (schoolIds.length) await setUserSchools(c.env.DB, newId, schoolIds);
+    await logActivity(c.env.DB, user.id, 'user', newId, 'create_user', { email, role, schoolIds });
     return c.redirect(`/admin/users?msg=Created+${encodeURIComponent(first+' '+last)}`);
   } catch (e: any) {
     return c.redirect('/admin/users?msg=' + encodeURIComponent('Could not create user: ' + (e.message || e)));
@@ -72,21 +89,34 @@ app.post('/users/create', async (c) => {
 app.post('/users/:id/update', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
-  const body = await c.req.parseBody();
+  const body = await c.req.parseBody({ all: true });
   const first = String(body.first_name || '').trim();
   const last = String(body.last_name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const role = String(body.role || '');
   const title = String(body.title || '').trim() || null;
   const phone = String(body.phone || '').trim() || null;
-  const school_id = body.school_id ? Number(body.school_id) : null;
+  const schoolIds = parseMultiIds(body.school_ids);
   const active = body.active ? 1 : 0;
   await c.env.DB.prepare(
-    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, school_id=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(first, last, email, role, title, phone, school_id, active, id).run();
-  await logActivity(c.env.DB, user.id, 'user', id, 'update_user');
+    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(first, last, email, role, title, phone, active, id).run();
+  await setUserSchools(c.env.DB, id, schoolIds);
+  await logActivity(c.env.DB, user.id, 'user', id, 'update_user', { schoolIds });
   return c.redirect('/admin/users?msg=Updated');
 });
+
+// Small helper — accept a single value or a repeated-name form (FormData { all: true }).
+function parseMultiIds(raw: any): number[] {
+  if (raw === undefined || raw === null) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const out: number[] = [];
+  for (const v of arr) {
+    const n = Number(String(v).trim());
+    if (Number.isFinite(n) && n > 0) out.push(n);
+  }
+  return Array.from(new Set(out));
+}
 
 app.post('/users/:id/reset-password', async (c) => {
   const user = c.get('user')!;
@@ -139,17 +169,48 @@ app.get('/assignments', async (c) => {
 
 app.post('/assignments/create', async (c) => {
   const user = c.get('user')!;
-  const body = await c.req.parseBody();
-  const teacher_id = Number(body.teacher_id);
-  const staff_id = Number(body.staff_id);
+  const body = await c.req.parseBody({ all: true });
+  const teacherIds = parseMultiIds(body.teacher_ids);
+  const staffIds = parseMultiIds(body.staff_ids);
   const relationship = String(body.relationship);
+  if (!teacherIds.length || !staffIds.length || !['appraiser','coach'].includes(relationship)) {
+    return c.redirect('/admin/assignments?msg=' + encodeURIComponent('Pick at least one teacher and at least one staff member.'));
+  }
   const sy = await c.env.DB.prepare(`SELECT id FROM school_years WHERE is_current=1`).first<any>();
-  await c.env.DB.prepare(
-    `INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
-     VALUES (?,?,?,?,1)`
-  ).bind(teacher_id, staff_id, relationship, sy?.id || null).run();
-  await logActivity(c.env.DB, user.id, 'assignment', null, 'create_assignment', { teacher_id, staff_id, relationship });
-  return c.redirect('/admin/assignments?msg=Assignment+added');
+  let created = 0, skipped = 0;
+  for (const t of teacherIds) {
+    for (const s of staffIds) {
+      // Reactivate an existing row if present, otherwise insert a new one.
+      const existing = await c.env.DB.prepare(
+        `SELECT id, active FROM assignments WHERE teacher_id=? AND staff_id=? AND relationship=?`
+      ).bind(t, s, relationship).first<any>();
+      if (existing) {
+        if (!existing.active) {
+          await c.env.DB.prepare(`UPDATE assignments SET active=1 WHERE id=?`).bind(existing.id).run();
+          created++;
+        } else skipped++;
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active) VALUES (?,?,?,?,1)`
+        ).bind(t, s, relationship, sy?.id || null).run();
+        created++;
+      }
+    }
+  }
+  await logActivity(c.env.DB, user.id, 'assignment', null, 'create_assignments_bulk', { teacherIds, staffIds, relationship, created, skipped });
+  return c.redirect('/admin/assignments?msg=' + encodeURIComponent(`${created} assignment(s) added${skipped ? `, ${skipped} already existed` : ''}.`));
+});
+
+app.post('/assignments/bulk-delete', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody({ all: true });
+  const ids = parseMultiIds(body.ids);
+  if (!ids.length) return c.redirect('/admin/assignments?msg=Nothing+selected');
+  for (const id of ids) {
+    await c.env.DB.prepare(`UPDATE assignments SET active=0 WHERE id=?`).bind(id).run();
+  }
+  await logActivity(c.env.DB, user.id, 'assignment', null, 'remove_assignments_bulk', { ids });
+  return c.redirect('/admin/assignments?msg=' + encodeURIComponent(`Removed ${ids.length} assignment(s).`));
 });
 
 app.post('/assignments/:id/delete', async (c) => {
@@ -309,15 +370,17 @@ app.post('/district/update', async (c) => {
 // BULK IMPORT — Users (teachers, principals, coaches, etc.)
 // ============================================================================
 const USER_CSV_HEADERS = [
-  'first_name','last_name','email','role','title','phone','school_name','password','active'
+  'first_name','last_name','email','role','title','phone','school_names','password','active'
 ];
 
 const USER_CSV_TEMPLATE_ROWS: string[][] = [
   // Sample rows so the admin can see exactly the expected format.
+  // school_names accepts ONE school OR a pipe-separated list of schools.
+  // The FIRST school becomes the "primary".
   ['Jane','Doe','jane.doe@k12.nd.us','teacher','2nd Grade','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
-  ['John','Smith','john.smith@k12.nd.us','teacher','Physical Education','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
-  ['Alex','Principal','alex.principal@k12.nd.us','appraiser','Elementary Principal','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
-  ['Casey','Coach','casey.coach@k12.nd.us','coach','Instructional Coach','701-828-3334','Alexander Junior/Senior High','Alexander2026!','yes'],
+  ['John','Smith','john.smith@k12.nd.us','teacher','Physical Education','701-828-3334','Alexander Elementary | Alexander Junior/Senior High','Alexander2026!','yes'],
+  ['Alex','Principal','alex.principal@k12.nd.us','appraiser','Principal (K-12)','701-828-3334','Alexander Elementary | Alexander Junior/Senior High','Alexander2026!','yes'],
+  ['Casey','Coach','casey.coach@k12.nd.us','coach','Instructional Coach','701-828-3334','Alexander Elementary | Alexander Junior/Senior High','Alexander2026!','yes'],
 ];
 
 app.get('/import/users/template', async (c) => {
@@ -348,8 +411,9 @@ app.post('/import/users', async (c) => {
   }
   const text = await (file as any).text();
   const { headers, rows } = parseCsvAsObjects(text);
-  // Validate headers
-  const missing = USER_CSV_HEADERS.filter(h => !headers.includes(h));
+  // Validate headers — accept legacy 'school_name' in place of 'school_names' for backwards compatibility.
+  const required = USER_CSV_HEADERS.map(h => h === 'school_names' && headers.includes('school_name') ? 'school_name' : h);
+  const missing = required.filter(h => !headers.includes(h));
   if (missing.length) {
     return c.redirect('/admin/import/users?msg=' + encodeURIComponent(
       'Missing required columns: ' + missing.join(', ') + '. Download the template and use its header row.'));
@@ -379,7 +443,9 @@ app.post('/import/users', async (c) => {
     const role = (r.role || '').trim().toLowerCase();
     const title = (r.title || '').trim() || null;
     const phone = (r.phone || '').trim() || null;
-    const schoolName = (r.school_name || '').trim();
+    // Accept either singular (school_name) or plural (school_names) header, pipe-separated for multi.
+    const schoolRaw = (r.school_names || r.school_name || '').trim();
+    const schoolNames = schoolRaw.split('|').map((s: string) => s.trim()).filter(Boolean);
     const password = (r.password || '').trim() || 'Alexander2026!';
     const activeRaw = (r.active || 'yes').trim().toLowerCase();
     const active = ['yes','y','true','1','active'].includes(activeRaw) ? 1 : 0;
@@ -392,13 +458,15 @@ app.post('/import/users', async (c) => {
       report.errors.push(`Line ${line}: invalid role "${role}". Use one of ${validRoles.join(', ')}.`);
       report.skipped++; continue;
     }
-    let school_id: number | null = null;
-    if (schoolName) {
-      const hit = schoolMap.get(schoolName.toLowerCase());
+    // Resolve every school name to an id; warn for any that don't match.
+    const resolvedSchoolIds: number[] = [];
+    for (const nm of schoolNames) {
+      const hit = schoolMap.get(nm.toLowerCase());
       if (!hit) {
-        report.warnings.push(`Line ${line}: school "${schoolName}" not found — user will be created without a school assignment.`);
-      } else school_id = hit;
+        report.warnings.push(`Line ${line}: school "${nm}" not found — that link will be skipped.`);
+      } else resolvedSchoolIds.push(hit);
     }
+    const primarySchoolId: number | null = resolvedSchoolIds[0] || null;
 
     if (dryRun) {
       if (existingMap.has(email)) report.updated++; else report.created++;
@@ -410,15 +478,18 @@ app.post('/import/users', async (c) => {
       if (existingId) {
         await c.env.DB.prepare(
           `UPDATE users SET first_name=?, last_name=?, role=?, title=?, phone=?, school_id=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-        ).bind(first, last, role, title, phone, school_id, active, existingId).run();
+        ).bind(first, last, role, title, phone, primarySchoolId, active, existingId).run();
+        if (resolvedSchoolIds.length) await setUserSchools(c.env.DB, existingId, resolvedSchoolIds);
         report.updated++;
       } else {
         const hash = await hashPassword(password);
         const res = await c.env.DB.prepare(
           `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password)
            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-        ).bind(school_id, email, hash, first, last, role, title, phone, active).run();
-        existingMap.set(email, Number((res.meta as any)?.last_row_id));
+        ).bind(primarySchoolId, email, hash, first, last, role, title, phone, active).run();
+        const newId = Number((res.meta as any)?.last_row_id);
+        existingMap.set(email, newId);
+        if (resolvedSchoolIds.length) await setUserSchools(c.env.DB, newId, resolvedSchoolIds);
         report.created++;
       }
     } catch (e: any) {
@@ -810,8 +881,12 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           </select></label>
           <label>Title<input name="title" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
           <label>Phone<input name="phone" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
-          <label>School<select name="school_id" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"><option value="">— None —</option>{schools.map((s: any) => <option value={s.id}>{s.name}</option>)}</select></label>
           <label>Initial password<input name="password" placeholder="Default: Alexander2026!" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
+          <label class="md:col-span-2">Schools <span class="text-xs text-slate-500">(hold Ctrl/⌘ to pick more than one — first pick becomes the primary)</span>
+            <select name="school_ids" multiple size={Math.min(6, Math.max(3, schools.length))} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
+              {schools.map((s: any) => <option value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
           <div class="md:col-span-4"><button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Create user</button></div>
         </form>
       </Card>
@@ -853,7 +928,11 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                       </select></label>
                       <label>Title<input name="title" value={u.title || ''} class="mt-1 w-full border rounded px-1 py-1" /></label>
                       <label>Phone<input name="phone" value={u.phone || ''} class="mt-1 w-full border rounded px-1 py-1" /></label>
-                      <label>School<select name="school_id" class="mt-1 w-full border rounded px-1 py-1"><option value="">— None —</option>{schools.map((s: any) => <option value={s.id} selected={u.school_id===s.id}>{s.name}</option>)}</select></label>
+                      <label class="md:col-span-2">Schools <span class="text-[10px] text-slate-500">(hold Ctrl/⌘ for multi — first = primary)</span>
+                        <select name="school_ids" multiple size={Math.min(5, Math.max(3, schools.length))} class="mt-1 w-full border rounded px-1 py-1">
+                          {schools.map((s: any) => <option value={s.id} selected={(u.schools || []).some((x: any) => x.school_id === s.id)}>{s.name}</option>)}
+                        </select>
+                      </label>
                       <label class="flex items-center gap-2 mt-5"><input type="checkbox" name="active" checked={!!u.active} /> Active</label>
                       <div class="md:col-span-4 flex flex-wrap gap-2"><button class="bg-aps-navy text-white px-3 py-1 rounded text-xs"><i class="fas fa-save mr-1"></i>Save</button></div>
                     </form>
@@ -870,7 +949,15 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                 </td>
                 <td class="text-slate-600">{u.email}</td>
                 <td><span class="text-xs bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">{u.role}</span></td>
-                <td class="text-slate-600">{u.school_name || '—'}</td>
+                <td class="text-slate-600">
+                  {(u.schools && u.schools.length) ? (
+                    <div class="flex flex-wrap gap-1">
+                      {u.schools.map((s: any) => (
+                        <span class={`text-[11px] px-2 py-0.5 rounded-full border ${s.is_primary ? 'bg-aps-navy text-white border-aps-navy' : 'bg-slate-100 border-slate-200 text-slate-700'}`} title={s.is_primary ? 'Primary school' : 'Additional school'}>{s.name}{s.is_primary && <i class="fas fa-star ml-1 text-[9px]"></i>}</span>
+                      ))}
+                    </div>
+                  ) : <span class="text-slate-400">—</span>}
+                </td>
                 <td class="text-slate-500 text-xs">{formatDateTime(u.last_login_at)}</td>
                 <td></td>
               </tr>
@@ -883,49 +970,110 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
 }
 
 function AssignmentsPage({ user, teachers, appraisers, coaches, assignments, msg }: any) {
+  // Group active assignments by staff member so it's easy to see "who evaluates whom".
+  const byStaff = new Map<number, any>();
+  for (const a of assignments) {
+    if (!byStaff.has(a.staff_id)) byStaff.set(a.staff_id, {
+      staff_id: a.staff_id, s_first: a.s_first, s_last: a.s_last, s_role: a.s_role,
+      appraiser: [] as any[], coach: [] as any[],
+    });
+    const g = byStaff.get(a.staff_id)!;
+    (a.relationship === 'coach' ? g.coach : g.appraiser).push(a);
+  }
+  const staffGroups = Array.from(byStaff.values()).sort((a, b) => `${a.s_last} ${a.s_first}`.localeCompare(`${b.s_last} ${b.s_first}`));
+
   return (
     <Layout title="Assignments" user={user} activeNav="admin-assign">
-      <h1 class="font-display text-2xl text-aps-navy mb-4">Assignments</h1>
-      <p class="text-slate-600 text-sm mb-4">Link each teacher to one or more appraisers (principal/admin) and instructional coaches.</p>
+      <h1 class="font-display text-2xl text-aps-navy mb-1">Assignments</h1>
+      <p class="text-slate-600 text-sm mb-4">Link one or many teachers to one or many appraisers (principal/admin) or instructional coaches in a single click. Each staff member can evaluate or coach as many teachers as you select.</p>
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
 
-      <Card title="Add assignment" icon="fas fa-link">
-        <form method="post" action="/admin/assignments/create" class="grid md:grid-cols-4 gap-2 text-sm items-end">
-          <label>Teacher<select name="teacher_id" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
-            <option value="">Select…</option>
-            {teachers.map((t: any) => <option value={t.id}>{t.last_name}, {t.first_name} ({t.school_name || '—'})</option>)}
-          </select></label>
-          <label>Relationship<select name="relationship" id="rel-select" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
-            <option value="appraiser">Appraiser</option>
-            <option value="coach">Coach</option>
-          </select></label>
-          <label>Staff member<select name="staff_id" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
-            <optgroup label="Appraisers">
-              {appraisers.map((s: any) => <option value={s.id}>{s.last_name}, {s.first_name} ({s.role})</option>)}
-            </optgroup>
-            <optgroup label="Coaches">
-              {coaches.map((s: any) => <option value={s.id}>{s.last_name}, {s.first_name}</option>)}
-            </optgroup>
-          </select></label>
-          <button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Add</button>
+      <Card title="Add assignments (multi-select)" icon="fas fa-link">
+        <form method="post" action="/admin/assignments/create" class="grid md:grid-cols-3 gap-4 text-sm items-start">
+          <div>
+            <label class="block font-medium text-slate-700 mb-1">Teachers <span class="text-xs text-slate-500">(Ctrl/⌘-click for many)</span></label>
+            <select name="teacher_ids" multiple required size={Math.min(12, Math.max(6, teachers.length))} class="w-full border border-slate-300 rounded px-2 py-1.5">
+              {teachers.map((t: any) => <option value={t.id}>{t.last_name}, {t.first_name} — {t.school_name || '—'}</option>)}
+            </select>
+            <div class="mt-1 text-xs">
+              <button type="button" onclick="Array.from(this.closest('div').previousElementSibling.options).forEach(o=>o.selected=true)" class="text-aps-blue hover:underline">Select all</button>
+              <span class="text-slate-400 mx-1">·</span>
+              <button type="button" onclick="Array.from(this.closest('div').previousElementSibling.options).forEach(o=>o.selected=false)" class="text-aps-blue hover:underline">Clear</button>
+            </div>
+          </div>
+          <div>
+            <label class="block font-medium text-slate-700 mb-1">Relationship</label>
+            <select name="relationship" required class="w-full border border-slate-300 rounded px-2 py-1.5">
+              <option value="appraiser">Appraiser (principal / admin)</option>
+              <option value="coach">Coach</option>
+            </select>
+            <p class="mt-2 text-xs text-slate-600 italic">Tip: to give a teacher both an appraiser and a coach, run this form twice — once with each relationship.</p>
+          </div>
+          <div>
+            <label class="block font-medium text-slate-700 mb-1">Staff members <span class="text-xs text-slate-500">(Ctrl/⌘-click for many)</span></label>
+            <select name="staff_ids" multiple required size={Math.min(12, Math.max(6, appraisers.length + coaches.length))} class="w-full border border-slate-300 rounded px-2 py-1.5">
+              <optgroup label="Appraisers & Superintendents">
+                {appraisers.map((s: any) => <option value={s.id} data-role={s.role}>{s.last_name}, {s.first_name} ({s.role})</option>)}
+              </optgroup>
+              <optgroup label="Coaches">
+                {coaches.map((s: any) => <option value={s.id} data-role="coach">{s.last_name}, {s.first_name}</option>)}
+              </optgroup>
+            </select>
+            <div class="mt-1 text-xs">
+              <button type="button" onclick="Array.from(this.closest('div').previousElementSibling.options).forEach(o=>o.selected=true)" class="text-aps-blue hover:underline">Select all</button>
+              <span class="text-slate-400 mx-1">·</span>
+              <button type="button" onclick="Array.from(this.closest('div').previousElementSibling.options).forEach(o=>o.selected=false)" class="text-aps-blue hover:underline">Clear</button>
+            </div>
+          </div>
+          <div class="md:col-span-3 flex items-center gap-3">
+            <button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Link selected teachers to selected staff</button>
+            <span class="text-xs text-slate-500">Creates every teacher × staff combination selected above (skipping duplicates).</span>
+          </div>
         </form>
       </Card>
 
-      <Card title={`Current assignments (${assignments.length})`} icon="fas fa-list" class="mt-4">
-        {assignments.length === 0 ? <p class="text-slate-500 text-sm">No assignments yet.</p> :
-          <table class="w-full text-sm">
-            <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>Relationship</th><th>Staff member</th><th></th></tr></thead>
-            <tbody>
-              {assignments.map((a: any) => (
-                <tr class="border-b border-slate-100">
-                  <td class="py-2 font-medium">{a.t_first} {a.t_last}</td>
-                  <td><span class="text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 capitalize">{a.relationship}</span></td>
-                  <td>{a.s_first} {a.s_last} <span class="text-xs text-slate-500">({a.s_role})</span></td>
-                  <td><form method="post" action={`/admin/assignments/${a.id}/delete`} onsubmit="return confirm('Remove this assignment?')"><button class="text-red-700 hover:underline text-xs"><i class="fas fa-trash mr-1"></i>Remove</button></form></td>
-                </tr>
+      <Card title={`Current assignments (${assignments.length}) — grouped by staff`} icon="fas fa-list" class="mt-4">
+        {staffGroups.length === 0 ? <p class="text-slate-500 text-sm">No assignments yet.</p> :
+          <form method="post" action="/admin/assignments/bulk-delete" onsubmit="return confirm('Remove all checked assignments?')">
+            <div class="space-y-4">
+              {staffGroups.map((g: any) => (
+                <div class="border border-slate-200 rounded">
+                  <div class="bg-slate-50 px-3 py-2 flex flex-wrap items-center gap-2 border-b border-slate-200">
+                    <div class="font-medium text-aps-navy">{g.s_first} {g.s_last}</div>
+                    <span class="text-xs text-slate-500">({g.s_role})</span>
+                    <span class="ml-auto text-xs text-slate-500">{g.appraiser.length + g.coach.length} teacher(s) linked</span>
+                  </div>
+                  <div class="grid md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-slate-200">
+                    {['appraiser','coach'].map((rel: string) => {
+                      const list = rel === 'appraiser' ? g.appraiser : g.coach;
+                      return (
+                        <div class="p-3">
+                          <div class="text-xs uppercase tracking-wide text-slate-500 mb-2 font-medium">{rel === 'appraiser' ? 'As appraiser of…' : 'As coach of…'}</div>
+                          {list.length === 0 ? <p class="text-sm text-slate-400 italic">None</p> :
+                            <ul class="space-y-1">
+                              {list.map((a: any) => (
+                                <li class="flex items-center gap-2 text-sm">
+                                  <input type="checkbox" name="ids" value={a.id} class="accent-aps-navy" />
+                                  <span class="flex-1">{a.t_first} {a.t_last}</span>
+                                  <form method="post" action={`/admin/assignments/${a.id}/delete`} onsubmit="event.stopPropagation(); return confirm('Remove this one assignment?');" class="inline">
+                                    <button class="text-red-700 hover:underline text-xs"><i class="fas fa-trash"></i></button>
+                                  </form>
+                                </li>
+                              ))}
+                            </ul>
+                          }
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
+            </div>
+            <div class="mt-4 flex items-center gap-3">
+              <button class="bg-red-700 text-white px-4 py-2 rounded hover:bg-red-800 text-sm"><i class="fas fa-trash mr-1"></i>Remove checked assignments</button>
+              <span class="text-xs text-slate-500">Tick any number of teachers above, then click to remove them in one step.</span>
+            </div>
+          </form>
         }
       </Card>
     </Layout>
@@ -1156,7 +1304,7 @@ function ImportUsersPage({ user, msg, result, schools }: any) {
             <li><code>role</code> — required. One of: <code>teacher</code>, <code>appraiser</code>, <code>coach</code>, <code>superintendent</code>, <code>super_admin</code>.</li>
             <li><code>title</code> — e.g. "2nd Grade", "Elementary Principal". Optional.</li>
             <li><code>phone</code> — optional.</li>
-            <li><code>school_name</code> — must exactly match an existing school name (case-insensitive). If blank or no match, user is created without a school assignment. Existing schools: {schools.length === 0 ? <em>(none defined yet)</em> : schools.map((s: any, i: number) => <span><code>{s.name}</code>{i < schools.length - 1 ? ', ' : ''}</span>)}.</li>
+            <li><code>school_names</code> — ONE school name, OR a <strong>pipe-separated list</strong> for users who work at several buildings (e.g. <code>Alexander Elementary | Alexander Junior/Senior High</code>). Names must exactly match existing schools (case-insensitive). The first name in the list becomes the "primary" school. If blank or no match, user is created without a school assignment. Existing schools: {schools.length === 0 ? <em>(none defined yet)</em> : schools.map((s: any, i: number) => <span><code>{s.name}</code>{i < schools.length - 1 ? ', ' : ''}</span>)}. Legacy column name <code>school_name</code> is still accepted.</li>
             <li><code>password</code> — optional initial password. If blank, defaults to <code>Alexander2026!</code>. User is always forced to change on first login.</li>
             <li><code>active</code> — <code>yes</code>/<code>no</code> (default <code>yes</code>).</li>
           </ul>

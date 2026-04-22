@@ -12,11 +12,24 @@ app.use('*', requireRole(['superintendent', 'super_admin']));
 app.get('/', async (c) => {
   const user = c.get('user')!;
   const kpis = await computeDistrictKpis(c.env.DB);
+  // Count every teacher linked to the school via either users.school_id (primary)
+  // OR the user_schools junction — multi-school teachers appear under each
+  // school they are assigned to.
   const bySchool = await c.env.DB.prepare(
     `SELECT s.id, s.name, s.grade_span,
-       (SELECT COUNT(*) FROM users u WHERE u.school_id = s.id AND u.role='teacher' AND u.active=1) AS teachers,
-       (SELECT COUNT(*) FROM observations o JOIN users u ON u.id = o.teacher_id WHERE u.school_id = s.id) AS total_obs,
-       (SELECT COUNT(*) FROM observations o JOIN users u ON u.id = o.teacher_id WHERE u.school_id = s.id AND (o.status='published' OR o.status='acknowledged')) AS published_obs
+       (SELECT COUNT(DISTINCT u.id) FROM users u
+          LEFT JOIN user_schools us ON us.user_id = u.id
+         WHERE u.role='teacher' AND u.active=1
+           AND (u.school_id = s.id OR us.school_id = s.id)) AS teachers,
+       (SELECT COUNT(DISTINCT o.id) FROM observations o
+          JOIN users u ON u.id = o.teacher_id
+          LEFT JOIN user_schools us ON us.user_id = u.id
+         WHERE (u.school_id = s.id OR us.school_id = s.id)) AS total_obs,
+       (SELECT COUNT(DISTINCT o.id) FROM observations o
+          JOIN users u ON u.id = o.teacher_id
+          LEFT JOIN user_schools us ON us.user_id = u.id
+         WHERE (u.school_id = s.id OR us.school_id = s.id)
+           AND (o.status='published' OR o.status='acknowledged')) AS published_obs
      FROM schools s WHERE s.district_id=1 ORDER BY s.name`
   ).all();
   return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} />);
@@ -28,12 +41,17 @@ app.get('/schools', async (c) => {
   const schools = await c.env.DB.prepare(`SELECT * FROM schools WHERE district_id=1 ORDER BY name`).all();
   const data: any[] = [];
   for (const s of (schools.results as any[])) {
+    // Include teachers whose primary school OR any user_schools link matches.
     const teachers = await c.env.DB.prepare(
-      `SELECT u.id, u.first_name, u.last_name, u.title,
+      `SELECT DISTINCT u.id, u.first_name, u.last_name, u.title,
          (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND (o.status='published' OR o.status='acknowledged')) AS pub,
          (SELECT MAX(observed_at) FROM observations o WHERE o.teacher_id = u.id) AS last_obs
-       FROM users u WHERE u.role='teacher' AND u.school_id=? AND u.active=1 ORDER BY u.last_name, u.first_name`
-    ).bind(s.id).all();
+       FROM users u
+       LEFT JOIN user_schools us ON us.user_id = u.id
+       WHERE u.role='teacher' AND u.active=1
+         AND (u.school_id=? OR us.school_id=?)
+       ORDER BY u.last_name, u.first_name`
+    ).bind(s.id, s.id).all();
     data.push({ school: s, teachers: teachers.results || [] });
   }
   return c.html(<SuperintendentSchools user={user} data={data} />);
