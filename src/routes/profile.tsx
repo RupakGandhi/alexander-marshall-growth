@@ -99,6 +99,25 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
           </form>
         </Card>
       </div>
+
+      <Card title="Guided Tour" icon="fas fa-compass" class="mt-6">
+        <p class="text-sm text-slate-700 mb-3">
+          Want a walkthrough of every feature available to your account? The guided tour highlights each part of the site, step by step, customized for your role.
+        </p>
+        <p class="text-xs text-slate-500 mb-3">
+          You can also relaunch the tour any time from the <strong>Guided Tour</strong> button in the top navigation, or from the menu under your initials in the upper-right.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="aps-tour-nav-btn" onclick="window.APSGuidedTour && window.APSGuidedTour.start()">
+            <i class="fas fa-play"></i>Start the tour
+          </button>
+          <button type="button"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-white text-aps-navy border border-aps-navy hover:bg-slate-50"
+            onclick="try{localStorage.removeItem('aps_tour_autolaunch_done');localStorage.removeItem('aps_tour_autolaunch_user');alert('The guided tour will auto-launch again the next time you sign in.');}catch(e){}">
+            <i class="fas fa-rotate-right"></i>Re-enable auto-launch on next login
+          </button>
+        </div>
+      </Card>
     </Layout>
   );
 }

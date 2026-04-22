@@ -11,6 +11,7 @@ app.use('*', requireRole(['superintendent', 'super_admin']));
 // District overview — KPIs and school-by-school rollup
 app.get('/', async (c) => {
   const user = c.get('user')!;
+  const welcome = c.req.query('welcome') === '1';
   const kpis = await computeDistrictKpis(c.env.DB);
   // Count every teacher linked to the school via either users.school_id (primary)
   // OR the user_schools junction — multi-school teachers appear under each
@@ -32,7 +33,7 @@ app.get('/', async (c) => {
            AND (o.status='published' OR o.status='acknowledged')) AS published_obs
      FROM schools s WHERE s.district_id=1 ORDER BY s.name`
   ).all();
-  return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} />);
+  return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} welcome={welcome} />);
 });
 
 // By school drill-down
@@ -130,13 +131,13 @@ export default app;
 
 // ============================== VIEWS ==============================
 
-function SuperintendentHome({ user, kpis, schools }: any) {
+function SuperintendentHome({ user, kpis, schools, welcome }: any) {
   return (
-    <Layout title="District Overview" user={user} activeNav="supt-home">
+    <Layout title="District Overview" user={user} activeNav="supt-home" autoLaunchTour={!!welcome}>
       <h1 class="font-display text-2xl text-aps-navy mb-1">District Overview</h1>
       <p class="text-slate-600 text-sm mb-6">Alexander Public School District · {kpis.teachers} teachers · {schools.length} schools</p>
 
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" data-tour="supt-kpis">
         <Kpi label="Teachers" value={kpis.teachers} icon="fas fa-chalkboard-user" />
         <Kpi label="Appraisers" value={kpis.appraisers} icon="fas fa-user-tie" />
         <Kpi label="Coaches" value={kpis.coaches} icon="fas fa-compass" />
@@ -166,7 +167,7 @@ function SuperintendentHome({ user, kpis, schools }: any) {
         }
       </Card>
 
-      <Card title="By School" icon="fas fa-school" class="mt-4">
+      <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">
         <table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">School</th><th>Grades</th><th>Teachers</th><th>Observations</th><th>Published</th><th></th></tr></thead>
           <tbody>
@@ -203,7 +204,7 @@ function SuperintendentSchools({ user, data }: any) {
   return (
     <Layout title="By School" user={user} activeNav="supt-schools">
       <h1 class="font-display text-2xl text-aps-navy mb-4">By School</h1>
-      <div class="space-y-4">
+      <div class="space-y-4" data-tour="supt-schools-list">
         {data.map((d: any) => (
           <Card title={`${d.school.name} · ${d.school.grade_span || ''}`} icon="fas fa-school">
             <table class="w-full text-sm">
@@ -231,7 +232,7 @@ function SuperintendentTeachers({ user, rows }: any) {
   return (
     <Layout title="By Teacher" user={user} activeNav="supt-teacher">
       <h1 class="font-display text-2xl text-aps-navy mb-4">All Teachers</h1>
-      <Card>
+      <Card data-tour="supt-teachers-list">
         <table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>School</th><th>Title</th><th>Obs</th><th>Published</th><th>Last observed</th><th></th></tr></thead>
           <tbody>

@@ -11,6 +11,7 @@ app.use('*', requireRole(['coach', 'super_admin']));
 // Coach home: assigned teachers
 app.get('/', async (c) => {
   const user = c.get('user')!;
+  const welcome = c.req.query('welcome') === '1';
   const teachers = await getAssignedTeachers(c.env.DB, user.id, 'coach');
   // For each teacher, show count of active focus areas
   const data: any[] = [];
@@ -20,7 +21,7 @@ app.get('/', async (c) => {
     ).bind(t.id).first<any>();
     data.push({ ...t, focusCount: focus?.n || 0 });
   }
-  return c.html(<CoachHome user={user} teachers={data} />);
+  return c.html(<CoachHome user={user} teachers={data} welcome={welcome} />);
 });
 
 // Coach teacher view — only focus areas & constructive feedback (no scores)
@@ -75,15 +76,15 @@ export default app;
 
 // ============================== VIEWS ==============================
 
-function CoachHome({ user, teachers }: any) {
+function CoachHome({ user, teachers, welcome }: any) {
   return (
-    <Layout title="My Teachers" user={user} activeNav="co-home">
+    <Layout title="My Teachers" user={user} activeNav="co-home" autoLaunchTour={!!welcome}>
       <h1 class="font-display text-2xl text-aps-navy mb-1">My Teachers</h1>
       <p class="text-slate-600 text-sm mb-6">Instructional coach view — focus areas and teacher-facing feedback only. You do not see scores or appraiser private notes.</p>
       {teachers.length === 0 ? (
         <Card><p class="text-slate-500 text-sm">No teachers are currently assigned to you as coach.</p></Card>
       ) : (
-        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-tour="co-teachers">
           {teachers.map((t: any) => (
             <Card>
               <div class="flex items-start justify-between">

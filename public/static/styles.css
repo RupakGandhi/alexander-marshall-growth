@@ -11,3 +11,113 @@ table thead th { font-weight: 600; font-size: 0.75rem; text-transform: uppercase
   header, nav, footer, form button { display: none !important; }
   .bg-aps-wheat { background: white !important; }
 }
+
+/* ============================================================
+   Guided Tour overlay, highlight, tooltip
+   ============================================================ */
+body.aps-tour-open { overflow: hidden; }
+.aps-tour-overlay {
+  position: fixed; inset: 0; background: rgba(11, 37, 69, 0.55);
+  z-index: 9998; backdrop-filter: blur(1.5px);
+  animation: apsFadeIn .25s ease-out;
+}
+.aps-tour-highlight {
+  position: absolute; z-index: 9999; pointer-events: none;
+  border: 3px solid #facc15;
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(11, 37, 69, 0.55), 0 0 24px rgba(250, 204, 21, 0.6);
+  transition: top .18s ease, left .18s ease, width .18s ease, height .18s ease;
+}
+.aps-tour-tooltip {
+  position: absolute; z-index: 10000;
+  width: min(380px, calc(100vw - 24px));
+  background: white; color: #0f172a; border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(2, 6, 23, 0.35), 0 4px 12px rgba(2, 6, 23, 0.15);
+  padding: 16px 18px 14px;
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Arial, sans-serif;
+  animation: apsPopIn .2s ease-out;
+}
+.aps-tour-tooltip[data-placement="center"] {
+  width: min(480px, calc(100vw - 24px));
+}
+.aps-tour-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #64748b;
+  margin-bottom: 4px;
+}
+.aps-tour-step-count { font-weight: 700; color: #0b2545; }
+.aps-tour-roletag {
+  background: #eef2ff; color: #0b2545;
+  padding: 2px 8px; border-radius: 999px; font-weight: 600;
+}
+.aps-tour-close {
+  margin-left: auto; background: transparent; border: none; font-size: 22px; line-height: 1;
+  color: #64748b; cursor: pointer; padding: 0 4px;
+}
+.aps-tour-close:hover { color: #0b2545; }
+.aps-tour-title {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 20px; color: #0b2545; margin: 2px 0 6px;
+}
+.aps-tour-body {
+  font-size: 14px; line-height: 1.55; color: #1e293b;
+}
+.aps-tour-body p { margin: 0 0 8px; }
+.aps-tour-body ul { margin: 4px 0 8px; padding-left: 20px; }
+.aps-tour-body code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+.aps-tour-body strong { color: #0b2545; }
+.aps-tour-hint {
+  margin-top: 8px; padding: 8px 10px;
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+  color: #78350f; font-size: 13px;
+}
+.aps-tour-hint i { color: #ca8a04; margin-right: 4px; }
+.aps-tour-progress {
+  height: 4px; background: #e2e8f0; border-radius: 999px; overflow: hidden;
+  margin: 12px 0 10px;
+}
+.aps-tour-progress-bar {
+  height: 100%; background: linear-gradient(90deg, #0b2545, #c9a227);
+  border-radius: 999px; transition: width .2s ease;
+}
+.aps-tour-foot {
+  display: flex; gap: 6px; justify-content: space-between; align-items: center;
+  margin-top: 2px;
+}
+.aps-tour-btn {
+  padding: 7px 13px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: none;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.aps-tour-btn-primary { background: #0b2545; color: #fff; }
+.aps-tour-btn-primary:hover { background: #13315c; }
+.aps-tour-btn-ghost { background: transparent; color: #64748b; }
+.aps-tour-btn-ghost:hover:not([disabled]) { background: #f1f5f9; color: #0b2545; }
+.aps-tour-btn[disabled] { opacity: .35; cursor: not-allowed; }
+
+.aps-tour-toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: #0b2545; color: #fff; padding: 12px 18px; border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(2,6,23,0.3); font-size: 14px;
+  z-index: 10001; transition: opacity .6s ease;
+}
+
+@keyframes apsFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes apsPopIn {
+  from { opacity: 0; transform: translateY(6px) scale(.97); }
+  to   { opacity: 1; transform: translateY(0)  scale(1); }
+}
+
+/* The "Guided Tour" button in the nav — subtle gold accent so it's always findable */
+.aps-tour-nav-btn {
+  background: #c9a227; color: #0b2545; font-weight: 600;
+  padding: 6px 12px; border-radius: 999px; font-size: 13px;
+  border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background .15s ease, transform .05s ease;
+}
+.aps-tour-nav-btn:hover { background: #e4b93a; }
+.aps-tour-nav-btn:active { transform: scale(.97); }
+
+@media print {
+  .aps-tour-overlay, .aps-tour-highlight, .aps-tour-tooltip, .aps-tour-nav-btn { display: none !important; }
+}

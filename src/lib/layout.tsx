@@ -1,4 +1,5 @@
 import type { User } from './types';
+import { getTour } from './tour';
 
 export function roleLabel(role: string): string {
   switch (role) {
@@ -22,9 +23,21 @@ export function roleHomeUrl(role: string): string {
   }
 }
 
-export function Layout(props: { title: string; user: User | null; children: any; activeNav?: string }) {
-  const { title, user, children, activeNav } = props;
+export function Layout(props: { title: string; user: User | null; children: any; activeNav?: string; autoLaunchTour?: boolean }) {
+  const { title, user, children, activeNav, autoLaunchTour } = props;
   const nav = user ? navFor(user, activeNav) : null;
+
+  // Embed the role-specific tour payload as a JSON blob. The tour engine
+  // (/static/tour.js) reads this on DOMContentLoaded.
+  const tourSteps = user ? getTour(user.role as any) : [];
+  const tourPayload = user && tourSteps.length ? {
+    userId: user.id,
+    role: user.role,
+    roleLabel: roleLabel(user.role),
+    autoLaunch: !!autoLaunchTour,
+    steps: tourSteps,
+  } : null;
+
   return (
     <html lang="en">
       <head>
@@ -53,7 +66,15 @@ export function Layout(props: { title: string; user: User | null; children: any;
           <div>© {new Date().getFullYear()} Alexander Public School District · 601 Delaney St, Alexander, ND 58831 · 701-828-3334</div>
           <div>Marshall Growth Platform v1.0</div>
         </footer>
+        {tourPayload && (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `window.__APS_TOUR__=${JSON.stringify(tourPayload).replace(/</g, '\\u003c')};`,
+            }}
+          />
+        )}
         <script src="/static/app.js" defer></script>
+        {tourPayload && <script src="/static/tour.js" defer></script>}
       </body>
     </html>
   );
@@ -71,7 +92,7 @@ function navFor(user: User, active?: string) {
             <div class="text-xs text-aps-sky">Marshall Growth Platform</div>
           </div>
         </a>
-        <nav class="hidden md:flex items-center gap-1">
+        <nav class="hidden md:flex items-center gap-1" data-tour="main-nav">
           {nav.map((item) => (
             <a href={item.href} class={`px-3 py-2 rounded text-sm hover:bg-aps-blue ${active === item.key ? 'bg-aps-blue' : ''}`}>
               <i class={`${item.icon} mr-2`}></i>{item.label}
@@ -79,6 +100,15 @@ function navFor(user: User, active?: string) {
           ))}
         </nav>
         <div class="flex items-center gap-3">
+          {/* Guided Tour launcher — visible on every page, every role */}
+          <button
+            type="button"
+            class="aps-tour-nav-btn hidden sm:inline-flex"
+            title="Open the guided walkthrough for your role"
+            onclick="window.APSGuidedTour && window.APSGuidedTour.start()"
+          >
+            <i class="fas fa-compass"></i>Guided Tour
+          </button>
           <div class="text-right hidden sm:block">
             <div class="text-sm font-medium">{user.first_name} {user.last_name}</div>
             <div class="text-xs text-aps-sky">{roleLabel(user.role)}</div>
@@ -92,6 +122,9 @@ function navFor(user: User, active?: string) {
                 <div class="text-sm font-semibold text-aps-navy">{user.first_name} {user.last_name}</div>
                 <div class="text-xs text-slate-500">{roleLabel(user.role)}</div>
               </div>
+              <button type="button" class="block w-full text-left px-4 py-2 hover:bg-slate-100 text-sm" onclick="window.APSGuidedTour && window.APSGuidedTour.start()">
+                <i class="fas fa-compass mr-2"></i>Guided Tour
+              </button>
               <a class="block px-4 py-2 hover:bg-slate-100 text-sm" href="/profile"><i class="fas fa-user-gear mr-2"></i>Profile &amp; Password</a>
               <form method="post" action="/logout"><button class="block w-full text-left px-4 py-2 hover:bg-slate-100 text-sm text-red-700"><i class="fas fa-sign-out-alt mr-2"></i>Sign out</button></form>
             </div>
@@ -154,9 +187,9 @@ function navItems(role: string) {
   }
 }
 
-export function Card(props: { title?: string; icon?: string; children: any; class?: string }) {
+export function Card(props: { title?: string; icon?: string; children: any; class?: string; ['data-tour']?: string }) {
   return (
-    <section class={`bg-white rounded-lg shadow-sm border border-slate-200 ${props.class || ''}`}>
+    <section class={`bg-white rounded-lg shadow-sm border border-slate-200 ${props.class || ''}`} data-tour={props['data-tour']}>
       {props.title && (
         <header class="px-5 py-3 border-b border-slate-100 flex items-center gap-2">
           {props.icon && <i class={`${props.icon} text-aps-navy`}></i>}

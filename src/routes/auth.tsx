@@ -31,7 +31,9 @@ app.post('/login', async (c) => {
   await logActivity(c.env.DB, u.id, 'user', u.id, 'login');
 
   if (u.must_change_password) return c.redirect('/profile?first=1');
-  return c.redirect(roleHomeUrl(u.role));
+  // Pass welcome=1 on login — each role's home page uses this to auto-launch
+  // the guided tour on the user's very first sign-in (gated by localStorage).
+  return c.redirect(roleHomeUrl(u.role) + '?welcome=1');
 });
 
 app.post('/logout', async (c) => {

@@ -12,6 +12,7 @@ app.use('*', requireRole(['super_admin']));
 // ---------- Admin overview ----------
 app.get('/', async (c) => {
   const user = c.get('user')!;
+  const welcome = c.req.query('welcome') === '1';
   const users = await c.env.DB.prepare(
     `SELECT role, COUNT(*) AS n FROM users WHERE active=1 GROUP BY role`
   ).all();
@@ -25,7 +26,7 @@ app.get('/', async (c) => {
      LEFT JOIN users u ON u.id = al.user_id
      ORDER BY al.id DESC LIMIT 20`
   ).all();
-  return c.html(<AdminHome user={user} byRole={byRole} byStatus={byStatus} recent={recent.results || []} />);
+  return c.html(<AdminHome user={user} byRole={byRole} byStatus={byStatus} recent={recent.results || []} welcome={welcome} />);
 });
 
 // ---------- Users ----------
@@ -802,10 +803,10 @@ export default app;
 
 // ============================== VIEWS ==============================
 
-function AdminHome({ user, byRole, byStatus, recent }: any) {
+function AdminHome({ user, byRole, byStatus, recent, welcome }: any) {
   return (
-    <Layout title="Admin" user={user} activeNav="admin-home">
-      <h1 class="font-display text-2xl text-aps-navy mb-4">Super Administrator</h1>
+    <Layout title="Admin" user={user} activeNav="admin-home" autoLaunchTour={!!welcome}>
+      <h1 class="font-display text-2xl text-aps-navy mb-4" data-tour="admin-overview">Super Administrator</h1>
       <div class="grid md:grid-cols-5 gap-4 mb-6">
         <Stat label="Teachers" value={byRole.teacher || 0} icon="fas fa-chalkboard-user" />
         <Stat label="Appraisers" value={byRole.appraiser || 0} icon="fas fa-user-tie" />
@@ -867,7 +868,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
 
       <Card title="Create user" icon="fas fa-user-plus">
-        <form method="post" action="/admin/users/create" class="grid md:grid-cols-4 gap-3 text-sm">
+        <form method="post" action="/admin/users/create" class="grid md:grid-cols-4 gap-3 text-sm" data-tour="users-create">
           <label>First name<input name="first_name" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
           <label>Last name<input name="last_name" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
           <label>Email<input name="email" type="email" required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
@@ -891,14 +892,14 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
         </form>
       </Card>
 
-      <Card title="Add many users at once" icon="fas fa-file-import" class="mt-4">
+      <Card title="Add many users at once" icon="fas fa-file-import" class="mt-4" data-tour="users-bulk">
         <div class="flex items-center justify-between gap-3 flex-wrap">
           <p class="text-sm text-slate-600">Need to onboard a full roster of teachers, principals, or coaches? Download the CSV template, fill it out in Excel, and upload it back — existing emails are updated, new emails are created.</p>
           <a href="/admin/import/users" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm whitespace-nowrap"><i class="fas fa-file-import mr-1"></i>Bulk import users</a>
         </div>
       </Card>
 
-      <Card title={`All users (${rows.length})`} icon="fas fa-users" class="mt-4">
+      <Card title={`All users (${rows.length})`} icon="fas fa-users" class="mt-4" data-tour="users-list">
         <form method="get" action="/admin/users" class="flex gap-2 mb-3 text-sm">
           <input name="q" value={q} placeholder="Search name or email…" class="flex-1 border border-slate-300 rounded px-2 py-1.5" />
           <select name="role" class="border border-slate-300 rounded px-2 py-1.5">
@@ -988,7 +989,7 @@ function AssignmentsPage({ user, teachers, appraisers, coaches, assignments, msg
       <p class="text-slate-600 text-sm mb-4">Link one or many teachers to one or many appraisers (principal/admin) or instructional coaches in a single click. Each staff member can evaluate or coach as many teachers as you select.</p>
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
 
-      <Card title="Add assignments (multi-select)" icon="fas fa-link">
+      <Card title="Add assignments (multi-select)" icon="fas fa-link" data-tour="assign-create">
         <form method="post" action="/admin/assignments/create" class="grid md:grid-cols-3 gap-4 text-sm items-start">
           <div>
             <label class="block font-medium text-slate-700 mb-1">Teachers <span class="text-xs text-slate-500">(Ctrl/⌘-click for many)</span></label>
@@ -1032,7 +1033,7 @@ function AssignmentsPage({ user, teachers, appraisers, coaches, assignments, msg
         </form>
       </Card>
 
-      <Card title={`Current assignments (${assignments.length}) — grouped by staff`} icon="fas fa-list" class="mt-4">
+      <Card title={`Current assignments (${assignments.length}) — grouped by staff`} icon="fas fa-list" class="mt-4" data-tour="assign-current">
         {staffGroups.length === 0 ? <p class="text-slate-500 text-sm">No assignments yet.</p> :
           <form method="post" action="/admin/assignments/bulk-delete" onsubmit="return confirm('Remove all checked assignments?')">
             <div class="space-y-4">
@@ -1085,7 +1086,7 @@ function SchoolsPage({ user, schools, msg }: any) {
     <Layout title="Schools" user={user} activeNav="admin-schools">
       <h1 class="font-display text-2xl text-aps-navy mb-4">Schools</h1>
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
-      <Card title="Add school" icon="fas fa-plus">
+      <Card title="Add school" icon="fas fa-plus" data-tour="schools-add">
         <form method="post" action="/admin/schools/create" class="grid md:grid-cols-4 gap-2 text-sm">
           <label>Name<input name="name" required class="mt-1 w-full border rounded px-2 py-1.5" /></label>
           <label>Grade span<input name="grade_span" placeholder="PK-5" class="mt-1 w-full border rounded px-2 py-1.5" /></label>
@@ -1219,7 +1220,7 @@ function FrameworkPage({ user, framework, domains }: any) {
     <Layout title="Framework" user={user} activeNav="admin-framework">
       <h1 class="font-display text-2xl text-aps-navy mb-1">{(framework as any).name}</h1>
       <p class="text-slate-600 text-sm mb-4">Version {(framework as any).version} · Read-only reference</p>
-      <div class="mb-4 flex flex-wrap gap-2">
+      <div class="mb-4 flex flex-wrap gap-2" data-tour="framework-actions">
         <a href="/admin/import/rubric" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-file-import mr-1"></i>Bulk import / replace rubric</a>
         <a href="/admin/import/rubric/export" class="bg-white border border-aps-navy text-aps-navy px-4 py-2 rounded hover:bg-slate-50 text-sm"><i class="fas fa-file-export mr-1"></i>Export current rubric (CSV)</a>
         <a href="/admin/pedagogy" class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded hover:bg-slate-50 text-sm"><i class="fas fa-pen-to-square mr-1"></i>Edit individual cells</a>
@@ -1259,7 +1260,7 @@ function DistrictPage({ user, d, years, msg }: any) {
     <Layout title="District" user={user} activeNav="admin-district">
       <h1 class="font-display text-2xl text-aps-navy mb-4">District Information</h1>
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
-      <Card title="District details" icon="fas fa-building-columns">
+      <Card title="District details" icon="fas fa-building-columns" data-tour="district-form">
         <form method="post" action="/admin/district/update" class="grid md:grid-cols-2 gap-3 text-sm">
           <label>Name<input name="name" value={d?.name || ''} class="mt-1 w-full border rounded px-2 py-1.5" /></label>
           <label>Phone<input name="phone" value={d?.phone || ''} class="mt-1 w-full border rounded px-2 py-1.5" /></label>
@@ -1293,7 +1294,7 @@ function ImportUsersPage({ user, msg, result, schools }: any) {
       {msg && <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-800 text-sm whitespace-pre-wrap">{msg}</div>}
       {result && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm whitespace-pre-wrap">{result}</div>}
 
-      <Card title="Step 1 — Download the template" icon="fas fa-file-csv">
+      <Card title="Step 1 — Download the template" icon="fas fa-file-csv" data-tour="import-users-template">
         <p class="text-sm text-slate-600 mb-3">The template already contains the exact header row the importer expects. Fill in your users, keep the column names unchanged, and save as CSV.</p>
         <a href="/admin/import/users/template" class="inline-flex items-center gap-2 bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-download"></i>Download users_import_template.csv</a>
         <div class="mt-4 text-xs">

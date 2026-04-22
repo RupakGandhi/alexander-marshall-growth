@@ -557,13 +557,13 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
 
   return (
     <Layout title="Reports" user={user} activeNav={activeNav}>
-      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-file-export mr-2"></i>Report Builder</h1>
+      <h1 class="font-display text-2xl text-aps-navy mb-1" data-tour="reports-title"><i class="fas fa-file-export mr-2"></i>Report Builder</h1>
       <p class="text-slate-600 text-sm mb-4">Build exactly the report you need in three simple steps: <strong>① choose who</strong>, <strong>② choose what to include</strong>, <strong>③ download</strong>. All selections support multi-pick — Ctrl/⌘-click to choose many.</p>
 
       {/* --------- Single form drives BOTH the preview and the export --------- */}
       <form method="get" action="/reports" class="space-y-4">
         {/* ========================== STEP 1: WHO ============================ */}
-        <Card title="① Who & when" icon="fas fa-user-group">
+        <Card title="① Who & when" icon="fas fa-user-group" data-tour="reports-who">
           <div class="grid md:grid-cols-3 gap-4 text-sm">
             {/* Teachers */}
             <div>
@@ -639,7 +639,7 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
         {f.types.map(t => <input type="hidden" name="types" value={t} />)}
 
         {/* ======================= STEP 2: WHAT ============================= */}
-        <Card title="② What to include" icon="fas fa-list-check">
+        <Card title="② What to include" icon="fas fa-list-check" data-tour="reports-what">
           <p class="text-sm text-slate-600 mb-3">Pick which sections to include. The presets configure the checkboxes for common use-cases — you can fine-tune any of them afterwards.</p>
 
           <div class="flex flex-wrap gap-2 mb-4">
@@ -666,7 +666,7 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
         </Card>
 
         {/* ======================= STEP 3: DOWNLOAD ========================= */}
-        <Card title="③ Download" icon="fas fa-download">
+        <Card title="③ Download" icon="fas fa-download" data-tour="reports-download">
           <div class="grid md:grid-cols-2 gap-4 text-sm">
             <div class="border border-slate-200 rounded p-4 bg-slate-50">
               <div class="font-display text-aps-navy text-lg mb-1"><i class="fas fa-file-csv mr-2"></i>Spreadsheet (CSV)</div>

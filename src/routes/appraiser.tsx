@@ -18,6 +18,7 @@ app.use('*', requireRole(['appraiser', 'super_admin']));
 // ---- Appraiser home: list assigned teachers
 app.get('/', async (c) => {
   const user = c.get('user')!;
+  const welcome = c.req.query('welcome') === '1';
   const teachers = await getAssignedTeachers(c.env.DB, user.id, 'appraiser');
   // Latest observation per teacher
   const ids = (teachers as any[]).map(t => t.id);
@@ -31,7 +32,7 @@ app.get('/', async (c) => {
     ).bind(...ids).all();
     for (const r of (rows.results as any[])) latest[r.teacher_id] = r;
   }
-  return c.html(<AppraiserHome user={user} teachers={teachers} latest={latest} />);
+  return c.html(<AppraiserHome user={user} teachers={teachers} latest={latest} welcome={welcome} />);
 });
 
 // ---- Single teacher detail
@@ -313,15 +314,15 @@ export default app;
 
 // ============================== VIEWS ==============================
 
-function AppraiserHome({ user, teachers, latest }: any) {
+function AppraiserHome({ user, teachers, latest, welcome }: any) {
   return (
-    <Layout title="My Teachers" user={user} activeNav="ap-home">
+    <Layout title="My Teachers" user={user} activeNav="ap-home" autoLaunchTour={!!welcome}>
       <h1 class="font-display text-2xl text-aps-navy mb-1">My Teachers</h1>
       <p class="text-slate-600 text-sm mb-6">Assigned for observation and evaluation · {teachers.length} teacher{teachers.length!==1?'s':''}</p>
       {teachers.length === 0 ? (
         <Card><p class="text-slate-500 text-sm">No teachers assigned. Contact your super admin for assignments.</p></Card>
       ) : (
-        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-tour="ap-teachers">
           {teachers.map((t: any) => {
             const l = latest[t.id];
             return (
@@ -338,7 +339,7 @@ function AppraiserHome({ user, teachers, latest }: any) {
                   {l ? <>Last observed <strong>{formatDate(l.observed_at)}</strong> · <span class={`px-1.5 py-0.5 rounded-full border ${statusBadge(l.status)}`}>{statusLabel(l.status)}</span></>
                      : <>No observations yet</>}
                 </div>
-                <div class="mt-3 flex flex-wrap gap-2">
+                <div class="mt-3 flex flex-wrap gap-2" data-tour="ap-start-obs">
                   <a href={`/appraiser/teachers/${t.id}`} class="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md border border-aps-navy text-aps-navy hover:bg-slate-50"><i class="fas fa-folder-open"></i>View data</a>
                   <form method="post" action={`/appraiser/teachers/${t.id}/observations/start`} class="inline">
                     <input type="hidden" name="observation_type" value="mini" />
@@ -521,7 +522,7 @@ function AppraiserObservations({ user, rows }: any) {
   return (
     <Layout title="Observations" user={user} activeNav="ap-obs">
       <h1 class="font-display text-2xl text-aps-navy mb-4">All Observations</h1>
-      <Card>
+      <Card data-tour="ap-obs-list">
         {rows.length === 0 ? <p class="text-slate-500 text-sm">No observations yet.</p> :
           <table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Date</th><th>Teacher</th><th>Type</th><th>Status</th><th></th></tr></thead>

@@ -10,8 +10,9 @@ app.use('*', requireRole(['teacher']));
 
 app.get('/', async (c) => {
   const user = c.get('user')!;
+  const welcome = c.req.query('welcome') === '1';
   const summary = await getTeacherSummary(c.env.DB, user.id);
-  return c.html(<TeacherHome user={user} summary={summary} />);
+  return c.html(<TeacherHome user={user} summary={summary} welcome={welcome} />);
 });
 
 app.get('/observations', async (c) => {
@@ -58,13 +59,13 @@ export default app;
 
 // ---------------------------- VIEWS ----------------------------
 
-function TeacherHome({ user, summary }: any) {
+function TeacherHome({ user, summary, welcome }: any) {
   if (!summary) return <Layout title="Dashboard" user={user}><p>No teacher record found.</p></Layout>;
   const { observations, focusAreas } = summary;
   const recent = observations.filter((o: any) => o.status === 'published' || o.status === 'acknowledged').slice(0, 5);
   const awaiting = observations.filter((o: any) => o.status === 'published').length;
   return (
-    <Layout title="Dashboard" user={user} activeNav="t-home">
+    <Layout title="Dashboard" user={user} activeNav="t-home" autoLaunchTour={!!welcome}>
       <div class="mb-6">
         <h1 class="font-display text-2xl text-aps-navy">Welcome, {user.first_name}</h1>
         <p class="text-slate-600 text-sm">Your personal growth dashboard · {user.title || ''}</p>
@@ -77,7 +78,7 @@ function TeacherHome({ user, summary }: any) {
         </div>
       )}
 
-      <div class="grid md:grid-cols-3 gap-4 mb-6">
+      <div class="grid md:grid-cols-3 gap-4 mb-6" data-tour="t-summary">
         <Card title="Active Focus Areas" icon="fas fa-bullseye">
           <div class="text-3xl font-display text-aps-navy">{focusAreas.length}</div>
           <a href="/teacher/focus" class="text-sm text-aps-blue hover:underline">View all →</a>
@@ -135,7 +136,7 @@ function TeacherObservations({ user, summary }: any) {
   return (
     <Layout title="Observations" user={user} activeNav="t-obs">
       <h1 class="font-display text-2xl text-aps-navy mb-4">My Observations</h1>
-      <Card>
+      <Card data-tour="t-obs-list">
         {list.length === 0 ? <p class="text-slate-500 text-sm">No published observations yet.</p> :
           <table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600">
@@ -279,7 +280,7 @@ function TeacherFocus({ user, summary }: any) {
   const { focusAreas, observations } = summary;
   return (
     <Layout title="Focus Areas" user={user} activeNav="t-focus">
-      <h1 class="font-display text-2xl text-aps-navy mb-4">Focus Areas</h1>
+      <h1 class="font-display text-2xl text-aps-navy mb-4" data-tour="t-focus">Focus Areas</h1>
       <Card>
         {focusAreas.length === 0 ? <p class="text-slate-500 text-sm">No active focus areas. Your appraiser will add these as you work together.</p> :
           <ul class="space-y-3">
