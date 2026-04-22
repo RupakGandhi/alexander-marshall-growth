@@ -4,16 +4,24 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
+    "preview": "wrangler pages dev dist --local --ip 0.0.0.0 --port 3000",
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "db:migrate:local": "wrangler d1 migrations apply webapp-production --local",
+    "db:migrate:prod": "wrangler d1 migrations apply webapp-production",
+    "db:seed:local": "wrangler d1 execute webapp-production --local --file=./seed/001_district_and_framework.sql && wrangler d1 execute webapp-production --local --file=./seed/002_pedagogy_library.sql && wrangler d1 execute webapp-production --local --file=./seed/003_alexander_staff.sql",
+    "db:seed:prod": "wrangler d1 execute webapp-production --file=./seed/001_district_and_framework.sql && wrangler d1 execute webapp-production --file=./seed/002_pedagogy_library.sql && wrangler d1 execute webapp-production --file=./seed/003_alexander_staff.sql",
+    "db:reset:local": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed:local",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
-    "hono": "^4.12.12"
+    "bcryptjs": "^3.0.3",
+    "hono": "^4.12.12",
+    "jose": "^6.2.2"
   },
   "devDependencies": {
     "@hono/vite-build": "^1.2.0",
     "@hono/vite-dev-server": "^0.18.2",
+    "@types/bcryptjs": "^2.4.6",
     "vite": "^6.3.5",
     "wrangler": "^4.4.0"
   }

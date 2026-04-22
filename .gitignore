@@ -1,33 +1,26 @@
-# prod
-dist/
-
-# dev
-.yarn/
-!.yarn/releases
-.vscode/*
-!.vscode/launch.json
-!.vscode/*.code-snippets
-.idea/workspace.xml
-.idea/usage.statistics.xml
-.idea/shelf
-
-# deps
+# Dependencies
 node_modules/
-.wrangler
 
-# env
+# Build output
+dist/
+.wrangler/
+
+# Env / secrets
 .env
-.env.production
 .dev.vars
 
-# logs
-logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-# misc
+# OS / editor
 .DS_Store
+*.log
+.vscode/
+
+# PM2
+.pm2/
+pids/
+logs/
+
+# Backups
+*.backup
+*.bak
+*.tar.gz
+*.zip

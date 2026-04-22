@@ -1,0 +1,13 @@
+/* Alexander Public Schools — Marshall Growth Platform */
+html, body { -webkit-tap-highlight-color: transparent; }
+.line-clamp-3 { display:-webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::after { content: "›"; float: right; transition: transform .15s ease; display: inline-block; }
+details[open] > summary::after { transform: rotate(90deg); }
+canvas[id^="sig-pad"] { display: block; }
+table thead th { font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+@media print {
+  header, nav, footer, form button { display: none !important; }
+  .bg-aps-wheat { background: white !important; }
+}
