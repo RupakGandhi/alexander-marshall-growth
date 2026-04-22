@@ -121,6 +121,8 @@ function navItems(role: string) {
         { key: 'admin-schools',  label: 'Schools',           href: '/admin/schools',      icon: 'fas fa-school' },
         { key: 'admin-pedagogy', label: 'Pedagogy Library',  href: '/admin/pedagogy',     icon: 'fas fa-book' },
         { key: 'admin-framework',label: 'Framework',         href: '/admin/framework',    icon: 'fas fa-list-check' },
+        { key: 'admin-import',   label: 'Bulk Import',       href: '/admin/import/users', icon: 'fas fa-file-import' },
+        { key: 'admin-reports',  label: 'Reports',           href: '/reports',            icon: 'fas fa-file-export' },
         { key: 'admin-district', label: 'District',          href: '/admin/district',     icon: 'fas fa-building-columns' },
       ];
     case 'superintendent':
@@ -128,11 +130,13 @@ function navItems(role: string) {
         { key: 'supt-home',   label: 'District Overview', href: '/superintendent',          icon: 'fas fa-gauge' },
         { key: 'supt-schools',label: 'By School',         href: '/superintendent/schools',  icon: 'fas fa-school' },
         { key: 'supt-teacher',label: 'By Teacher',        href: '/superintendent/teachers', icon: 'fas fa-chalkboard-user' },
+        { key: 'supt-reports',label: 'Reports',           href: '/reports',                 icon: 'fas fa-file-export' },
       ];
     case 'appraiser':
       return [
-        { key: 'ap-home',  label: 'My Teachers',    href: '/appraiser',             icon: 'fas fa-chalkboard-user' },
-        { key: 'ap-obs',   label: 'Observations',   href: '/appraiser/observations',icon: 'fas fa-clipboard-list' },
+        { key: 'ap-home',    label: 'My Teachers',    href: '/appraiser',             icon: 'fas fa-chalkboard-user' },
+        { key: 'ap-obs',     label: 'Observations',   href: '/appraiser/observations',icon: 'fas fa-clipboard-list' },
+        { key: 'ap-reports', label: 'Reports',        href: '/reports',               icon: 'fas fa-file-export' },
       ];
     case 'coach':
       return [
@@ -140,9 +144,10 @@ function navItems(role: string) {
       ];
     case 'teacher':
       return [
-        { key: 't-home',   label: 'My Dashboard',   href: '/teacher',                icon: 'fas fa-gauge' },
-        { key: 't-obs',    label: 'Observations',   href: '/teacher/observations',   icon: 'fas fa-clipboard-list' },
-        { key: 't-focus',  label: 'Focus Areas',    href: '/teacher/focus',          icon: 'fas fa-bullseye' },
+        { key: 't-home',    label: 'My Dashboard',   href: '/teacher',                icon: 'fas fa-gauge' },
+        { key: 't-obs',     label: 'Observations',   href: '/teacher/observations',   icon: 'fas fa-clipboard-list' },
+        { key: 't-focus',   label: 'Focus Areas',    href: '/teacher/focus',          icon: 'fas fa-bullseye' },
+        { key: 't-reports', label: 'Exports',        href: '/reports',                icon: 'fas fa-file-export' },
       ];
     default:
       return [];

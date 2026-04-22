@@ -4,6 +4,7 @@ import { Layout, Card, Button } from '../lib/layout';
 import { requireRole, hashPassword } from '../lib/auth';
 import { getDomainsWithIndicators, getActiveFramework, logActivity } from '../lib/db';
 import { formatDate, formatDateTime, levelLabels, levelColor } from '../lib/ui';
+import { parseCsvAsObjects, buildCsv } from '../lib/csv';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['super_admin']));
@@ -304,6 +305,428 @@ app.post('/district/update', async (c) => {
   return c.redirect('/admin/district?msg=Saved');
 });
 
+// ============================================================================
+// BULK IMPORT — Users (teachers, principals, coaches, etc.)
+// ============================================================================
+const USER_CSV_HEADERS = [
+  'first_name','last_name','email','role','title','phone','school_name','password','active'
+];
+
+const USER_CSV_TEMPLATE_ROWS: string[][] = [
+  // Sample rows so the admin can see exactly the expected format.
+  ['Jane','Doe','jane.doe@k12.nd.us','teacher','2nd Grade','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
+  ['John','Smith','john.smith@k12.nd.us','teacher','Physical Education','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
+  ['Alex','Principal','alex.principal@k12.nd.us','appraiser','Elementary Principal','701-828-3334','Alexander Elementary','Alexander2026!','yes'],
+  ['Casey','Coach','casey.coach@k12.nd.us','coach','Instructional Coach','701-828-3334','Alexander Junior/Senior High','Alexander2026!','yes'],
+];
+
+app.get('/import/users/template', async (c) => {
+  const csv = buildCsv(USER_CSV_HEADERS, USER_CSV_TEMPLATE_ROWS);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="users_import_template.csv"',
+    },
+  });
+});
+
+app.get('/import/users', async (c) => {
+  const user = c.get('user')!;
+  const msg = c.req.query('msg');
+  const result = c.req.query('result'); // pass-through report
+  const schools = await c.env.DB.prepare(`SELECT name FROM schools WHERE district_id=1 ORDER BY name`).all();
+  return c.html(<ImportUsersPage user={user} msg={msg} result={result} schools={(schools.results as any[]) || []} />);
+});
+
+app.post('/import/users', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const file = body.csv as unknown as File | undefined;
+  const dryRun = body.dry_run ? true : false;
+  if (!file || typeof (file as any).text !== 'function') {
+    return c.redirect('/admin/import/users?msg=' + encodeURIComponent('No file uploaded.'));
+  }
+  const text = await (file as any).text();
+  const { headers, rows } = parseCsvAsObjects(text);
+  // Validate headers
+  const missing = USER_CSV_HEADERS.filter(h => !headers.includes(h));
+  if (missing.length) {
+    return c.redirect('/admin/import/users?msg=' + encodeURIComponent(
+      'Missing required columns: ' + missing.join(', ') + '. Download the template and use its header row.'));
+  }
+
+  // Pre-load schools + existing emails for lookup
+  const schoolRows = await c.env.DB.prepare(`SELECT id, name FROM schools WHERE district_id=1`).all();
+  const schoolMap = new Map<string, number>();
+  for (const s of (schoolRows.results as any[])) schoolMap.set(String(s.name).trim().toLowerCase(), s.id);
+
+  const existingRows = await c.env.DB.prepare(`SELECT id, email FROM users`).all();
+  const existingMap = new Map<string, number>();
+  for (const u of (existingRows.results as any[])) existingMap.set(String(u.email).toLowerCase(), u.id);
+
+  const validRoles = ['teacher','appraiser','coach','superintendent','super_admin'];
+  const report = {
+    total: rows.length, created: 0, updated: 0, skipped: 0,
+    errors: [] as string[], warnings: [] as string[],
+  };
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const line = i + 2; // header is line 1
+    const first = (r.first_name || '').trim();
+    const last = (r.last_name || '').trim();
+    const email = (r.email || '').trim().toLowerCase();
+    const role = (r.role || '').trim().toLowerCase();
+    const title = (r.title || '').trim() || null;
+    const phone = (r.phone || '').trim() || null;
+    const schoolName = (r.school_name || '').trim();
+    const password = (r.password || '').trim() || 'Alexander2026!';
+    const activeRaw = (r.active || 'yes').trim().toLowerCase();
+    const active = ['yes','y','true','1','active'].includes(activeRaw) ? 1 : 0;
+
+    if (!first || !last || !email || !role) {
+      report.errors.push(`Line ${line}: missing required field (first_name/last_name/email/role).`);
+      report.skipped++; continue;
+    }
+    if (!validRoles.includes(role)) {
+      report.errors.push(`Line ${line}: invalid role "${role}". Use one of ${validRoles.join(', ')}.`);
+      report.skipped++; continue;
+    }
+    let school_id: number | null = null;
+    if (schoolName) {
+      const hit = schoolMap.get(schoolName.toLowerCase());
+      if (!hit) {
+        report.warnings.push(`Line ${line}: school "${schoolName}" not found — user will be created without a school assignment.`);
+      } else school_id = hit;
+    }
+
+    if (dryRun) {
+      if (existingMap.has(email)) report.updated++; else report.created++;
+      continue;
+    }
+
+    try {
+      const existingId = existingMap.get(email);
+      if (existingId) {
+        await c.env.DB.prepare(
+          `UPDATE users SET first_name=?, last_name=?, role=?, title=?, phone=?, school_id=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+        ).bind(first, last, role, title, phone, school_id, active, existingId).run();
+        report.updated++;
+      } else {
+        const hash = await hashPassword(password);
+        const res = await c.env.DB.prepare(
+          `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        ).bind(school_id, email, hash, first, last, role, title, phone, active).run();
+        existingMap.set(email, Number((res.meta as any)?.last_row_id));
+        report.created++;
+      }
+    } catch (e: any) {
+      report.errors.push(`Line ${line}: ${e.message || e}`);
+      report.skipped++;
+    }
+  }
+  await logActivity(c.env.DB, user.id, 'import', null, dryRun ? 'users_import_dryrun' : 'users_import', report);
+  const summary = `${dryRun ? 'Dry run · ' : ''}created=${report.created} updated=${report.updated} skipped=${report.skipped} errors=${report.errors.length}` +
+    (report.errors.length ? '\nErrors:\n' + report.errors.slice(0, 20).join('\n') : '') +
+    (report.warnings.length ? '\nWarnings:\n' + report.warnings.slice(0, 20).join('\n') : '');
+  return c.redirect('/admin/import/users?result=' + encodeURIComponent(summary));
+});
+
+// ============================================================================
+// BULK IMPORT — Rubric / Framework (domains + indicators + descriptors + pedagogy)
+// ============================================================================
+// Flat CSV template. One row per (domain, indicator, level).
+// If you only want to replace descriptors, fill out levels 1-4 for each
+// indicator. If you also want to seed pedagogy-library content, the optional
+// pedagogy columns populate the teacher_next_moves / feedback_starter cells.
+const RUBRIC_CSV_HEADERS = [
+  'domain_code','domain_name','domain_description','domain_sort_order',
+  'indicator_code','indicator_name','indicator_prompt','indicator_sort_order',
+  'level','level_label','descriptor',
+  'interpretation','evidence_signals','teacher_next_moves','coaching_considerations','resources','feedback_starter',
+];
+
+const RUBRIC_CSV_TEMPLATE_ROWS: string[][] = [
+  [
+    'A','Planning and Preparation for Learning','How the teacher plans and prepares for student learning','1',
+    'a','Knowledge','The teacher:','1',
+    '4','Highly Effective','Is expert in the subject and passionate about teaching it.',
+    'Deep, current expertise in content',
+    'Teacher explains why content matters | Makes cross-disciplinary connections | Answers advanced questions accurately',
+    'Maintain monthly content-PD reading | Present at department meeting | Build a content FAQ',
+    'Ask: "What recent research has reshaped how you teach this?" | Look for student-initiated advanced questions',
+    'Wiggins & McTighe — Understanding by Design | Marzano — The Art and Science of Teaching',
+    'You demonstrated expert knowledge of the subject today — particularly when…'
+  ],
+  [
+    'A','Planning and Preparation for Learning','How the teacher plans and prepares for student learning','1',
+    'a','Knowledge','The teacher:','1',
+    '3','Effective','Knows the subject well and shows genuine interest in it.','','','','','','',''
+  ],
+  [
+    'A','Planning and Preparation for Learning','How the teacher plans and prepares for student learning','1',
+    'a','Knowledge','The teacher:','1',
+    '2','Improvement Necessary','Has gaps in subject knowledge and/or shows limited interest in it.','','','','','','',''
+  ],
+  [
+    'A','Planning and Preparation for Learning','How the teacher plans and prepares for student learning','1',
+    'a','Knowledge','The teacher:','1',
+    '1','Does Not Meet Standards','Has little content knowledge and/or disinterest in the subject.','','','','','','',''
+  ],
+];
+
+app.get('/import/rubric/template', async (c) => {
+  const csv = buildCsv(RUBRIC_CSV_HEADERS, RUBRIC_CSV_TEMPLATE_ROWS);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="rubric_import_template.csv"',
+    },
+  });
+});
+
+// Export the CURRENT rubric back out as CSV — handy for editing in Excel.
+app.get('/import/rubric/export', async (c) => {
+  const fw = await getActiveFramework(c.env.DB);
+  if (!fw) return c.text('No active framework', 404);
+  const rows = await c.env.DB.prepare(
+    `SELECT d.code AS domain_code, d.name AS domain_name, d.description AS domain_description, d.sort_order AS domain_sort_order,
+            i.code AS indicator_code, i.name AS indicator_name, i.prompt AS indicator_prompt, i.sort_order AS indicator_sort_order,
+            fd.level, fd.level_label, fd.descriptor,
+            pl.interpretation, pl.evidence_signals, pl.teacher_next_moves, pl.coaching_considerations, pl.resources, pl.feedback_starter
+       FROM framework_domains d
+       JOIN framework_indicators i ON i.domain_id = d.id
+       LEFT JOIN framework_descriptors fd ON fd.indicator_id = i.id
+       LEFT JOIN pedagogy_library pl ON pl.indicator_id = i.id AND pl.level = fd.level
+      WHERE d.framework_id = ?
+      ORDER BY d.sort_order, i.sort_order, fd.level DESC`
+  ).bind((fw as any).id).all();
+  const toList = (s: any) => {
+    if (!s) return '';
+    try { const arr = typeof s === 'string' ? JSON.parse(s) : s; if (Array.isArray(arr)) return arr.join(' | '); return String(s); }
+    catch { return String(s); }
+  };
+  const toResources = (s: any) => {
+    if (!s) return '';
+    try {
+      const arr = typeof s === 'string' ? JSON.parse(s) : s;
+      if (Array.isArray(arr)) return arr.map((r: any) => [r.title, r.source].filter(Boolean).join(' — ')).join(' | ');
+      return String(s);
+    } catch { return String(s); }
+  };
+  const data = (rows.results as any[]).map(r => [
+    r.domain_code, r.domain_name, r.domain_description || '', r.domain_sort_order || '',
+    r.indicator_code, r.indicator_name, r.indicator_prompt || '', r.indicator_sort_order || '',
+    r.level, r.level_label, r.descriptor,
+    r.interpretation || '', toList(r.evidence_signals), toList(r.teacher_next_moves),
+    toList(r.coaching_considerations), toResources(r.resources), r.feedback_starter || '',
+  ]);
+  const csv = buildCsv(RUBRIC_CSV_HEADERS, data);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="rubric_current_${(fw as any).version || 'active'}.csv"`,
+    },
+  });
+});
+
+app.get('/import/rubric', async (c) => {
+  const user = c.get('user')!;
+  const msg = c.req.query('msg');
+  const result = c.req.query('result');
+  const fw = await getActiveFramework(c.env.DB);
+  return c.html(<ImportRubricPage user={user} msg={msg} result={result} framework={fw} />);
+});
+
+app.post('/import/rubric', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const file = body.csv as unknown as File | undefined;
+  const dryRun = body.dry_run ? true : false;
+  const frameworkName = String(body.framework_name || '').trim();
+  const frameworkVersion = String(body.framework_version || '').trim() || null;
+  const replaceExisting = body.replace_existing ? true : false;
+
+  if (!file || typeof (file as any).text !== 'function') {
+    return c.redirect('/admin/import/rubric?msg=' + encodeURIComponent('No file uploaded.'));
+  }
+  const text = await (file as any).text();
+  const { headers, rows } = parseCsvAsObjects(text);
+  const missing = RUBRIC_CSV_HEADERS.filter(h => !headers.includes(h));
+  if (missing.length) {
+    return c.redirect('/admin/import/rubric?msg=' + encodeURIComponent(
+      'Missing required columns: ' + missing.join(', ') + '. Download the template and use its header row.'));
+  }
+
+  // Determine target framework
+  let framework = await getActiveFramework(c.env.DB) as any;
+  const report = {
+    total: rows.length, domains: 0, indicators: 0, descriptors: 0, pedagogy: 0,
+    errors: [] as string[], mode: 'update' as 'update' | 'new',
+  };
+
+  if (!framework || replaceExisting) {
+    if (!dryRun) {
+      // Create brand-new framework and mark it active. Keep old framework rows
+      // intact so historical observations still have their framework reference.
+      const name = frameworkName || 'Imported Framework';
+      const version = frameworkVersion || new Date().toISOString().slice(0, 10);
+      const ins = await c.env.DB.prepare(
+        `INSERT INTO frameworks (district_id, name, version, description, scale_levels, is_active)
+         VALUES (1, ?, ?, 'Imported via CSV', 4, 1)`
+      ).bind(name, version).run();
+      const newId = Number((ins.meta as any)?.last_row_id);
+      await c.env.DB.prepare(`UPDATE frameworks SET is_active=0 WHERE id <> ?`).bind(newId).run();
+      await c.env.DB.prepare(`UPDATE districts SET active_framework_id=? WHERE id=1`).bind(newId).run();
+      framework = { id: newId, name, version };
+    }
+    report.mode = 'new';
+  }
+
+  // Build maps of existing domain/indicator rows so we can upsert.
+  const domainRowsDb = framework
+    ? await c.env.DB.prepare(`SELECT id, code FROM framework_domains WHERE framework_id=?`).bind((framework as any).id).all()
+    : { results: [] } as any;
+  const domainMap = new Map<string, number>();
+  for (const d of (domainRowsDb.results as any[])) domainMap.set(String(d.code).toUpperCase(), d.id);
+
+  const indicatorRowsDb = framework
+    ? await c.env.DB.prepare(
+        `SELECT i.id, i.code, i.domain_id FROM framework_indicators i
+         JOIN framework_domains d ON d.id = i.domain_id
+         WHERE d.framework_id = ?`
+      ).bind((framework as any).id).all()
+    : { results: [] } as any;
+  const indicatorMap = new Map<string, number>(); // key `${domainId}:${indicatorCode}`
+  for (const i of (indicatorRowsDb.results as any[])) indicatorMap.set(`${i.domain_id}:${String(i.code).toLowerCase()}`, i.id);
+
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    const line = r + 2;
+    const domainCode = (row.domain_code || '').trim().toUpperCase();
+    const indicatorCode = (row.indicator_code || '').trim().toLowerCase();
+    const level = Number(row.level);
+    if (!domainCode || !indicatorCode || !level) {
+      report.errors.push(`Line ${line}: domain_code, indicator_code, and level are required.`);
+      continue;
+    }
+    if (![1,2,3,4].includes(level)) {
+      report.errors.push(`Line ${line}: level must be 1-4.`);
+      continue;
+    }
+
+    if (dryRun) {
+      if (!domainMap.has(domainCode)) { report.domains++; domainMap.set(domainCode, -1); }
+      const ikey = `${domainMap.get(domainCode) || 0}:${indicatorCode}`;
+      if (!indicatorMap.has(ikey)) { report.indicators++; indicatorMap.set(ikey, -1); }
+      report.descriptors++;
+      if (row.interpretation || row.teacher_next_moves || row.feedback_starter) report.pedagogy++;
+      continue;
+    }
+
+    // Upsert domain
+    let domainId = domainMap.get(domainCode);
+    if (!domainId) {
+      const res = await c.env.DB.prepare(
+        `INSERT INTO framework_domains (framework_id, code, name, description, sort_order) VALUES (?,?,?,?,?)`
+      ).bind(
+        (framework as any).id, domainCode, row.domain_name || domainCode,
+        row.domain_description || null, Number(row.domain_sort_order) || 0,
+      ).run();
+      domainId = Number((res.meta as any)?.last_row_id);
+      domainMap.set(domainCode, domainId);
+      report.domains++;
+    } else if (row.domain_name || row.domain_description || row.domain_sort_order) {
+      await c.env.DB.prepare(
+        `UPDATE framework_domains SET name=COALESCE(NULLIF(?, ''), name),
+                                       description=COALESCE(NULLIF(?, ''), description),
+                                       sort_order=COALESCE(NULLIF(?, 0), sort_order) WHERE id=?`
+      ).bind(row.domain_name || '', row.domain_description || '', Number(row.domain_sort_order) || 0, domainId).run();
+    }
+
+    // Upsert indicator
+    const ikey = `${domainId}:${indicatorCode}`;
+    let indicatorId = indicatorMap.get(ikey);
+    if (!indicatorId) {
+      const res = await c.env.DB.prepare(
+        `INSERT INTO framework_indicators (domain_id, code, name, sort_order, prompt) VALUES (?,?,?,?,?)`
+      ).bind(
+        domainId, indicatorCode, row.indicator_name || indicatorCode,
+        Number(row.indicator_sort_order) || 0, row.indicator_prompt || null,
+      ).run();
+      indicatorId = Number((res.meta as any)?.last_row_id);
+      indicatorMap.set(ikey, indicatorId);
+      report.indicators++;
+    } else if (row.indicator_name || row.indicator_prompt || row.indicator_sort_order) {
+      await c.env.DB.prepare(
+        `UPDATE framework_indicators SET name=COALESCE(NULLIF(?, ''), name),
+                                          prompt=COALESCE(NULLIF(?, ''), prompt),
+                                          sort_order=COALESCE(NULLIF(?, 0), sort_order) WHERE id=?`
+      ).bind(row.indicator_name || '', row.indicator_prompt || '', Number(row.indicator_sort_order) || 0, indicatorId).run();
+    }
+
+    // Upsert descriptor for this level
+    const descriptor = row.descriptor || '';
+    const levelLabel = row.level_label || (level === 4 ? 'Highly Effective' : level === 3 ? 'Effective' : level === 2 ? 'Improvement Necessary' : 'Does Not Meet Standards');
+    if (descriptor.trim()) {
+      const existing = await c.env.DB.prepare(
+        `SELECT id FROM framework_descriptors WHERE indicator_id=? AND level=?`
+      ).bind(indicatorId, level).first<any>();
+      if (existing) {
+        await c.env.DB.prepare(
+          `UPDATE framework_descriptors SET level_label=?, descriptor=? WHERE id=?`
+        ).bind(levelLabel, descriptor, existing.id).run();
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO framework_descriptors (indicator_id, level, level_label, descriptor) VALUES (?,?,?,?)`
+        ).bind(indicatorId, level, levelLabel, descriptor).run();
+      }
+      report.descriptors++;
+    }
+
+    // Optional pedagogy-library cell for this (indicator, level)
+    const evidence = splitPipe(row.evidence_signals);
+    const moves = splitPipe(row.teacher_next_moves);
+    const coaching = splitPipe(row.coaching_considerations);
+    const resources = splitPipe(row.resources).map(r => {
+      const [title, source] = r.split(' — ').map(s => s.trim());
+      return { title: title || r, source: source || '', type: 'resource' };
+    });
+    if ((row.interpretation && row.interpretation.trim()) || evidence.length || moves.length || coaching.length || resources.length || (row.feedback_starter && row.feedback_starter.trim())) {
+      await c.env.DB.prepare(
+        `INSERT INTO pedagogy_library (indicator_id, level, interpretation, evidence_signals, teacher_next_moves, coaching_considerations, resources, feedback_starter, updated_by, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+         ON CONFLICT(indicator_id, level) DO UPDATE SET
+           interpretation=excluded.interpretation,
+           evidence_signals=excluded.evidence_signals,
+           teacher_next_moves=excluded.teacher_next_moves,
+           coaching_considerations=excluded.coaching_considerations,
+           resources=excluded.resources,
+           feedback_starter=excluded.feedback_starter,
+           updated_by=excluded.updated_by,
+           updated_at=CURRENT_TIMESTAMP`
+      ).bind(
+        indicatorId, level, row.interpretation || '',
+        JSON.stringify(evidence), JSON.stringify(moves),
+        JSON.stringify(coaching), JSON.stringify(resources),
+        row.feedback_starter || '', user.id
+      ).run();
+      report.pedagogy++;
+    }
+  }
+
+  await logActivity(c.env.DB, user.id, 'import', (framework as any)?.id || null, dryRun ? 'rubric_import_dryrun' : 'rubric_import', report);
+  const summary = `${dryRun ? 'Dry run · ' : ''}mode=${report.mode} domains=${report.domains} indicators=${report.indicators} descriptors=${report.descriptors} pedagogy=${report.pedagogy} errors=${report.errors.length}` +
+    (report.errors.length ? '\nErrors:\n' + report.errors.slice(0, 20).join('\n') : '');
+  return c.redirect('/admin/import/rubric?result=' + encodeURIComponent(summary));
+});
+
+function splitPipe(s: string | undefined): string[] {
+  if (!s) return [];
+  return String(s).split('|').map(x => x.trim()).filter(Boolean);
+}
+
 export default app;
 
 // ============================== VIEWS ==============================
@@ -344,6 +767,9 @@ function AdminHome({ user, byRole, byStatus, recent }: any) {
           <Button href="/admin/schools" variant="secondary"><i class="fas fa-school"></i>Schools</Button>
           <Button href="/admin/pedagogy" variant="secondary"><i class="fas fa-book"></i>Pedagogy Library</Button>
           <Button href="/admin/framework" variant="secondary"><i class="fas fa-list-check"></i>Framework</Button>
+          <Button href="/admin/import/users" variant="secondary"><i class="fas fa-file-import"></i>Bulk Import Users</Button>
+          <Button href="/admin/import/rubric" variant="secondary"><i class="fas fa-file-import"></i>Bulk Import Rubric</Button>
+          <Button href="/reports" variant="secondary"><i class="fas fa-file-export"></i>Reports</Button>
           <Button href="/admin/district" variant="secondary"><i class="fas fa-building-columns"></i>District Info</Button>
         </div>
       </Card>
@@ -388,6 +814,13 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           <label>Initial password<input name="password" placeholder="Default: Alexander2026!" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
           <div class="md:col-span-4"><button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Create user</button></div>
         </form>
+      </Card>
+
+      <Card title="Add many users at once" icon="fas fa-file-import" class="mt-4">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <p class="text-sm text-slate-600">Need to onboard a full roster of teachers, principals, or coaches? Download the CSV template, fill it out in Excel, and upload it back — existing emails are updated, new emails are created.</p>
+          <a href="/admin/import/users" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm whitespace-nowrap"><i class="fas fa-file-import mr-1"></i>Bulk import users</a>
+        </div>
       </Card>
 
       <Card title={`All users (${rows.length})`} icon="fas fa-users" class="mt-4">
@@ -638,6 +1071,11 @@ function FrameworkPage({ user, framework, domains }: any) {
     <Layout title="Framework" user={user} activeNav="admin-framework">
       <h1 class="font-display text-2xl text-aps-navy mb-1">{(framework as any).name}</h1>
       <p class="text-slate-600 text-sm mb-4">Version {(framework as any).version} · Read-only reference</p>
+      <div class="mb-4 flex flex-wrap gap-2">
+        <a href="/admin/import/rubric" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-file-import mr-1"></i>Bulk import / replace rubric</a>
+        <a href="/admin/import/rubric/export" class="bg-white border border-aps-navy text-aps-navy px-4 py-2 rounded hover:bg-slate-50 text-sm"><i class="fas fa-file-export mr-1"></i>Export current rubric (CSV)</a>
+        <a href="/admin/pedagogy" class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded hover:bg-slate-50 text-sm"><i class="fas fa-pen-to-square mr-1"></i>Edit individual cells</a>
+      </div>
       <div class="space-y-3">
         {domains.map((d: any) => (
           <details class="bg-white rounded-lg border border-slate-200">
@@ -688,6 +1126,113 @@ function DistrictPage({ user, d, years, msg }: any) {
         <ul class="space-y-1 text-sm">
           {years.map((y: any) => <li>{y.label} {y.is_current ? <span class="text-xs text-emerald-700 ml-1">(current)</span> : null} · {formatDate(y.start_date)} – {formatDate(y.end_date)}</li>)}
         </ul>
+      </Card>
+    </Layout>
+  );
+}
+
+// ============================================================================
+// IMPORT / EXPORT VIEWS
+// ============================================================================
+
+function ImportUsersPage({ user, msg, result, schools }: any) {
+  return (
+    <Layout title="Bulk import users" user={user} activeNav="admin-import">
+      <div class="mb-4"><a href="/admin/users" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to users</a></div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1">Bulk import users</h1>
+      <p class="text-slate-600 text-sm mb-4">Add or update many teachers, principals, coaches, or administrators at once from a CSV file. Existing users (matched by email) are updated; new emails are created with a default password and forced to change it on first login.</p>
+
+      {msg && <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-800 text-sm whitespace-pre-wrap">{msg}</div>}
+      {result && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm whitespace-pre-wrap">{result}</div>}
+
+      <Card title="Step 1 — Download the template" icon="fas fa-file-csv">
+        <p class="text-sm text-slate-600 mb-3">The template already contains the exact header row the importer expects. Fill in your users, keep the column names unchanged, and save as CSV.</p>
+        <a href="/admin/import/users/template" class="inline-flex items-center gap-2 bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-download"></i>Download users_import_template.csv</a>
+        <div class="mt-4 text-xs">
+          <div class="font-semibold text-aps-navy mb-1">Columns (all required in the header, even if blank in a row):</div>
+          <ul class="list-disc pl-5 space-y-0.5 text-slate-700">
+            <li><code>first_name</code>, <code>last_name</code> — required on every row.</li>
+            <li><code>email</code> — required, unique. Matching email = update existing user.</li>
+            <li><code>role</code> — required. One of: <code>teacher</code>, <code>appraiser</code>, <code>coach</code>, <code>superintendent</code>, <code>super_admin</code>.</li>
+            <li><code>title</code> — e.g. "2nd Grade", "Elementary Principal". Optional.</li>
+            <li><code>phone</code> — optional.</li>
+            <li><code>school_name</code> — must exactly match an existing school name (case-insensitive). If blank or no match, user is created without a school assignment. Existing schools: {schools.length === 0 ? <em>(none defined yet)</em> : schools.map((s: any, i: number) => <span><code>{s.name}</code>{i < schools.length - 1 ? ', ' : ''}</span>)}.</li>
+            <li><code>password</code> — optional initial password. If blank, defaults to <code>Alexander2026!</code>. User is always forced to change on first login.</li>
+            <li><code>active</code> — <code>yes</code>/<code>no</code> (default <code>yes</code>).</li>
+          </ul>
+        </div>
+      </Card>
+
+      <Card title="Step 2 — Upload your filled-out CSV" icon="fas fa-upload" class="mt-4">
+        <form method="post" action="/admin/import/users" enctype="multipart/form-data" class="space-y-3">
+          <input type="file" name="csv" accept=".csv,text/csv" required class="block text-sm" />
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" name="dry_run" value="1" />
+            Dry run (preview counts without writing to the database)
+          </label>
+          <div class="flex items-center gap-2">
+            <button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-cloud-arrow-up mr-1"></i>Upload &amp; import</button>
+            <span class="text-xs text-slate-500">Imports are atomic per-row: errors in one row never stop the others.</span>
+          </div>
+        </form>
+      </Card>
+    </Layout>
+  );
+}
+
+function ImportRubricPage({ user, msg, result, framework }: any) {
+  return (
+    <Layout title="Bulk import rubric" user={user} activeNav="admin-import">
+      <div class="mb-4"><a href="/admin/framework" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to framework</a></div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1">Bulk import / replace rubric</h1>
+      <p class="text-slate-600 text-sm mb-4">Update the Marshall Rubric (or any district rubric) in bulk from a CSV file. Use this when the framework is revised, when you want to switch to a different evaluation model, or when authoring the full pedagogy library offline.</p>
+
+      {msg && <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-800 text-sm whitespace-pre-wrap">{msg}</div>}
+      {result && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm whitespace-pre-wrap">{result}</div>}
+
+      <Card title="Step 1 — Download a template" icon="fas fa-file-csv">
+        <p class="text-sm text-slate-600 mb-3">Download either a blank template or an export of the currently-active rubric (recommended — it has every existing domain, indicator, descriptor, and pedagogy cell pre-filled so you can edit only what changed).</p>
+        <div class="flex flex-wrap gap-2">
+          <a href="/admin/import/rubric/template" class="inline-flex items-center gap-2 bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-download"></i>Blank template CSV</a>
+          <a href="/admin/import/rubric/export" class="inline-flex items-center gap-2 bg-white border border-aps-navy text-aps-navy px-4 py-2 rounded hover:bg-slate-50 text-sm"><i class="fas fa-file-export"></i>Export current rubric ({(framework as any)?.name || 'none'})</a>
+        </div>
+        <div class="mt-4 text-xs">
+          <div class="font-semibold text-aps-navy mb-1">Row format — one row per (domain, indicator, level). Four rows per indicator is typical (levels 4, 3, 2, 1).</div>
+          <ul class="list-disc pl-5 space-y-0.5 text-slate-700">
+            <li><code>domain_code</code>, <code>domain_name</code>, <code>domain_description</code>, <code>domain_sort_order</code> — the domain this indicator belongs to.</li>
+            <li><code>indicator_code</code>, <code>indicator_name</code>, <code>indicator_prompt</code>, <code>indicator_sort_order</code> — the indicator row.</li>
+            <li><code>level</code> (1-4), <code>level_label</code>, <code>descriptor</code> — the Kim Marshall-style cell text for that level.</li>
+            <li><code>interpretation</code> — plain-language meaning of this score (optional).</li>
+            <li><code>evidence_signals</code>, <code>teacher_next_moves</code>, <code>coaching_considerations</code>, <code>resources</code> — <strong>pipe-separated lists</strong> (e.g. <code>Item 1 | Item 2 | Item 3</code>).</li>
+            <li><code>feedback_starter</code> — seed sentence used when auto-generating feedback (optional).</li>
+          </ul>
+        </div>
+      </Card>
+
+      <Card title="Step 2 — Upload your edited CSV" icon="fas fa-upload" class="mt-4">
+        <form method="post" action="/admin/import/rubric" enctype="multipart/form-data" class="space-y-3">
+          <input type="file" name="csv" accept=".csv,text/csv" required class="block text-sm" />
+          <div class="grid md:grid-cols-2 gap-3 text-sm">
+            <label>Framework name (only used when replacing)<input name="framework_name" placeholder="e.g. Kim Marshall Rubric (2026 revision)" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
+            <label>Framework version (only used when replacing)<input name="framework_version" placeholder="e.g. 2026" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
+          </div>
+          <label class="flex items-start gap-2 text-sm text-slate-700">
+            <input type="checkbox" name="replace_existing" value="1" class="mt-1" />
+            <span><strong>Create a new active framework</strong> (keeps the previous one in history for past observations). Leave unchecked to update the current framework in place.</span>
+          </label>
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" name="dry_run" value="1" />
+            Dry run (preview counts without writing to the database)
+          </label>
+          <div class="flex items-center gap-2">
+            <button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-cloud-arrow-up mr-1"></i>Upload &amp; import</button>
+            <span class="text-xs text-slate-500">Existing indicators are matched by (domain_code, indicator_code); descriptors and pedagogy cells are upserted per level.</span>
+          </div>
+        </form>
+      </Card>
+
+      <Card title="Prefer the single-cell editor?" icon="fas fa-pen-to-square" class="mt-4">
+        <p class="text-sm text-slate-600">For one-off edits to a single indicator/level cell, use the built-in editor at <a href="/admin/pedagogy" class="text-aps-blue hover:underline">Pedagogy Library</a>. The bulk importer is for large revisions.</p>
       </Card>
     </Layout>
   );

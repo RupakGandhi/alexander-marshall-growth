@@ -12,6 +12,7 @@ import coachRoutes from './routes/coach';
 import superintendentRoutes from './routes/superintendent';
 import adminRoutes from './routes/admin';
 import apiRoutes from './routes/api';
+import reportsRoutes from './routes/reports';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -31,6 +32,7 @@ app.route('/appraiser', appraiserRoutes);
 app.route('/coach', coachRoutes);
 app.route('/superintendent', superintendentRoutes);
 app.route('/admin', adminRoutes);
+app.route('/reports', reportsRoutes);
 app.route('/api', apiRoutes);
 
 // Health
