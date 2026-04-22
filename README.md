@@ -1,5 +1,16 @@
 # Alexander Public Schools — Marshall Growth Platform
 
+## 📚 Documentation
+
+Complete role-specific user guides and a full technical developer guide are in **[`docs/`](docs/README.md)**:
+
+- [Super Admin Guide](docs/USER_GUIDE_SUPER_ADMIN.md)
+- [Superintendent Guide](docs/USER_GUIDE_SUPERINTENDENT.md)
+- [Appraiser / Principal Guide](docs/USER_GUIDE_APPRAISER.md)
+- [Coach Guide](docs/USER_GUIDE_COACH.md)
+- [Teacher Guide](docs/USER_GUIDE_TEACHER.md)
+- [**Technical Developer Guide**](docs/TECHNICAL_DEVELOPER_GUIDE.md) — architecture, schema, API reference, and step-by-step replication guide
+
 ## Project Overview
 - **Name**: Alexander Public Schools — Marshall Growth Platform
 - **District**: Alexander Public School District · 601 Delaney St, Alexander, ND 58831 · 701‑828‑3334
