@@ -157,7 +157,7 @@ function SuperintendentHome({ user, kpis, schools, welcome }: any) {
               <div style={`width:${kpis.pct[2]}%`} class="bg-amber-500 text-xs text-white flex items-center justify-center">{kpis.pct[2] > 6 && `${kpis.pct[2]}% IN`}</div>
               <div style={`width:${kpis.pct[1]}%`} class="bg-red-500 text-xs text-white flex items-center justify-center">{kpis.pct[1] > 6 && `${kpis.pct[1]}% DNM`}</div>
             </div>
-            <div class="mt-2 grid grid-cols-4 gap-2 text-xs text-slate-600">
+            <div class="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-slate-600">
               <div><span class="inline-block w-3 h-3 rounded-full bg-emerald-500 mr-1"></span>Highly Effective — {kpis.distribution[4]}</div>
               <div><span class="inline-block w-3 h-3 rounded-full bg-sky-500 mr-1"></span>Effective — {kpis.distribution[3]}</div>
               <div><span class="inline-block w-3 h-3 rounded-full bg-amber-500 mr-1"></span>Improvement Necessary — {kpis.distribution[2]}</div>
@@ -168,7 +168,7 @@ function SuperintendentHome({ user, kpis, schools, welcome }: any) {
       </Card>
 
       <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">School</th><th>Grades</th><th>Teachers</th><th>Observations</th><th>Published</th><th></th></tr></thead>
           <tbody>
             {schools.map((s: any) => (
@@ -182,7 +182,7 @@ function SuperintendentHome({ user, kpis, schools, welcome }: any) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </Card>
     </Layout>
   );
@@ -207,7 +207,7 @@ function SuperintendentSchools({ user, data }: any) {
       <div class="space-y-4" data-tour="supt-schools-list">
         {data.map((d: any) => (
           <Card title={`${d.school.name} · ${d.school.grade_span || ''}`} icon="fas fa-school">
-            <table class="w-full text-sm">
+            <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
               <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>Title</th><th>Published Obs</th><th>Last Observed</th><th></th></tr></thead>
               <tbody>
                 {d.teachers.map((t: any) => (
@@ -220,7 +220,7 @@ function SuperintendentSchools({ user, data }: any) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </Card>
         ))}
       </div>
@@ -233,7 +233,7 @@ function SuperintendentTeachers({ user, rows }: any) {
     <Layout title="By Teacher" user={user} activeNav="supt-teacher">
       <h1 class="font-display text-2xl text-aps-navy mb-4">All Teachers</h1>
       <Card data-tour="supt-teachers-list">
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>School</th><th>Title</th><th>Obs</th><th>Published</th><th>Last observed</th><th></th></tr></thead>
           <tbody>
             {rows.map((t: any) => (
@@ -248,7 +248,7 @@ function SuperintendentTeachers({ user, rows }: any) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </Card>
     </Layout>
   );
@@ -263,7 +263,7 @@ function SuperintendentTeacherDetail({ user, t, observations }: any) {
 
       <Card title="Observation History" icon="fas fa-clock-rotate-left">
         {observations.length === 0 ? <p class="text-slate-500 text-sm">No observations.</p> :
-          <table class="w-full text-sm">
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Date</th><th>Type</th><th>Appraiser</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {observations.map((o: any) => (
@@ -276,7 +276,7 @@ function SuperintendentTeacherDetail({ user, t, observations }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         }
       </Card>
     </Layout>
@@ -296,7 +296,7 @@ function SuperintendentObservationView({ user, o }: any) {
 
       {(o.scores || []).length > 0 && (
         <Card title="Scores" icon="fas fa-table-list" class="mt-3">
-          <table class="w-full text-sm">
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Domain</th><th>Indicator</th><th>Rating</th></tr></thead>
             <tbody>
               {o.scores.map((s: any) => (
@@ -307,7 +307,7 @@ function SuperintendentObservationView({ user, o }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </Card>
       )}
     </Layout>

@@ -478,7 +478,7 @@ function AppraiserTeacherDetail({ user, summary, performance }: any) {
         <div class="lg:col-span-2 space-y-4">
           <Card title="Observation History" icon="fas fa-clock-rotate-left">
             {observations.length === 0 ? <p class="text-slate-500 text-sm">No observations yet.</p> :
-              <table class="w-full text-sm">
+              <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
                 <thead><tr class="text-left border-b border-slate-200 text-slate-600">
                   <th class="py-2">Date</th><th>Type</th><th>Status</th><th>Summary</th><th></th>
                 </tr></thead>
@@ -493,7 +493,7 @@ function AppraiserTeacherDetail({ user, summary, performance }: any) {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             }
           </Card>
         </div>
@@ -524,7 +524,7 @@ function AppraiserObservations({ user, rows }: any) {
       <h1 class="font-display text-2xl text-aps-navy mb-4">All Observations</h1>
       <Card data-tour="ap-obs-list">
         {rows.length === 0 ? <p class="text-slate-500 text-sm">No observations yet.</p> :
-          <table class="w-full text-sm">
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Date</th><th>Teacher</th><th>Type</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {rows.map((o: any) => (
@@ -537,7 +537,7 @@ function AppraiserObservations({ user, rows }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         }
       </Card>
     </Layout>

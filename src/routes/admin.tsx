@@ -912,7 +912,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           </select>
           <button class="bg-aps-navy text-white px-3 rounded">Filter</button>
         </form>
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Name</th><th>Email</th><th>Role</th><th>School</th><th>Last login</th><th></th></tr></thead>
           <tbody>
             {rows.map((u: any) => (
@@ -964,7 +964,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </Card>
     </Layout>
   );
@@ -1096,7 +1096,7 @@ function SchoolsPage({ user, schools, msg }: any) {
         </form>
       </Card>
       <Card title="All schools" icon="fas fa-school" class="mt-4">
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
           <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Name</th><th>Grade span</th><th>Address</th><th>Phone</th></tr></thead>
           <tbody>
             {schools.map((s: any) => (
@@ -1117,7 +1117,7 @@ function SchoolsPage({ user, schools, msg }: any) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </Card>
     </Layout>
   );
@@ -1136,7 +1136,7 @@ function PedagogyPage({ user, domains, map }: any) {
               <span class="font-display text-aps-navy">{d.name}</span>
             </summary>
             <div class="p-4 overflow-x-auto">
-              <table class="w-full text-xs">
+              <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-xs">
                 <thead><tr class="text-left text-slate-500 border-b">
                   <th class="py-2 w-48">Indicator</th>
                   {[4,3,2,1].map(lvl => <th class="py-2"><span class={`inline-block px-2 py-0.5 rounded-full border ${levelColor[lvl]}`}>{lvl} · {levelLabels[lvl]}</span></th>)}
@@ -1163,7 +1163,7 @@ function PedagogyPage({ user, domains, map }: any) {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </div>
           </details>
         ))}

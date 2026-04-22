@@ -138,7 +138,7 @@ function TeacherObservations({ user, summary }: any) {
       <h1 class="font-display text-2xl text-aps-navy mb-4">My Observations</h1>
       <Card data-tour="t-obs-list">
         {list.length === 0 ? <p class="text-slate-500 text-sm">No published observations yet.</p> :
-          <table class="w-full text-sm">
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600">
               <th class="py-2">Date</th><th>Type</th><th>Subject / Context</th><th>Appraiser</th><th>Status</th><th></th>
             </tr></thead>
@@ -154,7 +154,7 @@ function TeacherObservations({ user, summary }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         }
       </Card>
     </Layout>
@@ -216,7 +216,7 @@ function TeacherObservationView({ user, o, msg }: any) {
 
       {scores.length > 0 && (
         <Card title="Rubric Scores" icon="fas fa-table-list" class="mt-4">
-          <table class="w-full text-sm">
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Domain</th><th>Indicator</th><th>Rating</th><th>Evidence Note</th></tr></thead>
             <tbody>
               {scores.map((s) => (
@@ -228,7 +228,7 @@ function TeacherObservationView({ user, o, msg }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </Card>
       )}
 

@@ -1,14 +1,75 @@
-/* Alexander Public Schools — Marshall Growth Platform */
+/* ============================================================
+   Alexander Public Schools — Marshall Growth Platform
+   Global + Mobile/PWA styles
+   ============================================================ */
 html, body { -webkit-tap-highlight-color: transparent; }
-.line-clamp-3 { display:-webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-details > summary { list-style: none; }
+html { -webkit-text-size-adjust: 100%; }
+
+/* Respect iOS / Android safe areas (notches, home indicators) */
+.aps-body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.aps-header {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Avoid iOS zoom-in on form focus (requires font-size ≥ 16px) */
+input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="reset"]),
+select,
+textarea {
+  font-size: 16px;
+}
+@media (min-width: 640px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="reset"]),
+  select,
+  textarea {
+    font-size: 14px;
+  }
+}
+
+/* Comfortable mobile touch targets */
+@media (max-width: 640px) {
+  button, .aps-tour-nav-btn, [role="button"], a.btn,
+  input[type="submit"], input[type="button"], input[type="reset"] {
+    min-height: 44px;
+  }
+  input[type="checkbox"], input[type="radio"] {
+    width: 20px; height: 20px;
+  }
+}
+
+/* Keep wide tables usable on narrow screens */
+.aps-table-scroll, .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+.aps-table-scroll table, table { min-width: max-content; }
+@media (min-width: 1024px) {
+  .aps-table-scroll table, table.aps-table-full { min-width: 0; }
+}
+
+/* Line-clamp helper */
+.line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Details/summary arrow */
+details > summary { list-style: none; cursor: pointer; }
 details > summary::-webkit-details-marker { display: none; }
 details > summary::after { content: "›"; float: right; transition: transform .15s ease; display: inline-block; }
 details[open] > summary::after { transform: rotate(90deg); }
-canvas[id^="sig-pad"] { display: block; }
+
+canvas[id^="sig-pad"] { display: block; touch-action: none; }
+
+/* Table header styling */
 table thead th { font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Wrap long email addresses, file paths, etc. so they never blow out the layout */
+.aps-break-words { overflow-wrap: anywhere; word-break: break-word; }
+
+/* Print — hide nav / interactive UI when printing observations */
 @media print {
-  header, nav, footer, form button { display: none !important; }
+  header, nav, footer, form button,
+  .aps-install-fab, .aps-offline-banner, .aps-update-banner, .aps-ios-install-hint {
+    display: none !important;
+  }
   .bg-aps-wheat { background: white !important; }
 }
 
@@ -36,9 +97,24 @@ body.aps-tour-open { overflow: hidden; }
   padding: 16px 18px 14px;
   font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Arial, sans-serif;
   animation: apsPopIn .2s ease-out;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
 }
 .aps-tour-tooltip[data-placement="center"] {
   width: min(480px, calc(100vw - 24px));
+}
+@media (max-width: 640px) {
+  /* On phones, keep the tooltip centered at the bottom — readable, not covering */
+  .aps-tour-tooltip {
+    position: fixed !important;
+    left: 8px !important; right: 8px !important;
+    bottom: calc(8px + env(safe-area-inset-bottom)) !important;
+    top: auto !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: 70vh;
+  }
+  .aps-tour-tooltip[data-placement="center"] { top: 50% !important; transform: translateY(-50%); bottom: auto !important; }
 }
 .aps-tour-head {
   display: flex; align-items: center; gap: 8px;
@@ -53,15 +129,14 @@ body.aps-tour-open { overflow: hidden; }
 .aps-tour-close {
   margin-left: auto; background: transparent; border: none; font-size: 22px; line-height: 1;
   color: #64748b; cursor: pointer; padding: 0 4px;
+  min-width: 32px; min-height: 32px;
 }
 .aps-tour-close:hover { color: #0b2545; }
 .aps-tour-title {
   font-family: Georgia, 'Times New Roman', serif;
   font-size: 20px; color: #0b2545; margin: 2px 0 6px;
 }
-.aps-tour-body {
-  font-size: 14px; line-height: 1.55; color: #1e293b;
-}
+.aps-tour-body { font-size: 14px; line-height: 1.55; color: #1e293b; }
 .aps-tour-body p { margin: 0 0 8px; }
 .aps-tour-body ul { margin: 4px 0 8px; padding-left: 20px; }
 .aps-tour-body code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
@@ -82,11 +157,11 @@ body.aps-tour-open { overflow: hidden; }
 }
 .aps-tour-foot {
   display: flex; gap: 6px; justify-content: space-between; align-items: center;
-  margin-top: 2px;
+  margin-top: 2px; flex-wrap: wrap;
 }
 .aps-tour-btn {
-  padding: 7px 13px; border-radius: 6px; font-size: 13px; font-weight: 600;
-  cursor: pointer; border: none;
+  padding: 9px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: none; min-height: 40px;
   transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
 .aps-tour-btn-primary { background: #0b2545; color: #fff; }
@@ -96,16 +171,21 @@ body.aps-tour-open { overflow: hidden; }
 .aps-tour-btn[disabled] { opacity: .35; cursor: not-allowed; }
 
 .aps-tour-toast {
-  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: calc(28px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   background: #0b2545; color: #fff; padding: 12px 18px; border-radius: 10px;
   box-shadow: 0 10px 30px rgba(2,6,23,0.3); font-size: 14px;
   z-index: 10001; transition: opacity .6s ease;
+  max-width: calc(100vw - 24px);
 }
 
 @keyframes apsFadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes apsPopIn {
   from { opacity: 0; transform: translateY(6px) scale(.97); }
-  to   { opacity: 1; transform: translateY(0)  scale(1); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes apsSlideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* The "Guided Tour" button in the nav — subtle gold accent so it's always findable */
@@ -114,10 +194,110 @@ body.aps-tour-open { overflow: hidden; }
   padding: 6px 12px; border-radius: 999px; font-size: 13px;
   border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
   transition: background .15s ease, transform .05s ease;
+  min-height: 36px;
 }
 .aps-tour-nav-btn:hover { background: #e4b93a; }
 .aps-tour-nav-btn:active { transform: scale(.97); }
+@media (max-width: 640px) {
+  .aps-tour-nav-btn { padding: 6px 10px; }
+}
 
-@media print {
-  .aps-tour-overlay, .aps-tour-highlight, .aps-tour-tooltip, .aps-tour-nav-btn { display: none !important; }
+/* ============================================================
+   PWA Install FAB (shown when beforeinstallprompt fires)
+   ============================================================ */
+.aps-install-fab {
+  position: fixed;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 9996;
+  background: #0b2545; color: #fff;
+  border: none; border-radius: 999px;
+  padding: 12px 18px 12px 14px;
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.35);
+  animation: apsSlideUp .35s ease-out;
+  min-height: 44px;
+}
+.aps-install-fab:hover { background: #13315c; }
+.aps-install-fab i { color: #c9a227; font-size: 15px; }
+.aps-install-fab .aps-install-x {
+  margin-left: 2px; color: #c9a227; font-weight: 900;
+  padding: 0 6px; border-left: 1px solid rgba(255,255,255,0.2);
+  cursor: pointer;
+}
+.aps-install-fab .aps-install-x:hover { color: #fff; }
+
+/* iOS "Add to Home Screen" hint card */
+.aps-ios-install-hint {
+  position: fixed;
+  left: calc(12px + env(safe-area-inset-left));
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  background: #0b2545; color: #fff;
+  padding: 14px 18px; border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(2, 6, 23, 0.4);
+  font-size: 14px; line-height: 1.5;
+  z-index: 9995;
+  display: flex; align-items: center; gap: 12px;
+  animation: apsSlideUp .35s ease-out;
+}
+.aps-ios-install-hint strong { color: #c9a227; }
+.aps-ios-install-hint i { margin: 0 3px; }
+.aps-ios-install-hint .aps-ios-x {
+  margin-left: auto; background: transparent; color: #c9a227;
+  border: none; font-size: 22px; font-weight: 900; cursor: pointer;
+  min-width: 32px; min-height: 32px;
+}
+
+/* Offline banner */
+.aps-offline-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  background: #b91c1c; color: #fff;
+  font-size: 13px; font-weight: 500;
+  text-align: center;
+  z-index: 10002;
+  animation: apsSlideUp .3s ease-out;
+}
+.aps-offline-banner i { margin-right: 6px; }
+
+/* "A new version is available — refresh" banner */
+.aps-update-banner {
+  position: fixed;
+  left: 50%; transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  background: #0b2545; color: #fff;
+  padding: 10px 14px; border-radius: 999px;
+  font-size: 13px;
+  display: inline-flex; align-items: center; gap: 10px;
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.35);
+  z-index: 10001;
+  max-width: calc(100vw - 24px);
+  animation: apsSlideUp .3s ease-out;
+}
+.aps-update-banner .aps-update-btn {
+  background: #c9a227; color: #0b2545;
+  border: none; padding: 6px 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; cursor: pointer;
+  min-height: 32px;
+}
+.aps-update-banner .aps-update-btn:hover { background: #e4b93a; }
+
+/* ============================================================
+   Multi-select helper (stacked chips on narrow screens)
+   ============================================================ */
+select[multiple] {
+  width: 100%;
+  max-width: 100%;
+  min-height: 140px;
+}
+
+/* Standalone (installed PWA) tweaks */
+@media (display-mode: standalone) {
+  .aps-install-fab, .aps-ios-install-hint { display: none !important; }
+  /* A little extra bottom padding so last content isn't hidden by home indicator */
+  body { padding-bottom: max(env(safe-area-inset-bottom), 8px); }
 }

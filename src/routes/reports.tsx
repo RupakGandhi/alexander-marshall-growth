@@ -600,10 +600,10 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
           </div>
 
           {/* Date range + types */}
-          <div class="grid md:grid-cols-4 gap-3 mt-4 text-sm">
-            <label>From<input type="date" name="from" value={f.from || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
-            <label>To<input type="date" name="to" value={f.to || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
-            <fieldset class="md:col-span-2">
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mt-4 text-sm">
+            <label class="block"><span class="block font-medium text-slate-700 mb-1">From</span><input type="date" name="from" value={f.from || ''} class="w-full border border-slate-300 rounded px-2 py-2" /></label>
+            <label class="block"><span class="block font-medium text-slate-700 mb-1">To</span><input type="date" name="to" value={f.to || ''} class="w-full border border-slate-300 rounded px-2 py-2" /></label>
+            <fieldset class="sm:col-span-2 md:col-span-2">
               <legend class="font-medium text-slate-700">Observation type</legend>
               <div class="mt-1 flex flex-wrap gap-3">
                 {[
@@ -699,7 +699,7 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
       <Card title="Matching observations (preview)" icon="fas fa-list" class="mt-4">
         {observations.length === 0 ? <p class="text-slate-500 text-sm">No observations match the current filters. Adjust your selections above and click <strong>Apply filters</strong>.</p> :
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
               <thead><tr class="text-left border-b border-slate-200 text-slate-600">
                 <th class="py-2">Date</th><th>Teacher</th><th>School</th><th>Type</th><th>Appraiser</th><th>Status</th><th></th>
               </tr></thead>
@@ -723,7 +723,7 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
                   );
                 })}
               </tbody>
-            </table>
+            </table></div>
           </div>
         }
         {observations.length > 100 && <p class="text-xs text-slate-500 mt-2">Showing 100 of {observations.length} — exports include all matching rows.</p>}

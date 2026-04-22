@@ -42,11 +42,22 @@ export function Layout(props: { title: string; user: User | null; children: any;
     <html lang="en">
       <head>
         <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=yes" />
         <meta name="theme-color" content="#0b2545" />
+        <meta name="color-scheme" content="light" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="APS Growth" />
+        <meta name="application-name" content="APS Growth" />
+        <meta name="format-detection" content="telephone=yes" />
+        <meta name="msapplication-TileColor" content="#0b2545" />
         <link rel="manifest" href="/static/manifest.json" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png" />
+        <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png" />
+        <link rel="shortcut icon" href="/static/favicon.ico" />
+        <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
         <title>{title} · Alexander Public Schools — Marshall Growth Platform</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
@@ -59,10 +70,10 @@ export function Layout(props: { title: string; user: User | null; children: any;
           }}
         />
       </head>
-      <body class="bg-aps-wheat min-h-screen font-sans text-slate-800">
+      <body class="bg-aps-wheat min-h-screen font-sans text-slate-800 aps-body">
         {nav}
-        <main class="max-w-7xl mx-auto px-4 py-6">{children}</main>
-        <footer class="max-w-7xl mx-auto px-4 py-6 text-xs text-slate-500 flex flex-wrap gap-3 justify-between items-center">
+        <main class="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">{children}</main>
+        <footer class="max-w-7xl mx-auto px-3 sm:px-4 py-6 text-xs text-slate-500 flex flex-wrap gap-2 sm:gap-3 justify-between items-center">
           <div>© {new Date().getFullYear()} Alexander Public School District · 601 Delaney St, Alexander, ND 58831 · 701-828-3334</div>
           <div>Marshall Growth Platform v1.0</div>
         </footer>
@@ -83,61 +94,114 @@ export function Layout(props: { title: string; user: User | null; children: any;
 function navFor(user: User, active?: string) {
   const nav = navItems(user.role);
   return (
-    <header class="bg-aps-navy text-white shadow-md sticky top-0 z-40">
-      <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
-        <a href={roleHomeUrl(user.role)} class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-full bg-aps-gold text-aps-navy font-display font-bold flex items-center justify-center text-lg">A</div>
-          <div class="leading-tight">
-            <div class="font-display text-lg">Alexander Public Schools</div>
-            <div class="text-xs text-aps-sky">Marshall Growth Platform</div>
+    <header class="bg-aps-navy text-white shadow-md sticky top-0 z-40 aps-header">
+      <div class="max-w-7xl mx-auto px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-4">
+        {/* Mobile hamburger (left) */}
+        <button
+          type="button"
+          id="aps-mobile-nav-btn"
+          class="md:hidden w-10 h-10 flex items-center justify-center rounded hover:bg-aps-blue focus:outline-none focus:ring-2 focus:ring-white"
+          aria-label="Open navigation menu"
+          aria-haspopup="true"
+          aria-expanded="false"
+          aria-controls="aps-mobile-nav"
+          onclick="window.toggleMobileNav && window.toggleMobileNav(event)"
+        >
+          <i class="fas fa-bars text-lg"></i>
+        </button>
+
+        {/* Logo + title */}
+        <a href={roleHomeUrl(user.role)} class="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 md:flex-initial">
+          <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-aps-gold text-aps-navy font-display font-bold flex items-center justify-center text-base sm:text-lg flex-shrink-0">A</div>
+          <div class="leading-tight min-w-0">
+            <div class="font-display text-sm sm:text-lg truncate">Alexander Public Schools</div>
+            <div class="text-[10px] sm:text-xs text-aps-sky truncate">Marshall Growth Platform</div>
           </div>
         </a>
-        <nav class="hidden md:flex items-center gap-1" data-tour="main-nav">
+
+        {/* Desktop nav */}
+        <nav class="hidden md:flex items-center gap-1 flex-wrap" data-tour="main-nav">
           {nav.map((item) => (
-            <a href={item.href} class={`px-3 py-2 rounded text-sm hover:bg-aps-blue ${active === item.key ? 'bg-aps-blue' : ''}`}>
-              <i class={`${item.icon} mr-2`}></i>{item.label}
+            <a href={item.href} class={`px-2 lg:px-3 py-2 rounded text-xs lg:text-sm hover:bg-aps-blue whitespace-nowrap ${active === item.key ? 'bg-aps-blue' : ''}`}>
+              <i class={`${item.icon} mr-1 lg:mr-2`}></i>{item.label}
             </a>
           ))}
         </nav>
-        <div class="flex items-center gap-3">
-          {/* Guided Tour launcher — visible on every page, every role */}
+
+        <div class="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+          {/* Guided Tour launcher — desktop and tablet */}
           <button
             type="button"
             class="aps-tour-nav-btn hidden sm:inline-flex"
             title="Open the guided walkthrough for your role"
             onclick="window.APSGuidedTour && window.APSGuidedTour.start()"
           >
-            <i class="fas fa-compass"></i>Guided Tour
+            <i class="fas fa-compass"></i><span class="hidden lg:inline">Guided Tour</span>
           </button>
-          <div class="text-right hidden sm:block">
-            <div class="text-sm font-medium">{user.first_name} {user.last_name}</div>
-            <div class="text-xs text-aps-sky">{roleLabel(user.role)}</div>
+
+          {/* User name — hide on small screens */}
+          <div class="text-right hidden lg:block">
+            <div class="text-sm font-medium truncate max-w-[10rem]">{user.first_name} {user.last_name}</div>
+            <div class="text-xs text-aps-sky truncate max-w-[10rem]">{roleLabel(user.role)}</div>
           </div>
+
+          {/* User avatar + menu */}
           <div class="relative" id="user-menu-root">
-            <button type="button" id="user-menu-btn" onclick="window.toggleUserMenu && window.toggleUserMenu(event)" class="w-9 h-9 rounded-full bg-aps-sky text-aps-navy font-bold flex items-center justify-center hover:ring-2 hover:ring-white focus:outline-none focus:ring-2 focus:ring-white" aria-label="User menu" aria-haspopup="true" aria-expanded="false">
+            <button
+              type="button"
+              id="user-menu-btn"
+              onclick="window.toggleUserMenu && window.toggleUserMenu(event)"
+              class="w-10 h-10 rounded-full bg-aps-sky text-aps-navy font-bold flex items-center justify-center hover:ring-2 hover:ring-white focus:outline-none focus:ring-2 focus:ring-white"
+              aria-label="User menu" aria-haspopup="true" aria-expanded="false"
+            >
               {user.first_name[0]}{user.last_name[0]}
             </button>
-            <div id="user-menu-panel" class="absolute right-0 mt-1 w-56 bg-white text-slate-800 rounded-md shadow-xl hidden z-50 border border-slate-200">
-              <div class="px-4 py-2 border-b border-slate-200">
-                <div class="text-sm font-semibold text-aps-navy">{user.first_name} {user.last_name}</div>
+            <div id="user-menu-panel" class="absolute right-0 mt-1 w-64 sm:w-56 bg-white text-slate-800 rounded-md shadow-xl hidden z-50 border border-slate-200">
+              <div class="px-4 py-3 border-b border-slate-200">
+                <div class="text-sm font-semibold text-aps-navy truncate">{user.first_name} {user.last_name}</div>
                 <div class="text-xs text-slate-500">{roleLabel(user.role)}</div>
               </div>
-              <button type="button" class="block w-full text-left px-4 py-2 hover:bg-slate-100 text-sm" onclick="window.APSGuidedTour && window.APSGuidedTour.start()">
-                <i class="fas fa-compass mr-2"></i>Guided Tour
+              <button type="button" class="block w-full text-left px-4 py-3 hover:bg-slate-100 text-sm min-h-[44px]" onclick="window.APSGuidedTour && window.APSGuidedTour.start()">
+                <i class="fas fa-compass mr-2 w-4 text-aps-navy"></i>Guided Tour
               </button>
-              <a class="block px-4 py-2 hover:bg-slate-100 text-sm" href="/profile"><i class="fas fa-user-gear mr-2"></i>Profile &amp; Password</a>
-              <form method="post" action="/logout"><button class="block w-full text-left px-4 py-2 hover:bg-slate-100 text-sm text-red-700"><i class="fas fa-sign-out-alt mr-2"></i>Sign out</button></form>
+              <a class="block px-4 py-3 hover:bg-slate-100 text-sm min-h-[44px]" href="/profile">
+                <i class="fas fa-user-gear mr-2 w-4 text-aps-navy"></i>Profile &amp; Password
+              </a>
+              <form method="post" action="/logout">
+                <button class="block w-full text-left px-4 py-3 hover:bg-slate-100 text-sm text-red-700 min-h-[44px]">
+                  <i class="fas fa-sign-out-alt mr-2 w-4"></i>Sign out
+                </button>
+              </form>
             </div>
           </div>
         </div>
       </div>
-      <nav class="md:hidden bg-aps-blue text-white overflow-x-auto">
-        <div class="flex gap-1 px-2 py-1">
+
+      {/* Mobile drawer menu */}
+      <nav
+        id="aps-mobile-nav"
+        class="md:hidden hidden bg-aps-blue text-white border-t border-aps-navy/30"
+        aria-label="Main navigation"
+        data-tour="main-nav"
+      >
+        <div class="max-w-7xl mx-auto px-2 py-2 grid grid-cols-1 gap-0.5">
           {nav.map((item) => (
-            <a href={item.href} class={`whitespace-nowrap px-3 py-2 rounded text-sm ${active === item.key ? 'bg-aps-navy' : ''}`}>
-              <i class={`${item.icon} mr-1`}></i>{item.label}
+            <a
+              href={item.href}
+              class={`flex items-center gap-3 px-4 py-3 rounded text-sm min-h-[44px] ${active === item.key ? 'bg-aps-navy font-semibold' : 'hover:bg-aps-navy/50'}`}
+            >
+              <i class={`${item.icon} w-5 text-aps-sky`}></i>
+              <span>{item.label}</span>
             </a>
           ))}
+          <button
+            type="button"
+            class="flex items-center gap-3 px-4 py-3 rounded text-sm min-h-[44px] hover:bg-aps-navy/50 text-left"
+            onclick="window.APSGuidedTour && window.APSGuidedTour.start()"
+          >
+            <i class="fas fa-compass w-5 text-aps-gold"></i>
+            <span>Guided Tour</span>
+          </button>
         </div>
       </nav>
     </header>
