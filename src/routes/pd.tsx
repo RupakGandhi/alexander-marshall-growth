@@ -17,6 +17,7 @@ import { Layout, Card, Button } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import { logActivity } from '../lib/db';
 import { formatDate, formatDateTime, escapeHtml } from '../lib/ui';
+import { buildCsv, parseCsvAsObjects } from '../lib/csv';
 import {
   teacherEnrollments, getEnrollment, getReflections, saveReflection,
   advanceEnrollment, submitDeliverable, verifyDeliverable,
@@ -253,7 +254,59 @@ reviewPd.get('/:id', async (c) => {
   const refMap: Record<string, string> = {};
   for (const r of reflections) refMap[r.phase] = r.body;
   const teacher = await c.env.DB.prepare(`SELECT first_name, last_name, title FROM users WHERE id = ?`).bind(e.teacher_id).first<any>();
-  return c.html(<ReviewPdDetail user={user} e={e} teacher={teacher} reflections={refMap} msg={c.req.query('msg')} />);
+  // April 2026 upgrade: deliverable rubric criteria + prior scores.  Criteria
+  // are admin-editable in the pd_deliverable_rubric_criteria table; scores
+  // are captured once per (enrollment, criterion) in pd_deliverable_scores.
+  const criteria = await c.env.DB.prepare(
+    `SELECT id, code, label, description, weight, sort_order
+       FROM pd_deliverable_rubric_criteria
+       WHERE is_active = 1
+       ORDER BY sort_order, id`
+  ).all();
+  const scores = await c.env.DB.prepare(
+    `SELECT criterion_id, level, note FROM pd_deliverable_scores WHERE enrollment_id = ?`
+  ).bind(id).all();
+  const scoreMap: Record<number, any> = {};
+  for (const s of (scores.results as any[]) || []) scoreMap[s.criterion_id] = s;
+  return c.html(<ReviewPdDetail
+    user={user} e={e} teacher={teacher} reflections={refMap}
+    criteria={(criteria.results as any[]) || []}
+    scoreMap={scoreMap}
+    msg={c.req.query('msg')}
+  />);
+});
+
+// April 2026 upgrade: save per-criterion deliverable rubric score.
+// Idempotent upsert so supervisors can adjust their scoring before verifying.
+reviewPd.post('/:id/rubric', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const e = await getEnrollment(c.env.DB, id);
+  if (!e) return c.text('Not found', 404);
+  if (user.role !== 'super_admin') {
+    const ok = await c.env.DB.prepare(
+      `SELECT 1 FROM assignments WHERE teacher_id = ? AND staff_id = ? AND active = 1 LIMIT 1`
+    ).bind(e.teacher_id, user.id).first();
+    if (!ok) return c.text('Forbidden', 403);
+  }
+  const body = await c.req.parseBody();
+  const criterionId = Number(body.criterion_id);
+  const level = Number(body.level);
+  const note = String(body.note || '').trim() || null;
+  if (!criterionId || !(level >= 1 && level <= 4)) {
+    return c.redirect(`/pd/review/${id}?msg=${encodeURIComponent('Pick a 1-4 rating for this criterion.')}`);
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO pd_deliverable_scores (enrollment_id, criterion_id, level, note, scored_by)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(enrollment_id, criterion_id) DO UPDATE SET
+       level = excluded.level,
+       note  = excluded.note,
+       scored_by = excluded.scored_by,
+       scored_at = CURRENT_TIMESTAMP`
+  ).bind(id, criterionId, level, note, user.id).run();
+  await logActivity(c.env.DB, user.id, 'pd_enrollment', id, 'rubric_score');
+  return c.redirect(`/pd/review/${id}?msg=${encodeURIComponent('Rubric score saved')}#rubric`);
 });
 
 reviewPd.post('/:id/verify', async (c) => {
@@ -320,6 +373,41 @@ adminPd.get('/new', async (c) => {
   return c.html(<AdminPdEditor user={user} indicators={(indicators.results as any[]) || []} m={{}} />);
 });
 
+// April 2026 upgrade: CSV export of every PD module — including the four
+// enrichment fields — so admins can audit, bulk-edit in Excel, and re-import.
+// (Registered BEFORE /:id so the literal path wins.)
+adminPd.get('/export-csv', async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT m.id, d.code AS domain_code, i.code AS indicator_code, i.name AS indicator_name,
+            m.target_level, m.title, m.subtitle, m.est_minutes, m.research_basis,
+            m.learn_content, m.practice_content, m.apply_content,
+            m.deliverable_prompt, m.deliverable_rubric, m.resources,
+            m.modeling_examples, m.collaboration_prompts,
+            m.family_engagement_notes, m.contextual_differentiation,
+            m.is_active
+       FROM pd_modules m
+       JOIN framework_indicators i ON i.id = m.indicator_id
+       JOIN framework_domains d ON d.id = i.domain_id
+       ORDER BY d.sort_order, i.sort_order, m.target_level`
+  ).all();
+  const headers = [
+    'id','domain_code','indicator_code','indicator_name',
+    'target_level','title','subtitle','est_minutes','research_basis',
+    'learn_content','practice_content','apply_content',
+    'deliverable_prompt','deliverable_rubric','resources',
+    'modeling_examples','collaboration_prompts',
+    'family_engagement_notes','contextual_differentiation','is_active',
+  ];
+  const data = (rows.results as any[]).map((r) => headers.map((h) => (r as any)[h] ?? ''));
+  const csv = buildCsv(headers, data);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="pd_modules_${new Date().toISOString().slice(0,10)}.csv"`,
+    },
+  });
+});
+
 adminPd.get('/:id', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
@@ -349,6 +437,12 @@ adminPd.post('/save', async (c) => {
   const deliverable_prompt = String(body.deliverable_prompt || '').trim();
   const deliverable_rubric = String(body.deliverable_rubric || '').trim() || null;
   const resources = String(body.resources || '').trim() || null;
+  // April 2026 enrichments — all optional, all stored as plain text so admins
+  // can edit them directly without touching any code.
+  const modeling_examples = String(body.modeling_examples || '').trim() || null;
+  const collaboration_prompts = String(body.collaboration_prompts || '').trim() || null;
+  const family_engagement_notes = String(body.family_engagement_notes || '').trim() || null;
+  const contextual_differentiation = String(body.contextual_differentiation || '').trim() || null;
   const is_active = body.is_active ? 1 : 0;
   if (!indicator_id || !title || !learn || !practice || !apply || !deliverable_prompt) {
     return c.redirect('/admin/pd?msg=' + encodeURIComponent('Title, indicator, target level, and all three phases are required.'));
@@ -357,20 +451,28 @@ adminPd.post('/save', async (c) => {
     await c.env.DB.prepare(
       `UPDATE pd_modules SET indicator_id=?, target_level=?, title=?, subtitle=?, est_minutes=?,
          research_basis=?, learn_content=?, practice_content=?, apply_content=?,
-         deliverable_prompt=?, deliverable_rubric=?, resources=?, is_active=?, updated_at=CURRENT_TIMESTAMP
+         deliverable_prompt=?, deliverable_rubric=?, resources=?,
+         modeling_examples=?, collaboration_prompts=?, family_engagement_notes=?, contextual_differentiation=?,
+         is_active=?, updated_at=CURRENT_TIMESTAMP
        WHERE id=?`
     ).bind(indicator_id, target_level, title, subtitle, est, research, learn, practice, apply,
-           deliverable_prompt, deliverable_rubric, resources, is_active, id).run();
+           deliverable_prompt, deliverable_rubric, resources,
+           modeling_examples, collaboration_prompts, family_engagement_notes, contextual_differentiation,
+           is_active, id).run();
     await logActivity(c.env.DB, user.id, 'pd_module', id, 'update');
     return c.redirect('/admin/pd?msg=' + encodeURIComponent(`Updated "${title}"`));
   } else {
     const ins = await c.env.DB.prepare(
       `INSERT INTO pd_modules (indicator_id, target_level, title, subtitle, est_minutes,
          research_basis, learn_content, practice_content, apply_content,
-         deliverable_prompt, deliverable_rubric, resources, is_active, created_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         deliverable_prompt, deliverable_rubric, resources,
+         modeling_examples, collaboration_prompts, family_engagement_notes, contextual_differentiation,
+         is_active, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(indicator_id, target_level, title, subtitle, est, research, learn, practice, apply,
-           deliverable_prompt, deliverable_rubric, resources, is_active, user.id).run();
+           deliverable_prompt, deliverable_rubric, resources,
+           modeling_examples, collaboration_prompts, family_engagement_notes, contextual_differentiation,
+           is_active, user.id).run();
     const newId = Number((ins.meta as any)?.last_row_id || 0);
     await logActivity(c.env.DB, user.id, 'pd_module', newId, 'create');
     return c.redirect('/admin/pd?msg=' + encodeURIComponent(`Created "${title}"`));
@@ -383,6 +485,134 @@ adminPd.post('/:id/delete', async (c) => {
   await c.env.DB.prepare(`DELETE FROM pd_modules WHERE id = ?`).bind(id).run();
   await logActivity(c.env.DB, user.id, 'pd_module', id, 'delete');
   return c.redirect('/admin/pd?msg=Deleted');
+});
+
+// Bulk CSV import for PD modules.  The CSV must include id, indicator_code,
+// domain_code, and target_level; everything else is updated if the matching
+// module exists, and a new row is inserted if id is blank.
+adminPd.post('/import-csv', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const file = body.csv as unknown as File | undefined;
+  if (!file || typeof (file as any).text !== 'function') {
+    return c.redirect('/admin/pd?msg=' + encodeURIComponent('No CSV file uploaded.'));
+  }
+  const text = await (file as any).text();
+  const { rows } = parseCsvAsObjects(text);
+  let updated = 0; let created = 0; let skipped = 0;
+  for (const row of rows) {
+    const id = Number(row.id || 0);
+    const domainCode = String(row.domain_code || '').trim().toUpperCase();
+    const indicatorCode = String(row.indicator_code || '').trim().toLowerCase();
+    const targetLevel = Number(row.target_level || 0);
+    const title = String(row.title || '').trim();
+    if (!title || !indicatorCode || !domainCode || !targetLevel) { skipped++; continue; }
+    const indicator = await c.env.DB.prepare(
+      `SELECT i.id FROM framework_indicators i
+       JOIN framework_domains d ON d.id = i.domain_id
+       WHERE LOWER(i.code) = ? AND UPPER(d.code) = ? LIMIT 1`
+    ).bind(indicatorCode, domainCode).first<any>();
+    if (!indicator) { skipped++; continue; }
+    const fields = {
+      indicator_id: indicator.id,
+      target_level: targetLevel,
+      title,
+      subtitle: row.subtitle || null,
+      est_minutes: Number(row.est_minutes || 45),
+      research_basis: row.research_basis || null,
+      learn_content: row.learn_content || '',
+      practice_content: row.practice_content || '',
+      apply_content: row.apply_content || '',
+      deliverable_prompt: row.deliverable_prompt || '',
+      deliverable_rubric: row.deliverable_rubric || null,
+      resources: row.resources || null,
+      modeling_examples: row.modeling_examples || null,
+      collaboration_prompts: row.collaboration_prompts || null,
+      family_engagement_notes: row.family_engagement_notes || null,
+      contextual_differentiation: row.contextual_differentiation || null,
+      is_active: String(row.is_active || '1') === '0' ? 0 : 1,
+    } as any;
+    if (id) {
+      await c.env.DB.prepare(
+        `UPDATE pd_modules SET indicator_id=?, target_level=?, title=?, subtitle=?, est_minutes=?,
+           research_basis=?, learn_content=?, practice_content=?, apply_content=?,
+           deliverable_prompt=?, deliverable_rubric=?, resources=?,
+           modeling_examples=?, collaboration_prompts=?, family_engagement_notes=?, contextual_differentiation=?,
+           is_active=?, updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(
+        fields.indicator_id, fields.target_level, fields.title, fields.subtitle, fields.est_minutes,
+        fields.research_basis, fields.learn_content, fields.practice_content, fields.apply_content,
+        fields.deliverable_prompt, fields.deliverable_rubric, fields.resources,
+        fields.modeling_examples, fields.collaboration_prompts, fields.family_engagement_notes, fields.contextual_differentiation,
+        fields.is_active, id,
+      ).run();
+      updated++;
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO pd_modules (indicator_id, target_level, title, subtitle, est_minutes,
+           research_basis, learn_content, practice_content, apply_content,
+           deliverable_prompt, deliverable_rubric, resources,
+           modeling_examples, collaboration_prompts, family_engagement_notes, contextual_differentiation,
+           is_active, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        fields.indicator_id, fields.target_level, fields.title, fields.subtitle, fields.est_minutes,
+        fields.research_basis, fields.learn_content, fields.practice_content, fields.apply_content,
+        fields.deliverable_prompt, fields.deliverable_rubric, fields.resources,
+        fields.modeling_examples, fields.collaboration_prompts, fields.family_engagement_notes, fields.contextual_differentiation,
+        fields.is_active, user.id,
+      ).run();
+      created++;
+    }
+  }
+  await logActivity(c.env.DB, user.id, 'pd_module_bulk', 0, `import: ${updated} updated, ${created} created, ${skipped} skipped`);
+  return c.redirect('/admin/pd?msg=' + encodeURIComponent(`Import complete: ${updated} updated · ${created} created · ${skipped} skipped.`));
+});
+
+// ==========================================================================
+// C2. PD DELIVERABLE RUBRIC CRITERIA EDITOR  /admin/pd-rubric
+// April 2026 upgrade — admins can rename labels, rewrite descriptions,
+// tweak weights, or deactivate criteria without touching code.
+// ==========================================================================
+export const adminPdRubric = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+adminPdRubric.use('*', requireRole(['super_admin']));
+
+adminPdRubric.get('/', async (c) => {
+  const user = c.get('user')!;
+  const rows = await c.env.DB.prepare(
+    `SELECT * FROM pd_deliverable_rubric_criteria ORDER BY sort_order, id`
+  ).all();
+  return c.html(<AdminPdRubric user={user} rows={(rows.results as any[]) || []} msg={c.req.query('msg')} />);
+});
+
+adminPdRubric.post('/save', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const id = Number(body.id || 0);
+  const code = String(body.code || '').trim();
+  const label = String(body.label || '').trim();
+  const description = String(body.description || '').trim();
+  const weight = Math.max(1, Number(body.weight || 1));
+  const sort_order = Number(body.sort_order || 0);
+  const is_active = body.is_active ? 1 : 0;
+  if (!code || !label || !description) {
+    return c.redirect('/admin/pd-rubric?msg=' + encodeURIComponent('Code, label, and description are all required.'));
+  }
+  if (id) {
+    await c.env.DB.prepare(
+      `UPDATE pd_deliverable_rubric_criteria
+         SET code=?, label=?, description=?, weight=?, sort_order=?, is_active=?, updated_by=?, updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`
+    ).bind(code, label, description, weight, sort_order, is_active, user.id, id).run();
+  } else {
+    await c.env.DB.prepare(
+      `INSERT INTO pd_deliverable_rubric_criteria (code, label, description, weight, sort_order, is_active, updated_by)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(code, label, description, weight, sort_order, is_active, user.id).run();
+  }
+  await logActivity(c.env.DB, user.id, 'pd_rubric_criterion', id || 0, id ? 'update' : 'create');
+  return c.redirect('/admin/pd-rubric?msg=' + encodeURIComponent('Saved'));
 });
 
 // ==========================================================================
@@ -696,6 +926,7 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
               </div>
             </LearnStep>
 
+            <EnrichmentBlock e={e} phase="learn" />
             <PhaseFooter e={e} phase="learn" nextLabel="Mark learn complete" nextStatus="learn_done" doneStamp={e.learn_done_at} />
           </div>
         )}
@@ -775,6 +1006,7 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
               </div>
             </LearnStep>
 
+            <EnrichmentBlock e={e} phase="practice" />
             <PhaseFooter e={e} phase="practice" nextLabel="Mark practice complete" nextStatus="practice_done" doneStamp={e.practice_done_at} />
           </div>
         )}
@@ -919,6 +1151,73 @@ function StepAnswer({ phase, step, placeholder, value, rows }: { phase: string; 
   );
 }
 
+// --------------------------------------------------------------------------
+// EnrichmentBlock (April 2026 upgrade)
+// --------------------------------------------------------------------------
+// Renders the four admin-editable enrichment fields (modeling_examples,
+// collaboration_prompts, family_engagement_notes, contextual_differentiation)
+// below each phase.  Every field is optional — fields that are null or empty
+// are silently skipped so modules whose admins haven't filled them in yet
+// continue to look clean.  All content lives in pd_modules (DB) and is fully
+// editable via /admin/pd/:id — there is NO hard-coded text here.
+function EnrichmentBlock({ e, phase }: { e: any; phase: 'learn' | 'practice' | 'apply' }) {
+  // On the Learn phase we show modeling + differentiation (so teachers
+  // visualize what good looks like BEFORE they try it).  On Practice we
+  // surface collaboration prompts (rehearsal with a colleague).  On Apply
+  // we surface family-engagement guidance (since Apply is where student +
+  // family impact shows up).  Admins can override this allocation by
+  // simply editing the content; we just pick which slot to *render* in.
+  const parts: { title: string; icon: string; body: string }[] = [];
+  if (phase === 'learn') {
+    if (e.modeling_examples) parts.push({
+      title: 'Modeling example — what good looks like',
+      icon: 'fa-theater-masks',
+      body: e.modeling_examples,
+    });
+    if (e.contextual_differentiation) parts.push({
+      title: 'Elementary vs. secondary — pick the version that fits',
+      icon: 'fa-arrows-split-up-and-left',
+      body: e.contextual_differentiation,
+    });
+  } else if (phase === 'practice') {
+    if (e.collaboration_prompts) parts.push({
+      title: 'Collaborate — rehearse with a colleague',
+      icon: 'fa-users',
+      body: e.collaboration_prompts,
+    });
+    if (e.modeling_examples) parts.push({
+      title: 'Re-read the modeling example before you script',
+      icon: 'fa-theater-masks',
+      body: e.modeling_examples,
+    });
+  } else {
+    // apply
+    if (e.family_engagement_notes) parts.push({
+      title: 'Family engagement — culturally responsive communication',
+      icon: 'fa-house-user',
+      body: e.family_engagement_notes,
+    });
+    if (e.contextual_differentiation) parts.push({
+      title: 'Adapt for your setting — elementary vs. secondary',
+      icon: 'fa-arrows-split-up-and-left',
+      body: e.contextual_differentiation,
+    });
+  }
+  if (parts.length === 0) return null;
+  return (
+    <div class="mt-4 border-t border-slate-100 pt-4 space-y-3">
+      {parts.map((p) => (
+        <details class="bg-sky-50 border border-sky-200 rounded-md">
+          <summary class="cursor-pointer px-3 py-2 text-sm font-medium text-aps-navy">
+            <i class={`fas ${p.icon} mr-2 text-sky-700`}></i>{p.title}
+          </summary>
+          <div class="px-3 pb-3 text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">{p.body}</div>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 // Footer with "Mark phase complete" button. Hidden once the phase has been
 // marked done. Posts through /advance with the correct target status; the
 // state machine auto-bridges recommended → learn_done if the teacher never
@@ -1006,6 +1305,8 @@ function ApplyPhase({ e, applyState, targetCoach }: any) {
           {e.status === 'submitted' && <span class="ml-2 text-xs text-violet-700"><i class="fas fa-inbox mr-1"></i>Awaiting supervisor review</span>}
         </form>
       </LearnStep>
+
+      <EnrichmentBlock e={e} phase="apply" />
     </div>
   );
 }
@@ -1091,8 +1392,25 @@ function ReviewRow({ r }: any) {
   );
 }
 
-function ReviewPdDetail({ user, e, teacher, reflections, msg }: any) {
+function ReviewPdDetail({ user, e, teacher, reflections, criteria, scoreMap, msg }: any) {
   const pill = statusPill(e.status);
+  criteria = criteria || [];
+  scoreMap = scoreMap || {};
+  // Roll-up weighted average — shown in the rubric header so the supervisor
+  // sees at a glance how the artifact is scoring overall.
+  let totalWeight = 0;
+  let weightedSum = 0;
+  let scoredCount = 0;
+  for (const cr of criteria) {
+    const s = scoreMap[cr.id];
+    if (s && s.level) {
+      totalWeight += (cr.weight || 1);
+      weightedSum += (cr.weight || 1) * s.level;
+      scoredCount += 1;
+    }
+  }
+  const avg = totalWeight ? (weightedSum / totalWeight) : null;
+  const levelLabels: Record<number, string> = { 4: 'Highly Effective', 3: 'Effective', 2: 'Improvement Needed', 1: 'Does Not Meet' };
   return (
     <Layout title={`Review: ${e.title}`} user={user} activeNav="pd-review">
       <div class="mb-2"><a href="/pd/review" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Review queue</a></div>
@@ -1121,6 +1439,62 @@ function ReviewPdDetail({ user, e, teacher, reflections, msg }: any) {
         <div class="text-sm text-slate-700 whitespace-pre-wrap">{e.deliverable_prompt}</div>
         {e.deliverable_rubric && <details class="mt-2 text-xs"><summary class="cursor-pointer text-aps-blue">Rubric guidance</summary><div class="mt-1 whitespace-pre-wrap text-slate-700">{e.deliverable_rubric}</div></details>}
       </Card>
+
+      {/* April 2026 upgrade: evidence-based deliverable rubric.  One row per
+          criterion in pd_deliverable_rubric_criteria.  The supervisor scores
+          1-4 on each; the rolled-up weighted average displays at the top so
+          they can tell at a glance whether to verify or ask for revision. */}
+      {criteria.length > 0 && (
+        <Card title="Deliverable rubric" icon="fas fa-clipboard-check" class="mt-4">
+          <a id="rubric"></a>
+          <p class="text-xs text-slate-500 mb-2">
+            Score the submitted artifact on each evidence-based criterion below. Your scores are saved individually — you can adjust any criterion before you click <em>Verify complete</em> or <em>Ask for revision</em> at the bottom of this page.
+            {' '}All four criteria are editable in <a href="/admin/pd-rubric" class="text-aps-blue hover:underline">Admin → PD deliverable rubric</a>.
+          </p>
+          {avg !== null && (
+            <div class="mb-3 p-2 bg-aps-navy text-white rounded flex items-center gap-3 text-sm">
+              <i class="fas fa-chart-simple"></i>
+              <span>Rolled-up weighted average: <strong>{avg.toFixed(2)} / 4.00</strong> ({scoredCount} / {criteria.length} criteria scored)</span>
+            </div>
+          )}
+          <div class="space-y-3">
+            {criteria.map((cr: any) => {
+              const s = scoreMap[cr.id] || {};
+              return (
+                <form method="post" action={`/pd/review/${e.id}/rubric`} class="border border-slate-200 rounded p-3">
+                  <input type="hidden" name="criterion_id" value={cr.id} />
+                  <div class="flex items-start gap-2 flex-wrap">
+                    <div class="flex-1 min-w-[14rem]">
+                      <div class="font-medium text-aps-navy text-sm">{cr.label}</div>
+                      <div class="text-xs text-slate-600 mt-0.5">{cr.description}</div>
+                    </div>
+                    {s.level && (
+                      <span class="text-xs px-2 py-0.5 rounded-full bg-aps-gold/20 text-aps-navy border border-aps-gold">
+                        Current: {s.level} · {levelLabels[s.level]}
+                      </span>
+                    )}
+                  </div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs">
+                    {[4, 3, 2, 1].map((lvl) => (
+                      <label class={`cursor-pointer border rounded p-2 hover:bg-slate-50 ${s.level === lvl ? 'border-aps-navy bg-sky-50 font-medium' : 'border-slate-200'}`}>
+                        <input type="radio" name="level" value={lvl} checked={s.level === lvl} class="mr-1" />
+                        <span>{lvl} · {levelLabels[lvl]}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <label class="block mt-2 text-xs">
+                    <span class="block text-slate-600 mb-1">Note (optional — what you saw in the artifact that supports this level)</span>
+                    <textarea name="note" rows={2} class="w-full border border-slate-300 rounded px-2 py-1.5 text-xs" placeholder="e.g. The rebuilt plan explicitly scripts the level-3 move at the pivot — see paragraph 2.">{s.note || ''}</textarea>
+                  </label>
+                  <div class="mt-2">
+                    <button class="text-xs bg-aps-navy text-white px-3 py-1 rounded hover:bg-aps-blue"><i class="fas fa-save mr-1"></i>Save score for this criterion</button>
+                  </div>
+                </form>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {(e.status === 'submitted' || e.status === 'needs_revision') && (
         <Card title="Verify" icon="fas fa-gavel" class="mt-4">
@@ -1153,9 +1527,23 @@ function AdminPdList({ user, rows, indicators, msg }: any) {
     <Layout title="PD modules" user={user} activeNav="admin-pd">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
         <h1 class="font-display text-2xl text-aps-navy">PD modules</h1>
-        <a href="/admin/pd/new" class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>New module</a>
+        <div class="flex flex-wrap gap-2">
+          <a href="/admin/pd-rubric" class="bg-white border border-aps-navy text-aps-navy px-3 py-1.5 rounded text-sm hover:bg-slate-50"><i class="fas fa-clipboard-check mr-1"></i>Deliverable rubric</a>
+          <a href="/admin/pd/export-csv" class="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded text-sm hover:bg-slate-50"><i class="fas fa-file-export mr-1"></i>Export CSV</a>
+          <a href="/admin/pd/new" class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>New module</a>
+        </div>
       </div>
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+
+      {/* April 2026 upgrade: CSV import lets admins bulk-edit all 120 modules
+          (including the four enrichment fields) in Excel and re-upload. */}
+      <Card title="Bulk import from CSV" icon="fas fa-file-import" class="mb-4">
+        <p class="text-xs text-slate-600 mb-2">Download the export above, edit in Excel, and re-upload to update existing rows (by <code>id</code>) or add new ones (leave <code>id</code> blank).</p>
+        <form method="post" action="/admin/pd/import-csv" enctype="multipart/form-data" class="flex items-center gap-2 flex-wrap">
+          <input type="file" name="csv" accept=".csv,text/csv" required class="text-sm" />
+          <button class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-upload mr-1"></i>Import CSV</button>
+        </form>
+      </Card>
 
       <Card title={`Modules (${rows.length})`} icon="fas fa-list">
         {rows.length === 0 ? <p class="text-sm text-slate-500">No modules yet. Click <em>New module</em> above to create the first one.</p> : (
@@ -1187,6 +1575,61 @@ function AdminPdList({ user, rows, indicators, msg }: any) {
         )}
       </Card>
     </Layout>
+  );
+}
+
+// April 2026 upgrade: admin-editable deliverable rubric criteria.  Each criterion
+// becomes a scoring row in the PD review queue.  Admins can rename, rewrite,
+// reweight, or deactivate any criterion (and add brand-new ones) without code.
+function AdminPdRubric({ user, rows, msg }: any) {
+  const blank = { id: 0, code: '', label: '', description: '', weight: 1, sort_order: (rows.length + 1) * 10, is_active: 1 };
+  return (
+    <Layout title="PD deliverable rubric" user={user} activeNav="admin-pd">
+      <div class="mb-2"><a href="/admin/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>PD modules</a></div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1">PD deliverable rubric</h1>
+      <p class="text-sm text-slate-600 mb-4">
+        These criteria appear — in this order — on every PD review page. Supervisors score each one 1-4 on the submitted artifact. Renaming a criterion here immediately changes what appraisers see. Scores already saved are never lost.
+      </p>
+      {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+
+      <div class="space-y-4">
+        {rows.map((r: any) => <AdminPdRubricForm row={r} />)}
+        <AdminPdRubricForm row={blank} isNew />
+      </div>
+    </Layout>
+  );
+}
+
+function AdminPdRubricForm({ row, isNew }: { row: any; isNew?: boolean }) {
+  return (
+    <form method="post" action="/admin/pd-rubric/save" class={`border rounded p-3 ${isNew ? 'border-dashed border-slate-300 bg-slate-50' : 'border-slate-200 bg-white'}`}>
+      <input type="hidden" name="id" value={row.id || ''} />
+      <div class="flex items-center gap-2 flex-wrap mb-2">
+        <strong class="text-aps-navy text-sm">{isNew ? 'Add a new criterion' : `Criterion: ${row.label}`}</strong>
+        {!isNew && (
+          <label class="text-xs text-slate-600 ml-auto flex items-center gap-1">
+            <input type="checkbox" name="is_active" value="1" checked={!!row.is_active} /> Active
+          </label>
+        )}
+      </div>
+      <div class="grid md:grid-cols-6 gap-2 text-xs">
+        <label class="md:col-span-1">Code (stable key)<input name="code" value={row.code || ''} required class="mt-1 w-full border border-slate-300 rounded px-2 py-1" placeholder="alignment" /></label>
+        <label class="md:col-span-2">Label (teacher-facing)<input name="label" value={row.label || ''} required class="mt-1 w-full border border-slate-300 rounded px-2 py-1" placeholder="Alignment with target indicator" /></label>
+        <label class="md:col-span-1">Weight<input type="number" name="weight" min="1" value={row.weight || 1} class="mt-1 w-full border border-slate-300 rounded px-2 py-1" /></label>
+        <label class="md:col-span-1">Sort order<input type="number" name="sort_order" value={row.sort_order || 0} class="mt-1 w-full border border-slate-300 rounded px-2 py-1" /></label>
+        {isNew && (
+          <label class="md:col-span-1 flex items-center gap-1 text-xs text-slate-600">
+            <input type="checkbox" name="is_active" value="1" checked /> Active
+          </label>
+        )}
+      </div>
+      <label class="block mt-2 text-xs">Description (scoring guidance)
+        <textarea name="description" rows={2} required class="mt-1 w-full border border-slate-300 rounded px-2 py-1">{row.description || ''}</textarea>
+      </label>
+      <div class="mt-2">
+        <button class="bg-aps-navy text-white px-3 py-1 rounded text-xs hover:bg-aps-blue"><i class="fas fa-save mr-1"></i>{isNew ? 'Add criterion' : 'Save changes'}</button>
+      </div>
+    </form>
   );
 }
 
@@ -1245,6 +1688,29 @@ function AdminPdEditor({ user, indicators, m }: any) {
 
         <Card title="Resources" icon="fas fa-link">
           <textarea name="resources" rows={4} class="w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs" placeholder="Links, readings, videos (one per line).">{m.resources || ''}</textarea>
+        </Card>
+
+        {/* April 2026 enrichments — all optional, all surfaced in the teacher view
+            below the core Learn / Practice / Apply content.  Each field is plain
+            text; admins can use bullet lists, numbered lists, or prose. */}
+        <Card title="Enrichment: Modeling examples" icon="fas fa-theater-masks">
+          <p class="text-xs text-slate-500 mb-2">A short textual mini-case study or scripted example that shows what effective practice looks like at the target level. No videos required — describe it step by step. Shown to teachers in the Learn and Practice phases.</p>
+          <textarea name="modeling_examples" rows={6} class="w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed" placeholder="Example: a 5-minute morning meeting.&#10;  1. Greeting (60s): …&#10;  2. Share (90s): …&#10;Sample teacher script: &quot;…&quot;">{m.modeling_examples || ''}</textarea>
+        </Card>
+
+        <Card title="Enrichment: Collaboration prompts" icon="fas fa-users">
+          <p class="text-xs text-slate-500 mb-2">One or two short prompts inviting the teacher to rehearse with a colleague or PLC. Shown in the Practice phase.</p>
+          <textarea name="collaboration_prompts" rows={4} class="w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed" placeholder="Bring your rebuilt routine to the next PLC. Ask one colleague to watch you run it and give you one piece of feedback on pacing and one on student response. Offer to return the favor.">{m.collaboration_prompts || ''}</textarea>
+        </Card>
+
+        <Card title="Enrichment: Family engagement notes" icon="fas fa-house-user">
+          <p class="text-xs text-slate-500 mb-2">Culturally responsive, accessible-language guidance for communicating with families about the redesigned lesson or routine. Shown in the Apply phase.</p>
+          <textarea name="family_engagement_notes" rows={5} class="w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed" placeholder="Equity first: assume families speak languages other than English, may not have reliable internet, and may work during typical 'parent night' hours. Offer a printed copy, a translated version, and either a daytime or evening option.">{m.family_engagement_notes || ''}</textarea>
+        </Card>
+
+        <Card title="Enrichment: Contextual differentiation (elementary vs secondary)" icon="fas fa-arrows-split-up-and-left">
+          <p class="text-xs text-slate-500 mb-2">How this module's moves look different in an elementary vs. a secondary classroom. Shown in the Learn and Apply phases so every teacher gets advice that fits their grade band.</p>
+          <textarea name="contextual_differentiation" rows={4} class="w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed" placeholder="Elementary: use visual feelings-cards, picture-book examples, puppet modeling. Lessons should fit in 5-10 minutes.&#10;Secondary: frame as executive-function skill, use case studies from the content area, keep each mini-lesson to 5 minutes.">{m.contextual_differentiation || ''}</textarea>
         </Card>
 
         <div class="flex items-center gap-2">

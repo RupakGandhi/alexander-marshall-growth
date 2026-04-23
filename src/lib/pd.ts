@@ -334,6 +334,12 @@ export async function getEnrollment(db: D1Database, id: number) {
         m.deliverable_prompt         AS deliverable_prompt,
         m.deliverable_rubric         AS deliverable_rubric,
         m.resources                  AS resources,
+        -- April 2026 enrichments — admin-editable textual additions below
+        -- the core learn/practice/apply content.
+        m.modeling_examples          AS modeling_examples,
+        m.collaboration_prompts      AS collaboration_prompts,
+        m.family_engagement_notes    AS family_engagement_notes,
+        m.contextual_differentiation AS contextual_differentiation,
         i.code                       AS indicator_code,
         i.name                       AS indicator_name,
         d.code                       AS domain_code,

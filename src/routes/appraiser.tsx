@@ -227,9 +227,13 @@ app.post('/observations/:id/score', async (c) => {
 });
 
 // ---- Auto-generate feedback chunks from scored indicators + pedagogy library
+// Accepts both classic form POSTs (redirects) and XHR with `Accept: application/json`
+// (returns JSON so the page can stay in place and flip a toast — spec 2.1).
 app.post('/observations/:id/generate-feedback', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
+  const wantsJson = (c.req.header('accept') || '').includes('application/json') ||
+    (c.req.header('x-requested-with') || '').toLowerCase() === 'fetch';
   const o = await getObservation(c.env.DB, id);
   if (!o || (o.appraiser_id !== user.id && user.role !== 'super_admin')) return c.text('Forbidden', 403);
 
@@ -279,6 +283,19 @@ app.post('/observations/:id/generate-feedback', async (c) => {
        updated_at=CURRENT_TIMESTAMP WHERE id=?`
   ).bind(id).run();
   await logActivity(c.env.DB, user.id, 'observation', id, 'generate_feedback');
+  if (wantsJson) {
+    // Return the fresh feedback chunks so the client can swap them in place
+    // without reloading the page or losing the appraiser's scroll position.
+    const items = await c.env.DB.prepare(
+      `SELECT id, indicator_id, category, title, body, sort_order, source
+         FROM feedback_items WHERE observation_id=? ORDER BY category, sort_order, id`
+    ).bind(id).all();
+    return c.json({
+      ok: true,
+      saved_at: new Date().toISOString(),
+      items: (items.results as any[]) || [],
+    });
+  }
   return c.redirect(`/appraiser/observations/${id}?msg=Feedback+generated`);
 });
 
@@ -861,7 +878,11 @@ function ObservationEditor({ user, o, domains, msg }: any) {
       <p class="text-sm text-slate-600 mb-3">Click any cell to assign a rating for that indicator. You can leave indicators unscored for mini-observations and only score the ones you had evidence for.</p>
       <div class="space-y-3">
         {domains.map((d: any) => (
-          <details class="bg-white rounded-lg border border-slate-200" open={domains.indexOf(d) < 2}>
+          // April 2026 UI polish: open ALL domains by default so Domain E (the
+          // "Professional Responsibilities" domain that used to stay collapsed)
+          // is visible without an extra click.  Appraisers can still collapse
+          // any domain by clicking its header.
+          <details class="bg-white rounded-lg border border-slate-200" open>
             <summary class="px-4 py-3 cursor-pointer flex items-center gap-2">
               <span class="w-8 h-8 rounded-full bg-aps-navy text-white font-display flex items-center justify-center text-sm">{d.code}</span>
               <span class="font-display text-aps-navy">{d.name}</span>
@@ -878,15 +899,21 @@ function ObservationEditor({ user, o, domains, msg }: any) {
         ))}
       </div>
 
-      {/* Generate feedback */}
-      <div class="mt-6 flex flex-wrap gap-3 items-center justify-between p-4 bg-white rounded-lg border border-slate-200">
-        <div class="text-sm">
-          <div class="font-medium text-aps-navy">Organize feedback for the teacher</div>
-          <div class="text-xs text-slate-500">Turns your scored indicators + scripted notes into an editable draft of glows, grows, focus areas, and next steps using the Pedagogy Library.</div>
+      {/* Generate feedback — async + scroll-preserving (April 2026 UI polish).
+          When JS is available we POST with fetch + show a toast right next to
+          the button, then swap the feedback list in place; if JS fails or is
+          disabled the form still works as a normal POST (graceful fallback). */}
+      <div id="aps-generate-feedback-block" class="mt-6 p-4 bg-white rounded-lg border border-slate-200">
+        <div class="flex flex-wrap gap-3 items-center justify-between">
+          <div class="text-sm">
+            <div class="font-medium text-aps-navy">Organize feedback for the teacher</div>
+            <div class="text-xs text-slate-500">Turns your scored indicators + scripted notes into an editable draft of glows, grows, focus areas, and next steps using the Pedagogy Library.</div>
+          </div>
+          <form id="aps-generate-feedback-form" method="post" action={`/appraiser/observations/${o.id}/generate-feedback`} class="flex items-center gap-3">
+            <span id="aps-generate-feedback-status" class="text-xs text-slate-500" aria-live="polite"></span>
+            <button class="bg-aps-gold text-aps-navy font-medium px-4 py-2 rounded hover:bg-yellow-400 text-sm" disabled={!editable}><i class="fas fa-wand-magic-sparkles mr-1"></i>Generate / refresh feedback</button>
+          </form>
         </div>
-        <form method="post" action={`/appraiser/observations/${o.id}/generate-feedback`}>
-          <button class="bg-aps-gold text-aps-navy font-medium px-4 py-2 rounded hover:bg-yellow-400 text-sm" disabled={!editable}><i class="fas fa-wand-magic-sparkles mr-1"></i>Generate / refresh feedback</button>
-        </form>
       </div>
 
       {/* Feedback chunks editor */}
@@ -907,6 +934,13 @@ function ObservationEditor({ user, o, domains, msg }: any) {
             {o.status === 'acknowledged' && (
               <p class="text-sm text-emerald-700 mt-2"><i class="fas fa-check-double mr-1"></i>Teacher acknowledged {formatDateTime(o.teacher_acknowledged_at)}.</p>
             )}
+            {/* April 2026 UI polish: jump-back links so the appraiser doesn't
+                have to hunt through the nav after publishing. */}
+            <div class="mt-3 flex flex-wrap gap-3 text-sm">
+              <a href={`/appraiser/teachers/${o.teacher_id}`} class="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-aps-navy text-aps-navy hover:bg-aps-navy hover:text-white"><i class="fas fa-user"></i> Back to {`${o.t_first || ''} ${o.t_last || 'teacher'}`.trim()}'s page</a>
+              <a href="/appraiser" class="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-50"><i class="fas fa-list"></i> All my teachers</a>
+              <a href="/coach/pd-review" class="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-50"><i class="fas fa-graduation-cap"></i> PD review queue</a>
+            </div>
           </div>
         ) : (
           <form method="post" action={`/appraiser/observations/${o.id}/publish`} class="space-y-2" id="publish-form">
@@ -924,6 +958,96 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           </form>
         )}
       </Card>
+
+      {/* April 2026 UI polish: async feedback generation + unsaved-score outline.
+          (1) Fetch-based POST to /generate-feedback — we stay on the page, keep
+              the scroll position exactly where it was, show a toast right next
+              to the button, and let the page reflect the fresh items via a
+              one-time location.reload() (so all the feedback edit forms stay
+              connected to their real DB ids).
+          (2) Red outline + tooltip on any IndicatorRow where the appraiser has
+              selected a level but not yet clicked "Save score".  Clears once
+              the row is saved. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        (function(){
+          // ---- Unsaved score outlines ---------------------------------------
+          document.querySelectorAll('form[action*="/score"]').forEach(function(form){
+            var radios = form.querySelectorAll('input[type="radio"][name="level"]');
+            var saveBtn = form.querySelector('button[type="submit"]');
+            var row = form.closest('.border');
+            function markDirty(){
+              if (!row) return;
+              row.style.outline = '2px solid #dc2626';
+              row.style.outlineOffset = '2px';
+              row.title = 'Unsaved — click Save score to record this rating.';
+              if (saveBtn) {
+                saveBtn.classList.remove('bg-aps-navy');
+                saveBtn.classList.add('bg-red-600','animate-pulse');
+                saveBtn.innerHTML = '<i class="fas fa-exclamation-circle mr-1"></i>Save score (unsaved)';
+              }
+            }
+            radios.forEach(function(r){
+              r.addEventListener('change', markDirty);
+            });
+            var note = form.querySelector('textarea[name="evidence_note"]');
+            if (note) note.addEventListener('input', markDirty);
+            // Submit clears dirty state before the navigation happens.
+            form.addEventListener('submit', function(){
+              if (row) { row.style.outline = ''; row.title = ''; }
+            });
+          });
+
+          // ---- Async feedback generation ------------------------------------
+          var genForm = document.getElementById('aps-generate-feedback-form');
+          var status = document.getElementById('aps-generate-feedback-status');
+          if (genForm && status) {
+            genForm.addEventListener('submit', function(ev){
+              ev.preventDefault();
+              var btn = genForm.querySelector('button[type="submit"]');
+              if (btn) btn.disabled = true;
+              status.style.color = '#0369a1';
+              status.textContent = 'Organizing feedback…';
+              // Preserve scroll position precisely.
+              var y = window.scrollY;
+              fetch(genForm.action, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json', 'X-Requested-With': 'fetch' },
+                body: new FormData(genForm),
+              }).then(function(r){ return r.json().catch(function(){ return {}; }); })
+                .then(function(j){
+                  if (j && j.ok) {
+                    status.style.color = '#065f46';
+                    status.textContent = '✓ Feedback refreshed (' + (j.items ? j.items.length : 0) + ' items)';
+                    // One-time full reload to rebuild the edit forms with real DB ids,
+                    // then scroll back to where the appraiser was.
+                    sessionStorage.setItem('aps-feedback-y', String(y));
+                    setTimeout(function(){ location.reload(); }, 700);
+                  } else {
+                    status.style.color = '#991b1b';
+                    status.textContent = '⚠ Could not refresh — try the button again.';
+                    if (btn) btn.disabled = false;
+                  }
+                })
+                .catch(function(){
+                  status.style.color = '#991b1b';
+                  status.textContent = '⚠ Network error — you can still try the button again.';
+                  if (btn) btn.disabled = false;
+                });
+            });
+          }
+          // Restore scroll after the one-time reload above.
+          var restoreY = sessionStorage.getItem('aps-feedback-y');
+          if (restoreY) {
+            sessionStorage.removeItem('aps-feedback-y');
+            window.scrollTo(0, Number(restoreY) || 0);
+            if (status) {
+              status.style.color = '#065f46';
+              status.textContent = '✓ Feedback refreshed — scroll preserved';
+              setTimeout(function(){ if(status) status.textContent=''; }, 4000);
+            }
+          }
+        })();
+      ` }}></script>
 
       {/* Client-side helper: "Auto" button next to Duration auto-calculates elapsed minutes
           from when the observation was started. The appraiser can still override manually. */}
