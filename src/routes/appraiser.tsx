@@ -11,6 +11,8 @@ import {
   levelColor, levelLabels, formatDate, formatDateTime,
   statusBadge, statusLabel, escapeHtml,
 } from '../lib/ui';
+import { notify } from '../lib/notifications';
+import { autoEnrollForObservation } from '../lib/pd';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['appraiser', 'super_admin']));
@@ -325,7 +327,8 @@ app.post('/observations/:id/publish', async (c) => {
   const focus = await c.env.DB.prepare(
     `SELECT * FROM feedback_items WHERE observation_id=? AND category='focus_area'`
   ).bind(id).all();
-  for (const f of (focus.results as any[])) {
+  const focusRows = (focus.results as any[]) || [];
+  for (const f of focusRows) {
     await c.env.DB.prepare(
       `INSERT INTO focus_areas (teacher_id, indicator_id, title, description, status, opened_observation_id)
        VALUES (?,?,?,?, 'active', ?)`
@@ -333,6 +336,52 @@ app.post('/observations/:id/publish', async (c) => {
   }
 
   await logActivity(c.env.DB, user.id, 'observation', id, 'publish');
+
+  // ----- Notifications + PD recommendations -----
+  // 1) Tell the teacher that their observation has been published
+  const obsTypeLabel = own.observation_type === 'annual_summary' ? 'Annual summary'
+    : own.observation_type === 'formal' ? 'Formal observation' : 'Mini-observation';
+  await notify(c.env.DB, {
+    user_id: own.teacher_id,
+    kind: 'observation_published',
+    title: `${obsTypeLabel} published`,
+    body: `${user.first_name} ${user.last_name} shared an evaluation with you. Review and acknowledge when ready.`,
+    url: `/teacher/observations/${id}`,
+    entity_type: 'observation', entity_id: id, actor_user_id: user.id,
+    severity: own.observation_type === 'annual_summary' ? 'info' : 'action',
+  }, c.env);
+  // 2) For every focus area promoted above, nudge the teacher again
+  for (const f of focusRows) {
+    await notify(c.env.DB, {
+      user_id: own.teacher_id,
+      kind: 'focus_area_opened',
+      title: 'New focus area opened',
+      body: f.title || 'A growth focus was opened for you.',
+      url: `/teacher/observations/${id}`,
+      entity_type: 'focus_area', entity_id: id, actor_user_id: user.id,
+    }, c.env);
+  }
+  // 3) Auto-enroll the teacher in PD modules for any indicator scored 1 or 2
+  await autoEnrollForObservation(c.env.DB, id, c.env);
+  // 4) Special case: annual summary → tell superintendents as an FYI
+  if (own.observation_type === 'annual_summary') {
+    const supts = await c.env.DB.prepare(
+      `SELECT id FROM users WHERE active=1 AND role IN ('superintendent','super_admin')`
+    ).all();
+    const ids = ((supts.results as any[]) || []).map((r) => r.id);
+    const teacher = await c.env.DB.prepare(`SELECT first_name, last_name FROM users WHERE id=?`).bind(own.teacher_id).first<any>();
+    for (const uid of ids) {
+      if (uid === user.id) continue;
+      await notify(c.env.DB, {
+        user_id: uid, kind: 'annual_summary_published',
+        title: 'Annual summary published',
+        body: `${user.first_name} ${user.last_name} published an annual summary for ${teacher?.first_name || ''} ${teacher?.last_name || ''}.`,
+        url: `/superintendent/observations/${id}`,
+        entity_type: 'observation', entity_id: id, actor_user_id: user.id,
+      }, c.env);
+    }
+  }
+
   return c.redirect(`/appraiser/observations/${id}?msg=Published+to+teacher`);
 });
 

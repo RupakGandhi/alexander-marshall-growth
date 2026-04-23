@@ -160,10 +160,36 @@ const superAdminSteps: TourStep[] = [
     body: `<p>Finally, the district's name, address, and phone number appear on every printed PDF. Keep them current here.</p>`,
   },
   {
+    page: '/admin/pd',
+    noHighlight: true,
+    title: 'PD Modules — your in-platform LMS',
+    body: `
+      <p>This is where you <strong>build the PD curriculum</strong> teachers see on their "My PD LMS" page. Each module is attached to a specific Marshall rubric indicator at a target level.</p>
+      <p>When a teacher gets scored at that level or below, the platform <em>auto-enrolls</em> them in the module — no manual assignment needed. You control the Learn / Practice / Apply content, the deliverable prompt, and the rubric used to judge the submission.</p>
+      <p>The seed migration ships 120 research-based modules (60 indicators × levels 1 & 2). Edit, add, or retire them freely.</p>`,
+  },
+  {
+    page: '/admin',
+    selector: '#aps-bell-btn',
+    placement: 'bottom',
+    title: 'Notifications — replaces every email',
+    body: `
+      <p>The bell in the header is the in-platform alert system. It fires for every important event: a teacher acknowledged, a PD deliverable submitted, a bulk import finished, etc.</p>
+      <p>Teachers, principals, coaches, and superintendents all get their own role-specific notifications. No SendGrid. No Twilio. No subscription. The district owns its own VAPID key pair and uses the browser's built-in Web Push standard.</p>`,
+  },
+  {
+    page: '/admin',
+    noHighlight: true,
+    title: "Schools vs. Appraiser — what's the difference?",
+    body: `
+      <p><strong>Schools</strong> are the physical buildings (Elementary, High School…). They're used for org structure, reporting roll-ups, and telling the system where a teacher is based. A teacher can belong to <strong>multiple</strong> schools.</p>
+      <p><strong>Appraiser</strong> is a <em>role</em> — typically a principal — who is <em>assigned</em> to teachers via the Assignments page. Being the principal of a school does <strong>not</strong> automatically assign you to its teachers; the super-admin picks explicitly who evaluates whom. This lets one principal cover teachers across buildings (very common in small districts) and keeps the eval system separate from staff directory data.</p>`,
+  },
+  {
     page: '/admin',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>That's the whole super-admin toolkit. Replay the tour from the <strong>Guided Tour</strong> button any time, and use the <strong>Profile</strong> menu in the top-right to change your password.</p><p>Questions? The <em>README</em> linked at the bottom of the site documents every route and feature.</p>`,
+    body: `<p>That's the whole super-admin toolkit. Replay the tour from the <strong>Guided Tour</strong> button any time, and use the <strong>Profile</strong> menu in the top-right to change your password or notification preferences.</p><p>Questions? The <em>README</em> linked at the bottom of the site documents every route and feature.</p>`,
   },
 ];
 
@@ -251,12 +277,29 @@ const appraiserSteps: TourStep[] = [
         <li><strong>Signatures</strong> — sign and publish; the teacher gets notified to acknowledge.</li>
       </ul>`,
   },
+  {
+    page: '/pd/review',
+    noHighlight: true,
+    title: 'PD review queue (in-platform, no email)',
+    body: `
+      <p>Teachers don't need a separate LMS — every module lives inside this platform. When one of your teachers submits a classroom deliverable for a PD module, it appears here as a <strong>pending review</strong>.</p>
+      <p>You can accept it as <em>verified</em> (success notification fires to the teacher) or ask for a revision (the teacher gets a nudge with your note). All without leaving the app.</p>`,
+  },
+  {
+    page: '/appraiser',
+    selector: '#aps-bell-btn',
+    placement: 'bottom',
+    title: 'Your notification bell',
+    body: `
+      <p>This bell replaces every email a traditional evaluation system would send. Teachers acknowledging their observations, deliverables submitted for review, overdue acknowledgments — they all surface here.</p>
+      <p>Click once to enable <strong>Web Push</strong> so your phone or desktop pings you in real time. No subscription, no third-party service.</p>`,
+  },
   ...reportsTourSteps(false),
   {
     page: '/appraiser',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>Everything you do here is <strong>scoped to your assigned teachers</strong> — reports, searches, and lists. If a teacher you expected to see is missing, ask your super admin to add the assignment.</p>`,
+    body: `<p>Everything you do here is <strong>scoped to your assigned teachers</strong> — reports, searches, lists, and PD reviews. If a teacher you expected to see is missing, ask your super admin to add the assignment.</p>`,
   },
 ];
 
@@ -332,12 +375,32 @@ const teacherSteps: TourStep[] = [
     title: 'Your current focus areas',
     body: `<p>These are the specific indicators your appraiser wants you to work on. Each one links to the pedagogy library's <strong>teacher next moves</strong> and <strong>resources</strong> for that exact indicator at your current level.</p>`,
   },
+  {
+    page: '/teacher/pd',
+    selector: '[data-tour="t-pd-home"]',
+    placement: 'auto',
+    title: 'My PD LMS — your Floating PD Day engine',
+    body: `
+      <p>When an observation scores you at Level 1 or 2 on an indicator, the system automatically queues a research-based <strong>Learn &rarr; Practice &rarr; Apply</strong> module for that exact indicator here — no subscriptions, no outside tools.</p>
+      <p>You can also browse the full library and add modules yourself. Group several modules into a <strong>PD Plan</strong> for a floating PD day and you've got a printable agenda for the whole day.</p>
+      <p>Each module ends with a <strong>classroom deliverable</strong> (an exit ticket, lesson plan, rubric…) that your supervisor verifies inside the platform.</p>`,
+  },
+  {
+    page: '/teacher',
+    selector: '#aps-bell-btn',
+    placement: 'bottom',
+    title: 'Notifications — no email required',
+    body: `
+      <p>The bell in the header collects every important event: a new observation, a focus area opened for you, a PD module recommended, a supervisor verification, and more.</p>
+      <p>Open the bell once and the browser will ask permission to enable <strong>Web Push</strong>, so you'll also get notifications on your phone / laptop lock screen — still completely free to the district.</p>
+      <p>You can fine-tune every notification kind (in-app + push, separately) from <strong>Profile &rarr; Notifications</strong>.</p>`,
+  },
   ...reportsTourSteps(false),
   {
     page: '/teacher',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>Everything here is <strong>your private record</strong> — only you, your appraiser, and district leadership can see it. Re-open the tour from the top nav any time, and use <strong>Profile</strong> to change your password.</p>`,
+    body: `<p>Everything here is <strong>your private record</strong> — only you, your appraiser, and district leadership can see it. Re-open the tour from the top nav any time, and use <strong>Profile</strong> to change your password or notification preferences.</p>`,
   },
 ];
 

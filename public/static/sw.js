@@ -10,7 +10,7 @@
 // Bump CACHE_VERSION any time static assets change in an incompatible way.
 // ============================================================================
 
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 const CACHE_SHELL   = `aps-shell-${CACHE_VERSION}`;
 const CACHE_STATIC  = `aps-static-${CACHE_VERSION}`;
 const CACHE_CDN     = `aps-cdn-${CACHE_VERSION}`;
@@ -139,3 +139,61 @@ async function networkFirstHTML(event) {
     );
   }
 }
+
+// ============================================================================
+// Push notifications — empty-payload delivery
+// ----------------------------------------------------------------------------
+// When the Workers backend fires a VAPID-signed push with NO payload (to sidestep
+// ECE encryption), the browser still wakes this SW with a 'push' event.  We
+// respond by fetching the freshest unread alert from /api/notifications/latest
+// and showing it as a system notification.  If the fetch fails (user logged
+// out, offline), we show a generic fallback so a notification still appears.
+// ============================================================================
+self.addEventListener('push', (event) => {
+  event.waitUntil((async () => {
+    let title = 'Alexander Marshall Growth';
+    let options = {
+      body: 'You have a new notification.',
+      icon: '/static/icon-192.png',
+      badge: '/static/icon-192.png',
+      data: { url: '/' },
+      tag: 'aps-notification',
+    };
+    try {
+      // First try payload if any push service actually sent one
+      if (event.data) {
+        const j = event.data.json ? event.data.json() : null;
+        if (j && j.title) {
+          title = j.title;
+          options.body = j.body || '';
+          options.data = { url: j.url || '/' };
+        }
+      }
+      // Otherwise fetch from the server with the user's cookie
+      const r = await fetch('/api/notifications/latest', { credentials: 'include' });
+      if (r && r.ok) {
+        const j = await r.json();
+        if (j && j.ok) {
+          title = j.title || title;
+          options.body = j.body || options.body;
+          options.data = { url: j.url || '/' };
+          options.tag = 'aps-notification-' + (j.id || Date.now());
+        }
+      }
+    } catch (_) { /* fall through to fallback */ }
+    await self.registration.showNotification(title, options);
+  })());
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // If a tab is already open, focus it and navigate
+    for (const c of all) {
+      try { await c.focus(); c.navigate(url); return; } catch (e) {}
+    }
+    await self.clients.openWindow(url);
+  })());
+});

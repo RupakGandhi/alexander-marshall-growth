@@ -4,6 +4,7 @@ import { Layout, Card, Button } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import { getTeacherSummary, getObservation, logActivity } from '../lib/db';
 import { levelColor, levelLabels, formatDate, formatDateTime, statusBadge, statusLabel, escapeHtml } from '../lib/ui';
+import { notify } from '../lib/notifications';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['teacher']));
@@ -46,6 +47,16 @@ app.post('/observations/:id/acknowledge', async (c) => {
      teacher_signature_data = ?, teacher_response = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).bind(sig, response, id).run();
   await logActivity(c.env.DB, user.id, 'observation', id, 'acknowledge');
+
+  // Notify the appraiser (and any super-admin) that the teacher has acknowledged
+  await notify(c.env.DB, {
+    user_id: o.appraiser_id,
+    kind: 'observation_acknowledged',
+    title: 'Teacher acknowledged',
+    body: `${user.first_name} ${user.last_name} acknowledged the observation${response ? ' and left a comment.' : '.'}`,
+    url: `/appraiser/observations/${id}`,
+    entity_type: 'observation', entity_id: id, actor_user_id: user.id,
+  }, c.env);
   return c.redirect(`/teacher/observations/${id}?msg=Acknowledged`);
 });
 

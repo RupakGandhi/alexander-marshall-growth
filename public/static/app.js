@@ -295,4 +295,192 @@
     panel.classList.toggle('hidden');
     btn.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
   };
+
+  // ======================================================================
+  // Notification Bell + Web Push
+  // ----------------------------------------------------------------------
+  // Drives the bell icon in the header:
+  //   • Polls /api/notifications/summary every 45s for the unread badge
+  //   • Lazy-loads full list on first open
+  //   • Exposes window.APSBell.{toggle, open, close, refresh, markAllRead}
+  //   • Also registers a Web Push subscription the first time the user
+  //     interacts with the bell (required by browsers for permission).
+  // ======================================================================
+  const APSBell = {
+    _panel: null, _list: null, _badge: null, _btn: null, _empty: null,
+    _loaded: false, _pollTimer: null,
+    _refs() {
+      this._panel = document.getElementById('aps-bell-panel');
+      this._list  = document.getElementById('aps-bell-list');
+      this._badge = document.getElementById('aps-bell-badge');
+      this._btn   = document.getElementById('aps-bell-btn');
+      this._empty = document.getElementById('aps-bell-empty');
+      return !!this._panel;
+    },
+    toggle(ev) {
+      if (ev) ev.stopPropagation();
+      if (!this._refs()) return;
+      const open = this._panel.classList.contains('hidden');
+      this._panel.classList.toggle('hidden');
+      this._btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) { this.refresh(); this._ensurePushSubscribed(); }
+    },
+    close() {
+      if (!this._refs()) return;
+      this._panel.classList.add('hidden');
+      this._btn.setAttribute('aria-expanded', 'false');
+    },
+    async refresh() {
+      if (!this._refs()) return;
+      try {
+        const r = await fetch('/api/notifications', { credentials: 'include' });
+        if (!r.ok) return;
+        const data = await r.json();
+        this._render(data.items || []);
+        this._updateBadge(data.unread || 0);
+        this._loaded = true;
+      } catch (_) { /* network fail is OK — poll will retry */ }
+    },
+    async summary() {
+      try {
+        const r = await fetch('/api/notifications/summary', { credentials: 'include' });
+        if (!r.ok) return;
+        const data = await r.json();
+        this._refs();
+        this._updateBadge(data.unread || 0);
+      } catch (_) {}
+    },
+    _updateBadge(n) {
+      if (!this._badge) return;
+      if (n > 0) {
+        this._badge.textContent = n > 99 ? '99+' : String(n);
+        this._badge.classList.remove('hidden');
+      } else {
+        this._badge.classList.add('hidden');
+      }
+    },
+    _render(items) {
+      if (!this._list) return;
+      if (items.length === 0) {
+        this._list.innerHTML = '<div class="p-8 text-center text-slate-400 text-xs"><i class="far fa-bell-slash text-2xl mb-2 block"></i>No notifications yet.</div>';
+        return;
+      }
+      const sevColor = {
+        success: 'text-emerald-600', warning: 'text-amber-600',
+        action: 'text-aps-navy', info: 'text-slate-500',
+      };
+      const esc = (s) => String(s || '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]);
+      const rel = (iso) => {
+        try {
+          const d = String(iso || '').replace(' ','T');
+          const t = new Date(/Z$/.test(d) ? d : d + 'Z').getTime();
+          const diff = (Date.now() - t) / 1000;
+          if (diff < 60) return 'just now';
+          if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+          if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+          return Math.floor(diff / 86400) + 'd ago';
+        } catch (e) { return ''; }
+      };
+      const html = items.map((n) => {
+        const read = !!n.read_at;
+        const sev  = sevColor[n.severity] || sevColor.info;
+        const dot  = read ? '' : '<span class="absolute top-3 right-3 w-2 h-2 rounded-full bg-aps-blue"></span>';
+        const rowBg = read ? 'bg-white hover:bg-slate-50' : 'bg-sky-50/60 hover:bg-sky-50';
+        const url  = esc(n.url || '#');
+        const actor = (n.actor_first || n.actor_last) ? ('<span class="text-slate-500"> · ' + esc(n.actor_first||'') + ' ' + esc(n.actor_last||'') + '</span>') : '';
+        return (
+          '<div class="relative border-b border-slate-100 ' + rowBg + '">' +
+            dot +
+            '<a href="' + url + '" class="flex gap-3 p-3" data-id="' + n.id + '" data-nav="1">' +
+              '<div class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center ' + sev + ' shrink-0"><i class="fas ' + esc(n.icon || 'fa-bell') + '"></i></div>' +
+              '<div class="flex-1 min-w-0">' +
+                '<div class="text-sm font-medium text-slate-800 truncate">' + esc(n.title) + '</div>' +
+                (n.body ? '<div class="text-xs text-slate-600 mt-0.5 line-clamp-2">' + esc(n.body) + '</div>' : '') +
+                '<div class="text-[11px] text-slate-400 mt-1">' + rel(n.created_at) + actor + '</div>' +
+              '</div>' +
+            '</a>' +
+          '</div>'
+        );
+      }).join('');
+      this._list.innerHTML = html;
+      // Mark read when clicked + navigate
+      this._list.querySelectorAll('a[data-nav]').forEach((a) => {
+        a.addEventListener('click', (ev) => {
+          const id = a.getAttribute('data-id');
+          // fire-and-forget — do not block navigation
+          try { fetch('/api/notifications/' + id + '/read', { method: 'POST', credentials: 'include' }); } catch (e) {}
+        });
+      });
+    },
+    async markAllRead() {
+      try {
+        await fetch('/api/notifications/read-all', { method: 'POST', credentials: 'include' });
+        this._updateBadge(0);
+        if (this._loaded) this.refresh();
+      } catch (e) {}
+    },
+    startPolling() {
+      if (this._pollTimer) return;
+      this.summary();
+      this._pollTimer = setInterval(() => this.summary(), 45000);
+      // Also refresh when the tab regains focus
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) this.summary(); });
+    },
+    // Web Push — registered only after user opens the bell (interaction gate)
+    async _ensurePushSubscribed() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        let sub = await reg.pushManager.getSubscription();
+        if (sub) return; // already subscribed on this device
+        if (Notification.permission === 'denied') return;
+        if (Notification.permission !== 'granted') {
+          const p = await Notification.requestPermission();
+          if (p !== 'granted') return;
+        }
+        const keyRes = await fetch('/api/push/public-key', { credentials: 'include' });
+        if (!keyRes.ok) return;
+        const { publicKey } = await keyRes.json();
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sub.toJSON ? sub.toJSON() : sub),
+        });
+      } catch (e) { /* permission denied / unsupported — silently skip */ }
+    },
+  };
+  window.APSBell = APSBell;
+
+  // Bell opens from icon click; close on outside click like the user menu
+  document.addEventListener('click', (e) => {
+    const root = document.getElementById('aps-bell-root');
+    const panel = document.getElementById('aps-bell-panel');
+    if (root && panel && !panel.classList.contains('hidden') && !root.contains(e.target)) {
+      APSBell.close();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') APSBell.close();
+  });
+  document.addEventListener('DOMContentLoaded', () => {
+    if (document.getElementById('aps-bell-btn')) APSBell.startPolling();
+  });
+
+  // Refresh summary right after a navigation (the freshest unread count
+  // wins, so if the same page triggers a notification we'll pick it up).
+  window.addEventListener('pageshow', () => { if (window.APSBell) APSBell.summary(); });
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const b64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
 })();

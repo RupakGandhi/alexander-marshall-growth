@@ -350,3 +350,49 @@ Export your full record as PDF before you leave — use the *Teacher folder copy
 ---
 
 *Questions? Talk to your principal first, then your Super Admin, then OptimizED Strategic Solutions.*
+
+---
+
+## 🔔 Notifications (new)
+
+You now have a **bell icon** in the top‑right corner on every page. Click it to see:
+- Observation published — jump straight to the new observation
+- Focus area opened or closed
+- Coach notes and resources
+- PD module recommendations and assignments
+- PD deliverable verified / revision requested
+
+### Push notifications (optional, free)
+If you install this as an app on your phone (Add to Home Screen on iPhone, "Install App" on Android/Chromebook), tapping the bell once will ask permission to send push notifications. Say yes and you'll get alerts like a text message — **no text or email plan needed**, and the district pays nothing.
+
+### Customize what pings you
+Go to **Profile → Notifications** and you can:
+- **Master push switch** — one click silences every device
+- **Master in‑app switch** — hide the bell badge entirely (useful for summer/leave)
+- **Per‑kind toggles** — e.g. allow observation alerts but mute "scheduled" notices
+
+Everything keeps saving to your history — turning alerts off just stops the interruption, you can still open the bell later and catch up.
+
+---
+
+## 🎓 My PD LMS — Floating PD Day (new)
+
+Open **My PD LMS** in the main menu (or `/teacher/pd`).
+
+### How modules get there
+- **Auto‑recommended** — when a principal publishes an observation that scored an indicator at level 1 or 2, the system automatically adds up to 3 research‑based modules for that indicator at the next‑level‑up. Same deterministic logic as the feedback engine: no AI, no waiting.
+- **Assigned** — your principal or coach can assign a specific module.
+- **Self‑enrolled** — browse the full library from the "Module library" button and pick anything you want.
+
+### Working a module
+Each module has three tabs:
+1. **Learn** — short research summary + linked resources (Marshall, Marzano, Hattie, Lemov, etc.)
+2. **Practice** — a concrete classroom plan to try once before submitting
+3. **Apply** — write/describe your actual classroom deliverable and submit it inside the platform
+
+When you submit, your principal (and coach) get a notification and a review queue entry. They'll either **verify** (you get a 🎉 alert) or **request revision** (you get a ↺ alert with their note).
+
+### Don't get overloaded
+- Modules are **never duplicated** per source observation.
+- If you see too many, open the "plan" mode to bundle modules into a single **Floating PD Day** — one focused day instead of many small tasks.
+- You can always **decline** a recommended module with a short reason; it disappears from the active list but stays in the audit log.

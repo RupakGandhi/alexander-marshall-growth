@@ -381,3 +381,64 @@ The platform is a full **Progressive Web App (PWA)** — you can install it on y
 ---
 
 *Questions or bug reports? Contact Dr. Rupak Gandhi at OptimizED Strategic Solutions.*
+
+---
+
+## 🔔 Notification system (new, replaces email)
+
+The district now owns its own in‑app + Web Push notification system. No Resend / SendGrid / Twilio / Mailgun subscription — zero recurring notification cost.
+
+- **Bell on every page** for every signed‑in user, with unread badge and deep‑link click‑through.
+- **Web Push** to installed PWAs on Android, iOS 16.4+, macOS, Windows, and Chromebooks.
+- **District‑owned VAPID identity** — auto‑generated on first use and stored in the `vapid_keys` table. To rotate keys, just delete the row; the next notification regenerates them.
+- **Opt‑outs**: every user has a `/profile#notifications` page with a master push switch, master in‑app switch, and per‑kind toggles. Respected everywhere (including cron‑style broadcasts you add later).
+
+### Catalog (see `src/lib/notifications.ts → NOTIFICATION_KINDS`)
+- `observation_published`, `observation_acknowledged`, `acknowledgment_overdue`
+- `focus_area_opened`, `focus_area_closed`, `coach_note`
+- `pd_module_recommended`, `pd_module_assigned`, `pd_deliverable_submitted`, `pd_deliverable_verified`, `pd_deliverable_revision`
+- `annual_summary_published`, `account_created`, `password_reset`, `import_complete`
+
+### Troubleshooting
+| Symptom | Fix |
+|---------|-----|
+| Teacher says "no bell alert" after publish | Confirm `user_settings.in_app_enabled = 1` and `notification_preferences` for that kind is 1, or null (defaults = on). |
+| "Push didn't come through" | User must have clicked the bell once to grant permission AND have the PWA installed on that device. Check `push_subscriptions` for that user. Stale endpoints are auto‑pruned on the next delivery. |
+| iOS user gets nothing | iOS only delivers push to PWAs that are **installed to the Home Screen** (iOS 16.4+). |
+
+---
+
+## 🎓 PD Module management (new)
+
+Open **PD Modules** in the main nav (`/admin/pd`). The page lists all 120 seeded modules (60 indicators × 2 growth levels) with:
+- Active / archived toggle
+- Enrollment counts (recommended / started / submitted / verified)
+- Full CRUD on module metadata, Learn/Practice/Apply content, deliverable prompt, rubric, and resources
+
+### How auto‑enrollment works
+When an appraiser publishes an observation, `autoEnrollForObservation(db, obsId, env)` runs:
+1. Reads every indicator scored ≤ 2 on that observation.
+2. For each, selects up to 3 active modules targeting the next level up.
+3. Inserts an enrollment row with `source='auto'` — **idempotent** on `(teacher, module, source_observation)`.
+4. Sends the teacher a `pd_module_recommended` notification.
+
+To change the threshold, edit `AUTO_ENROLL_THRESHOLD` in `src/lib/pd.ts`.
+
+### PD Completion Report
+`/reports/pd` and `/reports/pd.csv` give district‑wide views of every enrollment — auto, self, and assigned — filterable by teacher, school, domain, indicator, status, source, and date. Drill‑down at `/reports/pd/:enrollmentId` shows the teacher's actual classroom deliverable plus reflections.
+
+---
+
+## 🏫 Schools vs. Appraisers (clarification)
+
+**These are independent axes.** A user has exactly one `role` (the *permission* level) and zero‑to‑many school links via `user_schools` (the *scope* of data).
+
+| Example | `role` | `user_schools` | What they can do |
+|---------|--------|----------------|------------------|
+| Elementary Principal Allard | `appraiser` | `{ Alexander Elementary }` | Observe+score+publish for any teacher assigned to him; his reports scope to Elementary. |
+| Secondary Principal Faller | `appraiser` | `{ Alexander Jr/Sr High }` | Same, scoped to 6‑12. |
+| District Coach Hansel | `coach` | `{ both schools }` | See focus areas and PD deliverables across the district for her coach caseload. |
+| Supt. Bieber | `superintendent` | `{ both schools }` | Read‑only district roll‑up. |
+| Teacher Stahosky | `teacher` | `{ Alexander Elementary }` | Only her own data. |
+
+**Rule of thumb:** you pick the role to decide *verbs* (publish, verify, reset password); you pick the school list to decide *nouns* (which buildings' data is in scope).

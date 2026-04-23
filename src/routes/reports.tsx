@@ -533,6 +533,318 @@ function groupBy<T, K>(arr: T[], keyFn: (t: T) => K): Map<K, T[]> {
   return m;
 }
 
+// ============================================================================
+// ============================================================================
+// PD Completion Report — /reports/pd
+// ----------------------------------------------------------------------------
+// A dedicated, sortable & filterable report on every PD enrollment that has
+// passed through the system. Designed to answer questions like:
+//   • "Show me every module my staff completed this quarter."
+//   • "Which indicators are teachers working hardest on?"
+//   • "Has Ms. Lopez finished her AR2 deliverables yet?"
+//
+// Scoping mirrors the rest of the platform:
+//   super_admin / superintendent → district-wide
+//   appraiser / coach            → only their assigned teachers
+//   teacher                      → only themselves
+//
+// Filters (all optional, all multi-select-friendly):
+//   teacher_ids[]   school_ids[]   domain_codes[]   indicator_ids[]
+//   status[]        source         from=YYYY-MM-DD  to=YYYY-MM-DD
+//
+// Sort options: submitted, verified, teacher, indicator, status, module
+// Output: same filter bar drives (a) on-screen table preview, (b) CSV export,
+//         (c) drill-down page that shows the full deliverable + reflections.
+// ============================================================================
+
+interface PdFilters {
+  teacherIds: number[];
+  schoolIds: number[];
+  domains: string[];       // domain codes like 'A','B','C'
+  indicatorIds: number[];
+  statuses: string[];
+  source: string;          // 'auto' | 'self' | 'assigned' | ''
+  from: string | null;
+  to: string | null;
+  sort: string;            // 'submitted' | 'verified' | 'teacher' | 'indicator' | 'status' | 'module'
+}
+
+function parsePdFilters(c: any): PdFilters {
+  const numArr = (name: string): number[] => {
+    const arr = c.req.queries(name) || [];
+    const out: number[] = [];
+    for (const v of arr) { const n = Number(String(v).trim()); if (Number.isFinite(n) && n > 0) out.push(n); }
+    return out;
+  };
+  const strArr = (name: string): string[] => {
+    const arr = c.req.queries(name) || [];
+    return arr.map((v: any) => String(v).trim()).filter(Boolean);
+  };
+  return {
+    teacherIds: numArr('teacher_ids'),
+    schoolIds: numArr('school_ids'),
+    domains: strArr('domain_codes'),
+    indicatorIds: numArr('indicator_ids'),
+    statuses: strArr('statuses'),
+    source: String(c.req.query('source') || '').trim(),
+    from: c.req.query('from') || null,
+    to:   c.req.query('to')   || null,
+    sort: String(c.req.query('sort') || 'submitted'),
+  };
+}
+
+// Build a WHERE clause that reflects role-scoping + user filters. Returns
+// { sql, binds } that callers can splice into their own SELECT.
+async function pdScopeSql(db: D1Database, user: any, f: PdFilters) {
+  const where: string[] = ['1=1'];
+  const binds: any[] = [];
+
+  // Role scoping
+  if (user.role === 'teacher') {
+    where.push('e.teacher_id = ?'); binds.push(user.id);
+  } else if (user.role === 'appraiser' || user.role === 'coach') {
+    where.push(`e.teacher_id IN (SELECT teacher_id FROM assignments WHERE staff_id = ? AND active = 1)`);
+    binds.push(user.id);
+  }
+
+  if (f.teacherIds.length) {
+    where.push(`e.teacher_id IN (${f.teacherIds.map(() => '?').join(',')})`);
+    for (const x of f.teacherIds) binds.push(x);
+  }
+  if (f.schoolIds.length) {
+    // Teacher can belong to multiple schools via user_schools join; fall back
+    // to users.school_id when no row exists.
+    const ph = f.schoolIds.map(() => '?').join(',');
+    where.push(`(
+      EXISTS (SELECT 1 FROM user_schools us WHERE us.user_id = e.teacher_id AND us.school_id IN (${ph}))
+      OR (
+        NOT EXISTS (SELECT 1 FROM user_schools us2 WHERE us2.user_id = e.teacher_id)
+        AND (SELECT school_id FROM users WHERE id = e.teacher_id) IN (${ph})
+      )
+    )`);
+    for (let i = 0; i < 2; i++) for (const x of f.schoolIds) binds.push(x);
+  }
+  if (f.domains.length) {
+    where.push(`d.code IN (${f.domains.map(() => '?').join(',')})`);
+    for (const x of f.domains) binds.push(x);
+  }
+  if (f.indicatorIds.length) {
+    where.push(`m.indicator_id IN (${f.indicatorIds.map(() => '?').join(',')})`);
+    for (const x of f.indicatorIds) binds.push(x);
+  }
+  if (f.statuses.length) {
+    where.push(`e.status IN (${f.statuses.map(() => '?').join(',')})`);
+    for (const x of f.statuses) binds.push(x);
+  }
+  if (f.source && ['auto','self','assigned'].includes(f.source)) {
+    where.push(`e.source = ?`); binds.push(f.source);
+  }
+  if (f.from) { where.push(`date(COALESCE(e.submitted_at, e.verified_at, e.updated_at, e.created_at)) >= date(?)`); binds.push(f.from); }
+  if (f.to)   { where.push(`date(COALESCE(e.submitted_at, e.verified_at, e.updated_at, e.created_at)) <= date(?)`); binds.push(f.to); }
+
+  return { where: where.join(' AND '), binds };
+}
+
+function pdOrderBy(sort: string): string {
+  switch (sort) {
+    case 'verified':  return `e.verified_at DESC, e.updated_at DESC`;
+    case 'teacher':   return `t.last_name, t.first_name, e.updated_at DESC`;
+    case 'indicator': return `d.sort_order, i.sort_order, e.updated_at DESC`;
+    case 'status':    return `e.status, e.updated_at DESC`;
+    case 'module':    return `m.title, e.updated_at DESC`;
+    case 'submitted':
+    default:          return `COALESCE(e.submitted_at, e.updated_at) DESC`;
+  }
+}
+
+// GET /reports/pd — the full report UI
+app.get('/pd', async (c) => {
+  const user = c.get('user')!;
+  const f = parsePdFilters(c);
+  const { where, binds } = await pdScopeSql(c.env.DB, user, f);
+  const order = pdOrderBy(f.sort);
+
+  const sql = `
+    SELECT
+      e.id                      AS enrollment_id,
+      e.status, e.source, e.source_score_level,
+      e.created_at, e.submitted_at, e.verified_at, e.updated_at,
+      e.verification_note,
+      t.id AS teacher_id, t.first_name AS t_first, t.last_name AS t_last, t.title AS t_title,
+      sc.id AS school_id, sc.name AS school_name,
+      m.id AS module_id, m.title AS module_title, m.target_level, m.est_minutes,
+      i.code AS indicator_code, i.name AS indicator_name, i.id AS indicator_id,
+      d.code AS domain_code, d.name AS domain_name,
+      de.title AS deliverable_title, de.updated_at AS deliverable_updated,
+      vb.first_name AS verifier_first, vb.last_name AS verifier_last
+    FROM pd_enrollments e
+    JOIN users t ON t.id = e.teacher_id
+    LEFT JOIN schools sc ON sc.id = t.school_id
+    JOIN pd_modules m ON m.id = e.module_id
+    JOIN framework_indicators i ON i.id = m.indicator_id
+    JOIN framework_domains d ON d.id = i.domain_id
+    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+    LEFT JOIN users vb ON vb.id = e.verified_by
+    WHERE ${where}
+    ORDER BY ${order}
+    LIMIT 1000`;
+  const rowsRes = binds.length
+    ? await c.env.DB.prepare(sql).bind(...binds).all()
+    : await c.env.DB.prepare(sql).all();
+  const rows = (rowsRes.results as any[]) || [];
+
+  // Totals strip (respects the same filter set)
+  const totalsSql = `
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN e.status='verified' THEN 1 ELSE 0 END) AS verified,
+      SUM(CASE WHEN e.status='submitted' THEN 1 ELSE 0 END) AS submitted,
+      SUM(CASE WHEN e.status='needs_revision' THEN 1 ELSE 0 END) AS needs_revision,
+      SUM(CASE WHEN e.status IN ('recommended','started','learn_done','practice_done') THEN 1 ELSE 0 END) AS in_progress,
+      SUM(CASE WHEN e.status='declined' THEN 1 ELSE 0 END) AS declined,
+      SUM(COALESCE(m.est_minutes,0)) AS total_minutes
+    FROM pd_enrollments e
+    JOIN users t ON t.id = e.teacher_id
+    LEFT JOIN schools sc ON sc.id = t.school_id
+    JOIN pd_modules m ON m.id = e.module_id
+    JOIN framework_indicators i ON i.id = m.indicator_id
+    JOIN framework_domains d ON d.id = i.domain_id
+    WHERE ${where}`;
+  const totals = binds.length
+    ? await c.env.DB.prepare(totalsSql).bind(...binds).first<any>()
+    : await c.env.DB.prepare(totalsSql).first<any>();
+
+  // Lookups for the filter UI
+  const lookups = await buildLookups(c.env.DB, user);
+  const domains = await c.env.DB.prepare(
+    `SELECT DISTINCT d.code, d.name FROM framework_domains d ORDER BY d.sort_order`
+  ).all();
+  const indicators = await c.env.DB.prepare(
+    `SELECT i.id, i.code AS icode, i.name AS iname, d.code AS dcode
+       FROM framework_indicators i JOIN framework_domains d ON d.id = i.domain_id
+       ORDER BY d.sort_order, i.sort_order`
+  ).all();
+
+  return c.html(<PdReportPage user={user} f={f} rows={rows} totals={totals || {}}
+    teachers={lookups.teachers} schools={lookups.schools}
+    domains={(domains.results as any[]) || []} indicators={(indicators.results as any[]) || []} />);
+});
+
+// GET /reports/pd.csv — CSV export with the same filters
+app.get('/pd.csv', async (c) => {
+  const user = c.get('user')!;
+  const f = parsePdFilters(c);
+  const { where, binds } = await pdScopeSql(c.env.DB, user, f);
+  const order = pdOrderBy(f.sort);
+
+  const sql = `
+    SELECT
+      e.id AS enrollment_id, e.status, e.source, e.source_score_level,
+      e.created_at, e.submitted_at, e.verified_at,
+      t.last_name AS t_last, t.first_name AS t_first, t.title AS t_title,
+      sc.name AS school_name,
+      d.code AS domain_code, d.name AS domain_name,
+      i.code AS indicator_code, i.name AS indicator_name,
+      m.title AS module_title, m.target_level, m.est_minutes,
+      de.title AS deliverable_title, de.updated_at AS deliverable_updated,
+      de.body AS deliverable_body,
+      e.verification_note,
+      vb.first_name AS verifier_first, vb.last_name AS verifier_last
+    FROM pd_enrollments e
+    JOIN users t ON t.id = e.teacher_id
+    LEFT JOIN schools sc ON sc.id = t.school_id
+    JOIN pd_modules m ON m.id = e.module_id
+    JOIN framework_indicators i ON i.id = m.indicator_id
+    JOIN framework_domains d ON d.id = i.domain_id
+    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+    LEFT JOIN users vb ON vb.id = e.verified_by
+    WHERE ${where}
+    ORDER BY ${order}
+    LIMIT 5000`;
+  const rowsRes = binds.length
+    ? await c.env.DB.prepare(sql).bind(...binds).all()
+    : await c.env.DB.prepare(sql).all();
+  const rows = (rowsRes.results as any[]) || [];
+
+  const header = [
+    'Enrollment ID','Teacher','Title','School','Domain','Indicator',
+    'Module','Target Level','Est. Minutes','Status','Source','Trigger Score Level',
+    'Created','Submitted','Verified','Verified By','Verifier Note',
+    'Deliverable Title','Deliverable Updated','Deliverable (first 2000 chars)',
+  ];
+  const csvRows = rows.map((r: any) => [
+    r.enrollment_id,
+    `${r.t_last || ''}, ${r.t_first || ''}`,
+    r.t_title || '',
+    r.school_name || '',
+    r.domain_code || '',
+    `${r.domain_code}.${String(r.indicator_code || '').toUpperCase()} — ${r.indicator_name || ''}`,
+    r.module_title || '',
+    r.target_level ?? '',
+    r.est_minutes ?? '',
+    r.status || '',
+    r.source || '',
+    r.source_score_level ?? '',
+    r.created_at || '', r.submitted_at || '', r.verified_at || '',
+    (r.verifier_first || r.verifier_last) ? `${r.verifier_first || ''} ${r.verifier_last || ''}`.trim() : '',
+    r.verification_note || '',
+    r.deliverable_title || '',
+    r.deliverable_updated || '',
+    String(r.deliverable_body || '').slice(0, 2000),
+  ]);
+  await logActivity(c.env.DB, user.id, 'report', null, 'export_pd_csv', { count: rows.length });
+  const csv = buildCsv(header, csvRows);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="pd-completion-${new Date().toISOString().slice(0,10)}.csv"`,
+    },
+  });
+});
+
+// GET /reports/pd/:enrollmentId — read-only drill-down for one row
+app.get('/pd/:id', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const row = await c.env.DB.prepare(
+    `SELECT e.*, t.id AS teacher_id, t.first_name AS t_first, t.last_name AS t_last, t.title AS t_title,
+            sc.name AS school_name,
+            m.title AS module_title, m.subtitle AS module_subtitle, m.target_level, m.est_minutes,
+            m.research_basis, m.deliverable_prompt, m.deliverable_rubric,
+            i.code AS indicator_code, i.name AS indicator_name,
+            d.code AS domain_code, d.name AS domain_name,
+            de.title AS deliverable_title, de.body AS deliverable_body, de.updated_at AS deliverable_updated,
+            vb.first_name AS verifier_first, vb.last_name AS verifier_last,
+            ab.first_name AS assigner_first, ab.last_name AS assigner_last
+       FROM pd_enrollments e
+       JOIN users t ON t.id = e.teacher_id
+       LEFT JOIN schools sc ON sc.id = t.school_id
+       JOIN pd_modules m ON m.id = e.module_id
+       JOIN framework_indicators i ON i.id = m.indicator_id
+       JOIN framework_domains d ON d.id = i.domain_id
+       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+       LEFT JOIN users vb ON vb.id = e.verified_by
+       LEFT JOIN users ab ON ab.id = e.assigned_by
+       WHERE e.id = ?`
+  ).bind(id).first<any>();
+  if (!row) return c.text('Not found', 404);
+
+  // Scope check
+  if (user.role === 'teacher' && row.teacher_id !== user.id) return c.text('Forbidden', 403);
+  if (user.role === 'appraiser' || user.role === 'coach') {
+    const ok = await c.env.DB.prepare(
+      `SELECT 1 FROM assignments WHERE teacher_id=? AND staff_id=? AND active=1 LIMIT 1`
+    ).bind(row.teacher_id, user.id).first();
+    if (!ok) return c.text('Forbidden', 403);
+  }
+
+  const reflections = await c.env.DB.prepare(
+    `SELECT phase, body, created_at FROM pd_reflections WHERE enrollment_id = ? ORDER BY phase`
+  ).bind(id).all();
+
+  return c.html(<PdReportDetail user={user} e={row} reflections={(reflections.results as any[]) || []} />);
+});
+
 export default app;
 
 // ============================================================================
@@ -557,6 +869,10 @@ function ReportsPage({ user, f, observations, teachers, appraisers, schools }: a
 
   return (
     <Layout title="Reports" user={user} activeNav={activeNav}>
+      <div class="mb-2 flex items-center gap-3 flex-wrap text-sm">
+        <span class="px-3 py-1.5 rounded-full bg-aps-navy text-white"><i class="fas fa-clipboard-list mr-1"></i>Observations</span>
+        <a href="/reports/pd" class="px-3 py-1.5 rounded-full bg-white border border-aps-navy text-aps-navy hover:bg-slate-50"><i class="fas fa-graduation-cap mr-1"></i>PD Completion Report</a>
+      </div>
       <h1 class="font-display text-2xl text-aps-navy mb-1" data-tour="reports-title"><i class="fas fa-file-export mr-2"></i>Report Builder</h1>
       <p class="text-slate-600 text-sm mb-4">Build exactly the report you need in three simple steps: <strong>① choose who</strong>, <strong>② choose what to include</strong>, <strong>③ download</strong>. All selections support multi-pick — Ctrl/⌘-click to choose many.</p>
 
@@ -800,5 +1116,305 @@ function PresetButton({ label, title, data }: any) {
     <button type="button" data-preset={JSON.stringify(data)} title={title} class="bg-white border border-aps-navy text-aps-navy px-3 py-1.5 rounded hover:bg-slate-50 text-sm">
       <i class="fas fa-wand-magic-sparkles mr-1 text-aps-gold"></i>{label}
     </button>
+  );
+}
+
+// ============================================================================
+// PD Completion Report views
+// ============================================================================
+
+function pdStatusPill(s: string) {
+  switch (s) {
+    case 'verified':       return { color: 'bg-emerald-50 border-emerald-200 text-emerald-800', icon: 'fa-circle-check', label: 'Verified' };
+    case 'submitted':      return { color: 'bg-violet-50 border-violet-200 text-violet-800',    icon: 'fa-inbox',         label: 'Submitted' };
+    case 'needs_revision': return { color: 'bg-rose-50 border-rose-200 text-rose-800',          icon: 'fa-rotate-left',   label: 'Revision' };
+    case 'practice_done':  return { color: 'bg-indigo-50 border-indigo-200 text-indigo-800',    icon: 'fa-dumbbell',      label: 'Practice done' };
+    case 'learn_done':     return { color: 'bg-sky-50 border-sky-200 text-sky-800',             icon: 'fa-book-open',     label: 'Learn done' };
+    case 'started':        return { color: 'bg-sky-50 border-sky-200 text-sky-800',             icon: 'fa-play',          label: 'Started' };
+    case 'recommended':    return { color: 'bg-amber-50 border-amber-200 text-amber-800',       icon: 'fa-star',          label: 'Recommended' };
+    case 'declined':       return { color: 'bg-slate-50 border-slate-200 text-slate-600',       icon: 'fa-xmark',         label: 'Declined' };
+    default:               return { color: 'bg-slate-50 border-slate-200 text-slate-600',       icon: 'fa-circle',        label: s };
+  }
+}
+
+function PdReportPage({ user, f, rows, totals, teachers, schools, domains, indicators }: any) {
+  const activeNav = user.role === 'super_admin' ? 'admin-reports' :
+                    user.role === 'superintendent' ? 'supt-reports' :
+                    user.role === 'appraiser' ? 'ap-reports' :
+                    user.role === 'teacher' ? 't-reports' : '';
+
+  const qsFor = (overrides: Record<string, string> = {}) => {
+    const parts: string[] = [];
+    const pushArr = (name: string, arr: any[]) => { for (const v of arr) parts.push(`${encodeURIComponent(name)}=${encodeURIComponent(String(v))}`); };
+    pushArr('teacher_ids',   f.teacherIds);
+    pushArr('school_ids',    f.schoolIds);
+    pushArr('domain_codes',  f.domains);
+    pushArr('indicator_ids', f.indicatorIds);
+    pushArr('statuses',      f.statuses);
+    if (f.source) parts.push(`source=${encodeURIComponent(f.source)}`);
+    if (f.from)   parts.push(`from=${encodeURIComponent(f.from)}`);
+    if (f.to)     parts.push(`to=${encodeURIComponent(f.to)}`);
+    parts.push(`sort=${encodeURIComponent(overrides.sort || f.sort)}`);
+    return parts.join('&');
+  };
+
+  const statusChoices = [
+    { key: 'recommended',    label: 'Recommended' },
+    { key: 'started',        label: 'Started' },
+    { key: 'learn_done',     label: 'Learn done' },
+    { key: 'practice_done',  label: 'Practice done' },
+    { key: 'submitted',      label: 'Submitted' },
+    { key: 'needs_revision', label: 'Needs revision' },
+    { key: 'verified',       label: 'Verified' },
+    { key: 'declined',       label: 'Declined' },
+  ];
+
+  return (
+    <Layout title="PD Completion Report" user={user} activeNav={activeNav}>
+      <div class="mb-2 flex items-center gap-3 flex-wrap text-sm">
+        <a href="/reports" class="px-3 py-1.5 rounded-full bg-white border border-aps-navy text-aps-navy hover:bg-slate-50"><i class="fas fa-clipboard-list mr-1"></i>Observations</a>
+        <span class="px-3 py-1.5 rounded-full bg-aps-navy text-white"><i class="fas fa-graduation-cap mr-1"></i>PD Completion Report</span>
+      </div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-graduation-cap mr-2"></i>PD Completion Report</h1>
+      <p class="text-slate-600 text-sm mb-4">
+        Every PD module enrollment across the platform — auto-recommended, self-selected, and supervisor-assigned. Filter by teacher, school, rubric domain/indicator, status, or date; click any row to open the teacher's actual deliverable.
+      </p>
+
+      {/* KPI strip */}
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4">
+        <KpiPd label="Total" v={Number(totals.total || 0)} icon="fa-layer-group" />
+        <KpiPd label="Verified" v={Number(totals.verified || 0)} icon="fa-circle-check" color="text-emerald-700" />
+        <KpiPd label="Submitted" v={Number(totals.submitted || 0)} icon="fa-inbox" color="text-violet-700" />
+        <KpiPd label="Revision" v={Number(totals.needs_revision || 0)} icon="fa-rotate-left" color="text-rose-700" />
+        <KpiPd label="In progress" v={Number(totals.in_progress || 0)} icon="fa-hourglass-half" color="text-sky-700" />
+        <KpiPd label="Total minutes" v={Number(totals.total_minutes || 0)} icon="fa-clock" />
+      </div>
+
+      <form method="get" action="/reports/pd" class="mb-4">
+        <Card title="Filters" icon="fas fa-filter">
+          <div class="grid md:grid-cols-3 gap-4 text-sm">
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Teachers</label>
+              <MultiSelect name="teacher_ids" options={teachers.map((t: any) => ({
+                id: t.id, label: `${t.last_name}, ${t.first_name}${t.school_name ? ` — ${t.school_name}` : ''}`,
+              }))} selected={f.teacherIds} emptyLabel="No teachers in scope." rows={8} />
+              <SelectAllLinks hint="Leave empty to include all in-scope teachers." />
+            </div>
+            {user.role !== 'teacher' && (
+              <div>
+                <label class="block font-medium text-slate-700 mb-1">Schools</label>
+                <MultiSelect name="school_ids" options={schools.map((s: any) => ({ id: s.id, label: s.name }))}
+                  selected={f.schoolIds} emptyLabel="No schools." rows={6} />
+                <SelectAllLinks />
+              </div>
+            )}
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Rubric domains</label>
+              <select name="domain_codes" multiple size={6} class="w-full border border-slate-300 rounded px-2 py-1 text-sm">
+                {domains.map((d: any) => (
+                  <option value={d.code} selected={f.domains.includes(d.code)}>{d.code} — {d.name}</option>
+                ))}
+              </select>
+              <SelectAllLinks />
+            </div>
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Specific indicators</label>
+              <select name="indicator_ids" multiple size={8} class="w-full border border-slate-300 rounded px-2 py-1 text-sm">
+                {indicators.map((i: any) => (
+                  <option value={i.id} selected={f.indicatorIds.includes(i.id)}>
+                    {i.dcode}.{String(i.icode || '').toUpperCase()} — {i.iname}
+                  </option>
+                ))}
+              </select>
+              <SelectAllLinks hint="Overrides the domain filter above when set." />
+            </div>
+            <div>
+              <label class="block font-medium text-slate-700 mb-1">Status</label>
+              <select name="statuses" multiple size={8} class="w-full border border-slate-300 rounded px-2 py-1 text-sm">
+                {statusChoices.map((s: any) => (
+                  <option value={s.key} selected={f.statuses.includes(s.key)}>{s.label}</option>
+                ))}
+              </select>
+              <SelectAllLinks />
+            </div>
+            <div class="space-y-2">
+              <div>
+                <label class="block font-medium text-slate-700 mb-1">Trigger source</label>
+                <select name="source" class="w-full border border-slate-300 rounded px-2 py-1 text-sm">
+                  <option value="" selected={!f.source}>Any</option>
+                  <option value="auto"     selected={f.source==='auto'}>Auto (triggered by low score)</option>
+                  <option value="self"     selected={f.source==='self'}>Self-enrolled (teacher picked)</option>
+                  <option value="assigned" selected={f.source==='assigned'}>Assigned (by supervisor)</option>
+                </select>
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <label>From<input type="date" name="from" value={f.from || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1" /></label>
+                <label>To<input type="date" name="to" value={f.to || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1" /></label>
+              </div>
+              <div>
+                <label class="block font-medium text-slate-700 mb-1">Sort by</label>
+                <select name="sort" class="w-full border border-slate-300 rounded px-2 py-1 text-sm">
+                  <option value="submitted" selected={f.sort==='submitted'}>Most recent activity</option>
+                  <option value="verified"  selected={f.sort==='verified'}>Most recently verified</option>
+                  <option value="teacher"   selected={f.sort==='teacher'}>Teacher (A → Z)</option>
+                  <option value="indicator" selected={f.sort==='indicator'}>Rubric indicator</option>
+                  <option value="status"    selected={f.sort==='status'}>Status</option>
+                  <option value="module"    selected={f.sort==='module'}>Module title</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 flex items-center gap-2 flex-wrap">
+            <button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-filter mr-1"></i>Apply filters</button>
+            <a href="/reports/pd" class="text-sm text-slate-500 hover:underline">Clear</a>
+            <span class="flex-1"></span>
+            <a href={`/reports/pd.csv?${qsFor()}`} class="bg-white border border-aps-navy text-aps-navy px-3 py-1.5 rounded hover:bg-slate-50 text-sm"><i class="fas fa-file-csv mr-1"></i>Download CSV</a>
+          </div>
+        </Card>
+      </form>
+
+      <Card title={`Results (${rows.length}${rows.length >= 1000 ? ' — showing the first 1,000' : ''})`} icon="fas fa-table">
+        {rows.length === 0 ? (
+          <p class="text-sm text-slate-500">No PD records match these filters.</p>
+        ) : (
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="text-xs text-slate-500 text-left bg-slate-50 border-b">
+                <tr>
+                  <th class="py-2 pl-3 pr-2">Teacher</th>
+                  <th class="py-2 px-2">Rubric indicator</th>
+                  <th class="py-2 px-2">Module</th>
+                  <th class="py-2 px-2">Source</th>
+                  <th class="py-2 px-2">Status</th>
+                  <th class="py-2 px-2">Submitted</th>
+                  <th class="py-2 px-2">Verified</th>
+                  <th class="py-2 px-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r: any) => {
+                  const p = pdStatusPill(r.status);
+                  return (
+                    <tr class="border-b border-slate-100 hover:bg-slate-50">
+                      <td class="py-2 pl-3 pr-2">
+                        <div class="text-slate-800 font-medium">{r.t_last}, {r.t_first}</div>
+                        <div class="text-xs text-slate-500">{r.t_title || '—'}{r.school_name ? ` · ${r.school_name}` : ''}</div>
+                      </td>
+                      <td class="py-2 px-2">
+                        <div class="text-xs text-slate-500">{r.domain_code}.{String(r.indicator_code || '').toUpperCase()}</div>
+                        <div class="text-slate-800">{r.indicator_name}</div>
+                      </td>
+                      <td class="py-2 px-2">
+                        <div class="text-slate-800">{r.module_title}</div>
+                        <div class="text-xs text-slate-500">target &ge; L{r.target_level} · {r.est_minutes || 0}m</div>
+                      </td>
+                      <td class="py-2 px-2 text-xs">
+                        {r.source === 'auto' ? (<><i class="fas fa-wand-magic-sparkles mr-1 text-amber-600"></i>Auto (L{r.source_score_level || '?'})</>) :
+                         r.source === 'assigned' ? (<><i class="fas fa-user-tie mr-1 text-sky-600"></i>Assigned</>) :
+                         (<><i class="fas fa-hand-point-up mr-1 text-slate-500"></i>Self</>)}
+                      </td>
+                      <td class="py-2 px-2"><span class={`text-xs px-2 py-0.5 rounded-full border ${p.color}`}><i class={`fas ${p.icon} mr-1`}></i>{p.label}</span></td>
+                      <td class="py-2 px-2 text-xs text-slate-600">{r.submitted_at ? formatDate(r.submitted_at) : '—'}</td>
+                      <td class="py-2 px-2 text-xs text-slate-600">{r.verified_at ? formatDate(r.verified_at) : '—'}</td>
+                      <td class="py-2 px-2 text-right"><a href={`/reports/pd/${r.enrollment_id}`} class="text-xs text-aps-blue hover:underline">Open <i class="fas fa-chevron-right"></i></a></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </Layout>
+  );
+}
+
+function KpiPd({ label, v, icon, color }: any) {
+  return (
+    <div class="bg-white border border-slate-200 rounded-md p-3">
+      <div class="flex items-center justify-between">
+        <div class="text-xs text-slate-500 uppercase">{label}</div>
+        <i class={`fas ${icon} ${color || 'text-aps-navy'}`}></i>
+      </div>
+      <div class="text-2xl font-display text-aps-navy mt-1">{v}</div>
+    </div>
+  );
+}
+
+function PdReportDetail({ user, e, reflections }: any) {
+  const activeNav = user.role === 'super_admin' ? 'admin-reports' :
+                    user.role === 'superintendent' ? 'supt-reports' :
+                    user.role === 'appraiser' ? 'ap-reports' :
+                    user.role === 'teacher' ? 't-reports' : '';
+  const pill = pdStatusPill(e.status);
+  const refMap: Record<string, string> = {};
+  for (const r of reflections) refMap[r.phase] = r.body;
+  return (
+    <Layout title="PD Completion Detail" user={user} activeNav={activeNav}>
+      <div class="mb-2"><a href="/reports/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to PD Completion Report</a></div>
+      <h1 class="font-display text-2xl text-aps-navy">{e.module_title}</h1>
+      <p class="text-slate-600 text-sm">{e.domain_code}.{String(e.indicator_code || '').toUpperCase()} — {e.indicator_name} · target &ge; level {e.target_level}</p>
+      <p class="text-slate-700 text-sm mt-1">
+        Teacher: <strong>{e.t_first} {e.t_last}</strong>
+        {e.t_title ? <span class="text-slate-500"> · {e.t_title}</span> : null}
+        {e.school_name ? <span class="text-slate-500"> · {e.school_name}</span> : null}
+      </p>
+      <div class="mt-2 flex items-center gap-2 flex-wrap">
+        <span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span>
+        <span class="text-xs text-slate-500"><i class="far fa-clock mr-1"></i>{e.est_minutes || 0} min</span>
+        {e.source === 'auto'     && <span class="text-xs text-amber-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Auto from Level {e.source_score_level || '?'}</span>}
+        {e.source === 'assigned' && <span class="text-xs text-sky-700"><i class="fas fa-user-tie mr-1"></i>Assigned by {e.assigner_first} {e.assigner_last}</span>}
+      </div>
+
+      <div class="grid md:grid-cols-4 gap-3 mt-4 text-xs">
+        <div class="bg-white border border-slate-200 rounded p-3"><div class="text-slate-500 uppercase">Recommended</div><div class="text-slate-800 mt-1">{e.created_at ? formatDateTime(e.created_at) : '—'}</div></div>
+        <div class="bg-white border border-slate-200 rounded p-3"><div class="text-slate-500 uppercase">Learn done</div><div class="text-slate-800 mt-1">{e.learn_done_at ? formatDateTime(e.learn_done_at) : '—'}</div></div>
+        <div class="bg-white border border-slate-200 rounded p-3"><div class="text-slate-500 uppercase">Submitted</div><div class="text-slate-800 mt-1">{e.submitted_at ? formatDateTime(e.submitted_at) : '—'}</div></div>
+        <div class="bg-white border border-slate-200 rounded p-3"><div class="text-slate-500 uppercase">Verified</div><div class="text-slate-800 mt-1">{e.verified_at ? formatDateTime(e.verified_at) : '—'}{e.verifier_first ? <div class="text-slate-500 mt-0.5">by {e.verifier_first} {e.verifier_last}</div> : null}</div></div>
+      </div>
+
+      {e.research_basis && (
+        <Card title="Research basis" icon="fas fa-book" class="mt-4">
+          <div class="text-sm text-slate-700 whitespace-pre-wrap">{e.research_basis}</div>
+        </Card>
+      )}
+
+      <Card title="The deliverable the teacher submitted" icon="fas fa-file-alt" class="mt-4">
+        {e.deliverable_body ? (
+          <>
+            <div class="font-medium text-aps-navy mb-2">{e.deliverable_title || 'Untitled'}</div>
+            <div class="p-3 bg-slate-50 border border-slate-200 rounded text-sm whitespace-pre-wrap leading-relaxed">{e.deliverable_body}</div>
+            {e.deliverable_updated && <div class="mt-2 text-xs text-slate-500">Last updated {formatDateTime(e.deliverable_updated)}</div>}
+          </>
+        ) : (
+          <p class="text-sm text-slate-500 italic">The teacher has not submitted a deliverable yet.</p>
+        )}
+      </Card>
+
+      <Card title="Phase reflections" icon="fas fa-comments" class="mt-4">
+        {(['learn','practice','apply']).map((p) => (
+          <div class="mb-3">
+            <div class="text-xs font-semibold uppercase text-slate-500">{p === 'learn' ? 'Learn' : p === 'practice' ? 'Practice' : 'Apply'}</div>
+            <div class="text-sm text-slate-800 whitespace-pre-wrap">{refMap[p] || <span class="text-slate-400 italic">No reflection</span>}</div>
+          </div>
+        ))}
+      </Card>
+
+      <Card title="Deliverable prompt (what the teacher was asked to produce)" icon="fas fa-clipboard-list" class="mt-4">
+        <div class="text-sm text-slate-700 whitespace-pre-wrap">{e.deliverable_prompt}</div>
+        {e.deliverable_rubric && (
+          <details class="mt-2 text-xs">
+            <summary class="cursor-pointer text-aps-blue">Rubric / "looks like"</summary>
+            <div class="mt-1 whitespace-pre-wrap text-slate-700">{e.deliverable_rubric}</div>
+          </details>
+        )}
+      </Card>
+
+      {e.verification_note && (
+        <Card title="Supervisor note" icon="fas fa-gavel" class="mt-4">
+          <div class="text-sm text-slate-800 whitespace-pre-wrap">{e.verification_note}</div>
+        </Card>
+      )}
+    </Layout>
   );
 }

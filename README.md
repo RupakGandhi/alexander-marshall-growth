@@ -11,6 +11,33 @@ Complete role-specific user guides and a full technical developer guide are in *
 - [Teacher Guide](docs/USER_GUIDE_TEACHER.md)
 - [**Technical Developer Guide**](docs/TECHNICAL_DEVELOPER_GUIDE.md) — architecture, schema, API reference, and step-by-step replication guide
 
+## ⭐ What's New (Round 2)
+
+### In‑app notifications + Web Push (replaces all email/SMS)
+- **Bell in the header on every page.** Unread badge, click‑to‑open dropdown, "Mark all read", deep‑links to the related screen.
+- **Web Push** to installed PWAs on any device — Android, iOS 16.4+, macOS, Windows, Chromebook. Zero subscription cost: the district owns its own VAPID key pair generated inside the app on first use.
+- **Workflow‑wired**: publishing an observation → teacher notified; teacher acknowledges → appraiser (and super admin) notified; focus area opened → teacher notified; annual summary published → superintendents notified; PD deliverable submitted / verified / needs revision — all wired automatically.
+- **Per‑user settings** on `/profile#notifications`:
+  - 🔴 **Master push on/off** (one‑click "silence all devices")
+  - 🔴 **Master in‑app on/off** (hide bell badge district‑wide for this user)
+  - ✅ Per‑kind granular toggle (in‑app + push for every kind in the catalog)
+
+### Floating PD Day — deterministic, research‑based PD LMS
+- **120 PD modules seeded** (60 indicators × 2 growth levels), each with Learn → Practice → Apply content, a concrete **classroom deliverable prompt**, a rubric, and resource links.
+- **Auto‑enrollment on low scores** (level ≤ 2): publishing an observation auto‑recommends up to 3 modules per low indicator into the teacher's PD LMS — exactly the same deterministic DB logic as the feedback engine, no AI calls.
+- **Teacher "My PD LMS"** (`/teacher/pd`) shows every module recommended/assigned, tracks completion by phase, accepts the deliverable inside the platform, and keeps per‑phase reflection notes.
+- **Supervisor PD Review** (`/pd/review`) — appraisers and coaches verify or send back for revision (and the teacher is notified in‑app/push).
+- **Super‑admin module management** (`/admin/pd`) — add, edit, archive modules with full content, deliverable, rubric, resources.
+- **Overload guard**: modules are idempotent per `(teacher × module × source observation)` and bucketed by status to avoid flooding.
+
+### PD Completion Report
+- New **`/reports/pd`** page and **`/reports/pd.csv`** export: every enrollment across the platform, filterable by teacher, school, rubric domain/indicator, status, source, and date range, sortable six ways, with KPI strip (total / verified / submitted / revision / in progress / total minutes).
+- **Drill‑down** at `/reports/pd/:enrollmentId` shows the module, the teacher's actual deliverable (title + body + any attachment), all reflections, verification notes, and timestamps — so administrators can show exactly which modules a teacher completed and what they produced.
+- Scoping matches the rest of the platform: teachers see only themselves, coaches/appraisers see only their assigned teachers, superintendent and super_admin see the district.
+
+### Schools ↔ Appraisers (distinct role)
+- Any user may be assigned to **one or more schools** via `user_schools`. This is distinct from the **appraiser** role: being in a school links a person to that building for scoping (appraiser queues, reports, superintendent drill‑down) while the **role** determines what they can *do*. A principal is `role = appraiser` **and** `user_schools = {their building}`; a district‑level appraiser can have `user_schools = {all buildings}`.
+
 ## Project Overview
 - **Name**: Alexander Public Schools — Marshall Growth Platform
 - **District**: Alexander Public School District · 601 Delaney St, Alexander, ND 58831 · 701‑828‑3334
@@ -84,8 +111,20 @@ All deterministic — **no runtime AI, no external APIs**. Super‑admin can edi
 | `/health` | GET | JSON health probe |
 
 ### Profile (all authenticated)
-| `/profile` | GET/POST | Edit own profile |
+| `/profile` | GET/POST | Edit own profile + notification master switches + per‑kind preferences |
 | `/profile/password` | POST | Change own password |
+| `/profile/notifications` | POST | Save master push/in‑app + per‑kind in‑app/push preferences |
+
+### Notifications & Web Push API (all authenticated, JSON)
+| `/api/notifications/summary` | GET | `{ unread: N }` — polled every 45 s by the bell |
+| `/api/notifications` | GET | Recent notification list for the dropdown |
+| `/api/notifications/latest` | GET | Freshest unread, used by the service worker on push |
+| `/api/notifications/:id/read` | POST | Mark one read |
+| `/api/notifications/read-all` | POST | Mark all read |
+| `/api/notifications/:id/delete` | POST | Remove one |
+| `/api/push/public-key` | GET | District VAPID public key for `pushManager.subscribe` |
+| `/api/push/subscribe` | POST | Register a browser push endpoint |
+| `/api/push/unsubscribe` | POST | Remove one endpoint |
 
 ### Super Admin (`super_admin` only)
 | `/admin` | GET | KPIs + activity log |
@@ -123,6 +162,32 @@ All deterministic — **no runtime AI, no external APIs**. Super‑admin can edi
 | `/teacher/observations/:id` | GET | View one published observation |
 | `/teacher/observations/:id/acknowledge` | POST | Sign to acknowledge (+ optional response) |
 | `/teacher/focus` | GET | My focus areas |
+| `/teacher/pd` | GET | My PD LMS (Floating PD Day) — all recommended/assigned modules |
+| `/teacher/pd/library` | GET | Browse all active PD modules (self‑enroll) |
+| `/teacher/pd/modules/:id/enroll` | POST | Self‑enroll |
+| `/teacher/pd/enroll/:id` | GET | Module workspace — Learn / Practice / Apply |
+| `/teacher/pd/enroll/:id/advance` | POST | Advance phase |
+| `/teacher/pd/enroll/:id/reflect` | POST | Save a per‑phase reflection |
+| `/teacher/pd/enroll/:id/submit` | POST | Submit the deliverable (notifies supervisors) |
+| `/teacher/pd/plans` | GET / POST | Build a multi‑module "Floating PD Day" plan |
+
+### PD Review (appraiser + coach)
+| `/pd/review` | GET | Queue of submitted deliverables to verify |
+| `/pd/review/:enrollmentId` | GET | Read the deliverable + reflections |
+| `/pd/review/:enrollmentId/verify` | POST | Mark verified (teacher notified) |
+| `/pd/review/:enrollmentId/revision` | POST | Request revision (teacher notified) |
+| `/pd/review/assign` | POST | Assign a specific module to a supervised teacher |
+
+### PD Module Management (super_admin)
+| `/admin/pd` | GET | List all modules with counts |
+| `/admin/pd/new` | GET / POST | Create a new module |
+| `/admin/pd/:id` | GET / POST | Edit module content, deliverable, rubric, resources |
+| `/admin/pd/:id/archive` | POST | Soft‑archive |
+
+### Reports — PD Completion (role‑scoped)
+| `/reports/pd` | GET | Full on‑screen report: filters, KPI strip, sortable table |
+| `/reports/pd.csv` | GET | CSV export of the filtered rows |
+| `/reports/pd/:enrollmentId` | GET | Drill‑down: module + teacher's actual deliverable + reflections |
 
 ### Coach
 | `/coach` | GET | My coached teachers |
@@ -137,6 +202,7 @@ All deterministic — **no runtime AI, no external APIs**. Super‑admin can edi
 
 ### API (JSON)
 | `/api/pedagogy/:indicatorId/:level` | GET | Live pedagogy lookup for appraiser UI |
+| `/api/notifications/*` | — | See "Notifications & Web Push API" above |
 
 ## Data Architecture
 
@@ -145,6 +211,7 @@ All deterministic — **no runtime AI, no external APIs**. Super‑admin can edi
 **Main tables** (see `migrations/0001_initial_schema.sql`):
 - `districts`, `schools`, `school_years`
 - `users`, `sessions`
+- `user_schools` *(0002)* — many‑to‑many link distinct from the `role` column
 - `assignments` (teacher ↔ appraiser/coach per school year)
 - `frameworks`, `framework_domains`, `framework_indicators`, `framework_descriptors`
 - `pedagogy_library` (uniq on `indicator_id + level`)
@@ -152,10 +219,27 @@ All deterministic — **no runtime AI, no external APIs**. Super‑admin can edi
 - `focus_areas` (persistent, carry across observations)
 - `activity_log` (audit trail)
 
+**Notifications (migration 0003)**:
+- `notifications` — the source of truth; bell, badge, and push all read from here
+- `notification_preferences` — per‑user, per‑kind in‑app + push opt‑in
+- `push_subscriptions` — one row per browser/device; auto‑pruned on 404/410
+- `vapid_keys` — single‑row district VAPID identity, self‑generated
+
+**PD LMS (migration 0003)**:
+- `pd_modules` — keyed by `(indicator_id, target_level)`, holds Learn/Practice/Apply content, deliverable prompt, rubric, resources, `is_active`
+- `pd_enrollments` — per‑teacher enrollment; status machine `recommended → started → learn_done → practice_done → submitted → verified / needs_revision / declined`
+- `pd_reflections` — one row per `(enrollment, phase)` for free‑text teacher reflection
+- `pd_deliverables` — the teacher's actual classroom deliverable (title, body, optional attachment url)
+- `pd_plans` + `pd_plan_items` — multi‑module "Floating PD Day" plans
+
+**User settings (migration 0004)**:
+- `user_settings` — master push on/off + master in‑app on/off per user (quiet‑hours reserved)
+
 **Seeds** (all idempotent `INSERT OR IGNORE` / `INSERT OR REPLACE`):
 - `seed/001_district_and_framework.sql` — district, schools, Marshall framework + descriptors
 - `seed/002_pedagogy_library.sql` — 240 pedagogy cells
 - `seed/003_alexander_staff.sql` — real APS staff + assignments, default password `Alexander2026!`
+- `seed/004_pd_modules.sql` — **120 PD modules** (60 indicators × 2 growth levels), deterministic, research‑based
 
 ## User Guide
 

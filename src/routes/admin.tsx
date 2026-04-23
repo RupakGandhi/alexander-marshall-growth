@@ -81,6 +81,15 @@ app.post('/users/create', async (c) => {
     const newId = Number((res.meta as any)?.last_row_id);
     if (schoolIds.length) await setUserSchools(c.env.DB, newId, schoolIds);
     await logActivity(c.env.DB, user.id, 'user', newId, 'create_user', { email, role, schoolIds });
+    // Welcome notification — shown on first sign-in bell
+    await notify(c.env.DB, {
+      user_id: newId,
+      kind: 'account_created',
+      title: 'Welcome to the Marshall Growth Platform',
+      body: `Your ${role} account is active. Use your temporary password to sign in, then change it on the Profile page.`,
+      url: '/profile',
+      entity_type: 'user', entity_id: newId, actor_user_id: user.id,
+    }, c.env);
     return c.redirect(`/admin/users?msg=Created+${encodeURIComponent(first+' '+last)}`);
   } catch (e: any) {
     return c.redirect('/admin/users?msg=' + encodeURIComponent('Could not create user: ' + (e.message || e)));
@@ -131,6 +140,12 @@ app.post('/users/:id/reset-password', async (c) => {
   // kill active sessions
   await c.env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
   await logActivity(c.env.DB, user.id, 'user', id, 'reset_password');
+  await notify(c.env.DB, {
+    user_id: id, kind: 'password_reset',
+    title: 'Your password was reset by an administrator',
+    body: 'You will be asked to set a new password the next time you sign in.',
+    url: '/profile', entity_type: 'user', entity_id: id, actor_user_id: user.id,
+  }, c.env);
   return c.redirect('/admin/users?msg=Password+reset+to+' + encodeURIComponent(pw));
 });
 

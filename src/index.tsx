@@ -13,6 +13,7 @@ import superintendentRoutes from './routes/superintendent';
 import adminRoutes from './routes/admin';
 import apiRoutes from './routes/api';
 import reportsRoutes from './routes/reports';
+import { teacherPd, reviewPd, adminPd } from './routes/pd';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -27,10 +28,13 @@ app.get('/', async (c) => {
 
 app.route('/', authRoutes);
 app.route('/profile', profileRoutes);
+app.route('/teacher/pd', teacherPd);            // mount BEFORE /teacher so /teacher/pd/* wins
 app.route('/teacher', teacherRoutes);
 app.route('/appraiser', appraiserRoutes);
 app.route('/coach', coachRoutes);
 app.route('/superintendent', superintendentRoutes);
+app.route('/pd/review', reviewPd);
+app.route('/admin/pd', adminPd);
 app.route('/admin', adminRoutes);
 app.route('/reports', reportsRoutes);
 app.route('/api', apiRoutes);

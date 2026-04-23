@@ -145,6 +145,32 @@ function navFor(user: User, active?: string) {
             <div class="text-xs text-aps-sky truncate max-w-[10rem]">{roleLabel(user.role)}</div>
           </div>
 
+          {/* Notification bell */}
+          <div class="relative" id="aps-bell-root">
+            <button
+              type="button"
+              id="aps-bell-btn"
+              class="relative w-10 h-10 flex items-center justify-center rounded-full hover:bg-aps-blue focus:outline-none focus:ring-2 focus:ring-white"
+              aria-label="Notifications" aria-haspopup="true" aria-expanded="false"
+              onclick="window.APSBell && window.APSBell.toggle(event)"
+            >
+              <i class="fas fa-bell text-lg"></i>
+              <span id="aps-bell-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center border border-aps-navy">0</span>
+            </button>
+            <div id="aps-bell-panel" class="hidden absolute right-0 mt-1 w-80 sm:w-96 max-h-[70vh] overflow-hidden bg-white text-slate-800 rounded-md shadow-xl z-50 border border-slate-200 flex flex-col">
+              <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+                <div class="text-sm font-semibold text-aps-navy">Notifications</div>
+                <button type="button" class="text-xs text-aps-blue hover:underline" onclick="window.APSBell && window.APSBell.markAllRead()">Mark all read</button>
+              </div>
+              <div id="aps-bell-list" class="flex-1 overflow-y-auto text-sm">
+                <div class="p-6 text-center text-slate-400 text-xs" id="aps-bell-empty">Loading…</div>
+              </div>
+              <div class="px-4 py-2 border-t border-slate-200 text-center">
+                <a href="/profile#notifications" class="text-xs text-aps-blue hover:underline"><i class="fas fa-sliders mr-1"></i>Notification settings</a>
+              </div>
+            </div>
+          </div>
+
           {/* User avatar + menu */}
           <div class="relative" id="user-menu-root">
             <button
@@ -217,6 +243,7 @@ function navItems(role: string) {
         { key: 'admin-assign',   label: 'Assignments',       href: '/admin/assignments',  icon: 'fas fa-user-group' },
         { key: 'admin-schools',  label: 'Schools',           href: '/admin/schools',      icon: 'fas fa-school' },
         { key: 'admin-pedagogy', label: 'Pedagogy Library',  href: '/admin/pedagogy',     icon: 'fas fa-book' },
+        { key: 'admin-pd',       label: 'PD Modules',        href: '/admin/pd',           icon: 'fas fa-graduation-cap' },
         { key: 'admin-framework',label: 'Framework',         href: '/admin/framework',    icon: 'fas fa-list-check' },
         { key: 'admin-import',   label: 'Bulk Import',       href: '/admin/import/users', icon: 'fas fa-file-import' },
         { key: 'admin-reports',  label: 'Reports',           href: '/reports',            icon: 'fas fa-file-export' },
@@ -233,20 +260,23 @@ function navItems(role: string) {
       ];
     case 'appraiser':
       return [
-        { key: 'ap-home',    label: 'My Teachers',    href: '/appraiser',             icon: 'fas fa-chalkboard-user' },
-        { key: 'ap-obs',     label: 'Observations',   href: '/appraiser/observations',icon: 'fas fa-clipboard-list' },
-        { key: 'ap-reports', label: 'Reports',        href: '/reports',               icon: 'fas fa-file-export' },
+        { key: 'ap-home',      label: 'My Teachers',   href: '/appraiser',             icon: 'fas fa-chalkboard-user' },
+        { key: 'ap-obs',       label: 'Observations',  href: '/appraiser/observations',icon: 'fas fa-clipboard-list' },
+        { key: 'pd-review',    label: 'PD Review',     href: '/pd/review',             icon: 'fas fa-clipboard-check' },
+        { key: 'ap-reports',   label: 'Reports',       href: '/reports',               icon: 'fas fa-file-export' },
       ];
     case 'coach':
       return [
-        { key: 'co-home',  label: 'My Teachers',    href: '/coach',                 icon: 'fas fa-chalkboard-user' },
+        { key: 'co-home',   label: 'My Teachers',  href: '/coach',      icon: 'fas fa-chalkboard-user' },
+        { key: 'pd-review', label: 'PD Review',    href: '/pd/review',  icon: 'fas fa-clipboard-check' },
       ];
     case 'teacher':
       return [
-        { key: 't-home',    label: 'My Dashboard',   href: '/teacher',                icon: 'fas fa-gauge' },
-        { key: 't-obs',     label: 'Observations',   href: '/teacher/observations',   icon: 'fas fa-clipboard-list' },
-        { key: 't-focus',   label: 'Focus Areas',    href: '/teacher/focus',          icon: 'fas fa-bullseye' },
-        { key: 't-reports', label: 'Exports',        href: '/reports',                icon: 'fas fa-file-export' },
+        { key: 't-home',    label: 'My Dashboard',  href: '/teacher',              icon: 'fas fa-gauge' },
+        { key: 't-obs',     label: 'Observations',  href: '/teacher/observations', icon: 'fas fa-clipboard-list' },
+        { key: 't-focus',   label: 'Focus Areas',   href: '/teacher/focus',        icon: 'fas fa-bullseye' },
+        { key: 't-pd',      label: 'My PD LMS',     href: '/teacher/pd',           icon: 'fas fa-graduation-cap' },
+        { key: 't-reports', label: 'Exports',       href: '/reports',              icon: 'fas fa-file-export' },
       ];
     default:
       return [];

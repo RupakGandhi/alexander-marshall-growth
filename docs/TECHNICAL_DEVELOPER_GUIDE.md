@@ -1267,3 +1267,174 @@ Then access in code via `c.env.MAIL_API_KEY`.
 **Last updated:** 2026-04-22
 **Maintainer:** Dr. Rupak Gandhi, OptimizED Strategic Solutions
 **Contact:** https://github.com/RupakGandhi/alexander-marshall-growth/issues
+
+---
+
+# 14. Notifications & Web Push (Round 2)
+
+All outbound email / SMS has been **replaced** by an in‑app notification + Web Push system that the district owns outright. No Resend, SendGrid, Twilio, Mailgun, AWS SES, or any other paid subscription.
+
+## 14.1 Data model (`migrations/0003_notifications_and_pd.sql`)
+
+```
+notifications          — one row per alert; the source of truth
+  user_id, kind, title, body, url, icon, severity,
+  entity_type, entity_id, actor_user_id,
+  read_at (NULL = unread), created_at
+
+notification_preferences   — per user × per kind
+  user_id, kind, in_app (default 1), push (default 1)
+
+push_subscriptions     — one row per browser/device
+  user_id, endpoint UNIQUE, p256dh, auth, user_agent,
+  created_at, last_used_at
+
+vapid_keys             — single‑row district identity
+  public_key (raw 65‑byte b64url),
+  private_key (full JWK as JSON),
+  subject (default mailto:admin@alexanderschoolnd.us)
+```
+
+Plus `user_settings` (migration 0004) — master switches per user:
+```
+user_settings
+  user_id PK, push_enabled (0/1), in_app_enabled (0/1),
+  quiet_hours TEXT (reserved), updated_at
+```
+
+## 14.2 The write path — `src/lib/notifications.ts`
+
+```ts
+import { notify, notifyMany, NOTIFICATION_KINDS } from '../lib/notifications';
+
+await notify(c.env.DB, {
+  user_id: teacherId,
+  kind:    'observation_published',
+  title:   'New observation published by Principal Allard',
+  body:    'Mini on “Fractions” — please read and sign.',
+  url:     `/teacher/observations/${obsId}`,
+  entity_type: 'observation',
+  entity_id:   obsId,
+  actor_user_id: publisherId,
+}, c.env);
+```
+
+`notify()` is **opinionated**:
+1. Looks up master switches (`user_settings`). If either master is off, short‑circuits.
+2. Looks up per‑kind preference. If `in_app=0`, writes nothing and returns 0.
+3. INSERTs the row.
+4. If `env` was passed AND `master push=1` AND per‑kind `push=1`, fires `pushTo()` best‑effort. Errors are swallowed — persistence is always authoritative.
+
+## 14.3 Push: empty‑payload VAPID (zero‑crypto‑hell)
+
+Most Web Push tutorials send AES‑GCM ECE‑encrypted payloads. That's painful in a Cloudflare Worker. We go a simpler route:
+
+1. Generate a district VAPID key pair once with Web Crypto (`ECDSA P‑256`), store the public key as raw b64url and the private key as a full JWK string. Invariant: **one row** in `vapid_keys`.
+2. On each push we sign a short VAPID JWT (`aud=origin`, `exp`, `sub=vapid.subject`) with `ECDSA/SHA-256` and POST an **empty body** to every endpoint:
+   ```
+   TTL: 86400
+   Urgency: normal
+   Authorization: vapid t=<JWT>, k=<public_key_b64url>
+   ```
+3. The service worker (`public/static/sw.js`, cache v4+) handles `push` events by calling back to `/api/notifications/latest`, reading the freshest unread row for the signed‑in user, and calling `registration.showNotification(...)`.
+
+This way every device only sees metadata that was already persisted in D1 — no leak risk and no ECE dance.
+
+Dead endpoints (`404 / 410`) are auto‑pruned from `push_subscriptions` on the next delivery attempt.
+
+## 14.4 Client wiring
+
+- **Bell** — `public/static/app.js → APSBell` polls `/api/notifications/summary` every 45 s, lazy‑loads `/api/notifications` on first open, and `POST /api/notifications/:id/read` on click. Rendered from the server in `src/lib/layout.tsx` inside the header.
+- **Push registration** — the first bell‑click requests `Notification.permission`, then calls `pushManager.subscribe({ applicationServerKey: <vapidPublicB64> })` and POSTs the endpoint/keys to `/api/push/subscribe`. No registration happens without an explicit user gesture.
+- **Service worker** — bumped cache to `v4` and added `push` + `notificationclick` handlers. On click, focuses an existing client if one is already on the target URL, else opens a new window.
+
+## 14.5 All wired workflow hooks
+
+| Event | File | Notification kind |
+|-------|------|-------------------|
+| Publish observation | `src/routes/appraiser.tsx` | `observation_published` (teacher) + `focus_area_opened` (teacher, per promoted item) + `annual_summary_published` (superintendents) |
+| Teacher acknowledges | `src/routes/teacher.tsx` | `observation_acknowledged` (appraiser + super_admin) |
+| Publish observation with low scores | `src/lib/pd.ts:autoEnrollForObservation` | `pd_module_recommended` (teacher) |
+| Supervisor assigns module | `src/lib/pd.ts:enrollTeacher('assigned')` | `pd_module_assigned` (teacher) |
+| Teacher submits deliverable | `src/lib/pd.ts:submitDeliverable` | `pd_deliverable_submitted` (supervisors) |
+| Supervisor verifies | `src/lib/pd.ts:verifyDeliverable('verified')` | `pd_deliverable_verified` (teacher) |
+| Supervisor requests revision | `src/lib/pd.ts:verifyDeliverable('needs_revision')` | `pd_deliverable_revision` (teacher) |
+
+---
+
+# 15. Floating PD Day — deterministic PD LMS
+
+## 15.1 Data model
+
+```
+pd_modules
+  indicator_id, target_level (1 or 2 = the next level up from low score),
+  title, subtitle, est_minutes,
+  research_basis, learn_content, practice_content, apply_content,
+  deliverable_prompt, deliverable_rubric, resources,
+  is_active, created_by, timestamps
+
+pd_enrollments
+  teacher_id, module_id, source ('auto'|'self'|'assigned'),
+  source_observation_id, source_score_level, assigned_by,
+  status ('recommended'|'started'|'learn_done'|'practice_done'
+         |'submitted'|'needs_revision'|'verified'|'declined'),
+  learn_done_at, practice_done_at, submitted_at, verified_at,
+  declined_at, verified_by, verification_note, decline_reason
+
+pd_reflections       — one per (enrollment, phase)
+pd_deliverables      — one per enrollment (title, body, attachment_url)
+pd_plans + pd_plan_items — multi‑module “Floating PD Day”
+```
+
+Idempotency: `pd_enrollments(teacher_id, module_id, source_observation_id)` is UNIQUE — a given observation can never spam duplicate modules on re‑publish.
+
+## 15.2 Auto‑enrollment logic
+
+`src/lib/pd.ts:autoEnrollForObservation(db, obsId, env)`:
+1. Select every `observation_scores` row with `score <= AUTO_ENROLL_THRESHOLD (= 2)`.
+2. For each scored indicator, look up up to 3 `pd_modules WHERE indicator_id = ? AND target_level = score+1 AND is_active = 1`.
+3. `INSERT OR IGNORE` into `pd_enrollments` with `source='auto'`, carrying `source_observation_id` and `source_score_level`.
+4. For each new enrollment, `notify(... 'pd_module_recommended')`.
+
+**No AI.** Same deterministic pattern as the feedback engine — the database *is* the logic.
+
+## 15.3 State machine
+
+```
+ recommended ──start──▶ started ──learn──▶ learn_done ──practice──▶
+ practice_done ──apply/submit──▶ submitted
+     │                                         ├──verify──▶ verified  (terminal)
+     │                                         └──revision──▶ needs_revision ──apply/submit──▶ submitted
+     └──decline──▶ declined (terminal)
+```
+
+Implemented in `advanceEnrollment`, `submitDeliverable`, `verifyDeliverable`. Illegal transitions throw.
+
+## 15.4 Routes
+
+- **Teacher**: `/teacher/pd` (My PD LMS), `/teacher/pd/library`, `/teacher/pd/enroll/:id` (workspace with Learn/Practice/Apply tabs), `/teacher/pd/enroll/:id/submit`, `/teacher/pd/plans`.
+- **Supervisor**: `/pd/review` (queue), `/pd/review/:enrollmentId` (read deliverable + reflections), `/pd/review/:enrollmentId/verify`, `/pd/review/:enrollmentId/revision`, `/pd/review/assign`.
+- **Super‑admin**: `/admin/pd`, `/admin/pd/new`, `/admin/pd/:id`, `/admin/pd/:id/archive`.
+
+## 15.5 Reporting — `/reports/pd`
+
+In `src/routes/reports.tsx`:
+- Filter model `PdFilters`: teacherIds, schoolIds, domain codes, indicator ids, statuses, source, from, to, sort.
+- Role scoping mirrors observations: teacher→self, coach/appraiser→caseload, superintendent/super_admin→district.
+- `/reports/pd` renders the `PdReportPage` with KPI strip, filter bar, sortable table.
+- `/reports/pd.csv` streams a CSV with identical filters (used for board packets).
+- `/reports/pd/:enrollmentId` renders `PdReportDetail` with the teacher's actual deliverable body + per‑phase reflections.
+
+---
+
+# 16. Schools ↔ Appraisers (clarification)
+
+`user_schools` (introduced in migration `0002_multi_school_and_indexes.sql`) is the **scope** axis; `users.role` is the **permission** axis. They are independent. Every query that returns "school data for me" joins `user_schools` on the signed‑in user; every query that returns "what I can do" checks `users.role`.
+
+A principal is `role=appraiser` AND `user_schools={building}`; a district appraiser would be `role=appraiser` AND `user_schools={every building}`. Coaches, counselors, teachers work the same way.
+
+## Changelog
+
+- **Round 2 (this batch)** — In‑app + Web Push notifications (migration 0003), per‑user master switches (migration 0004), 120 deterministic PD modules (seed 004), Floating PD Day LMS, PD Review queue, PD Completion Report with CSV + drill‑down, schools↔appraisers clarified, all guided tours and all user guides updated.
+- **Round 1** — Mobile responsiveness, installable PWA, role‑specific guided tour, multi‑school support, multi‑select assignments, bulk CSV imports, Report Builder.

@@ -255,3 +255,21 @@ When the appraiser's next observation scores that indicator higher. You can comp
 ---
 
 *Questions? Contact your Super Admin or OptimizED Strategic Solutions.*
+
+---
+
+## 🔔 Notifications + PD Review (new)
+
+Coaches now see a bell in the top‑right header. It will ping you for:
+- **PD deliverable submitted** by a teacher on your caseload
+- Any module you assigned being completed
+- Coach‑relevant focus‑area updates
+
+Click the bell to jump straight to the item. Install the platform on your phone (Add to Home Screen / Install App) to receive push alerts on any device — **no email or SMS cost to the district**.
+
+Turn individual alerts off on `/profile#notifications` — there's a master push switch and master in‑app switch for blanket control, plus per‑kind toggles.
+
+### PD Review (coach mode)
+Open **PD Review** in the main nav. You'll see submitted PD deliverables from every teacher on your coach caseload. You can **verify** a deliverable (teacher gets a success ping) or **request revision** with a short note (teacher gets a revision ping). You can also assign a module directly from the module library (`PD Review → Assign a module`).
+
+All of this rolls into **Reports → PD Completion Report** (`/reports/pd`) so you can show a principal exactly what modules your teachers completed and what they produced.

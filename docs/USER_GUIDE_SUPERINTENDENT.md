@@ -241,3 +241,20 @@ Yes — pick multiple teachers in step ① and open the PDF. Each teacher's obse
 ---
 
 *Questions? Contact your district's Super Admin or OptimizED Strategic Solutions.*
+
+---
+
+## 🔔 Notifications (new)
+
+Your header has a bell. It pings for:
+- **Annual summary published** anywhere in the district
+- District‑wide exception events (overdue acknowledgments on high‑stakes observations)
+
+Install the platform on your phone for push delivery. All on/off controls live on **Profile → Notifications** — master push, master in‑app, and per‑kind.
+
+## 📊 PD Completion Report (new)
+
+Open **Reports** and switch the pill to **PD Completion Report**. District‑wide by default — filter by teacher, school, domain, indicator, status, source, or date range. The KPI strip at the top answers "how much PD was actually completed this quarter?" in a single glance, and you can:
+- Click any row to read the teacher's **actual classroom deliverable** and reflections.
+- Download the filtered rows as CSV for board packets.
+- Sort by submission date, verification date, teacher last name, rubric indicator, status, or module.

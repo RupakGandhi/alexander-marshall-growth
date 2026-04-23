@@ -339,3 +339,33 @@ The platform is a full **Progressive Web App**. You can observe from your phone 
 ---
 
 *Questions? Contact your Super Admin or OptimizED Strategic Solutions.*
+
+---
+
+## 🔔 Notifications + PD Review (new)
+
+### The bell in your header
+Every principal/appraiser sees a bell in the top‑right. You'll get alerts for:
+- **Teacher acknowledged** an observation you published (click to jump to it)
+- **Acknowledgment overdue** — a teacher hasn't signed within 3 days
+- **PD deliverable submitted** — one of your teachers turned in a classroom deliverable
+- **Annual summary published** (if you're also a superintendent)
+
+### Push to any device, no subscription
+Install the PWA on your phone (Add to Home Screen) and the very first time you click the bell you'll be asked for push permission. That's it — you now get principal alerts like a text message with **zero district cost**.
+
+### Customize on `/profile#notifications`
+Two master switches (push on/off, in‑app on/off) plus per‑kind granular control. Everything is persisted so your settings follow you from browser to phone.
+
+---
+
+## 🎓 PD Review (new)
+
+When you publish a formal/mini observation, the platform **auto‑recommends PD modules** for every indicator you scored at level 1 or 2 (up to 3 per indicator). Teachers see them in their "My PD LMS". You'll get a notification when they submit a deliverable — open **PD Review** in the main nav to:
+
+1. See the queue of submitted deliverables from teachers assigned to you.
+2. Click a row to read the teacher's actual deliverable + their per‑phase reflections.
+3. **Verify** (teacher gets a success ping) or **Request revision** with a short note (teacher gets a ↺ ping).
+4. **Assign a specific module** from the module library if you want a teacher to tackle a growth area that wasn't flagged by an observation yet.
+
+All PD completion data rolls into **Reports → PD Completion Report** (`/reports/pd`), filterable by teacher, school, rubric domain/indicator, status, source, and date, with drill‑down to the deliverable itself.
