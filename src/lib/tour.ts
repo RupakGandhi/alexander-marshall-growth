@@ -273,13 +273,14 @@ const appraiserSteps: TourStep[] = [
     body: `
       <p>When you open an observation, the editor gives you everything in one place:</p>
       <ul>
-        <li><strong>Scripted notes</strong> — low-inference evidence you collect live in the classroom.</li>
+        <li><strong>Scripted notes</strong> — low-inference evidence you collect live in the classroom. <em>Auto-saves on every keystroke</em> — no "Save" button.</li>
         <li><strong>Rubric scoring</strong> — click 1–4 on each indicator; the pedagogy library's plain-English language appears as guidance.</li>
         <li><strong>Glows & Grows</strong> — auto-generated starter sentences you can accept or rewrite.</li>
         <li><strong>Focus areas & next steps</strong> — what the teacher should work on and how.</li>
-        <li><strong>Private notes</strong> — admin-only; never shown to the teacher.</li>
+        <li><strong>Private notes</strong> — admin-only; never shown to the teacher. Auto-saves too.</li>
         <li><strong>Signatures</strong> — sign and publish; the teacher gets notified to acknowledge.</li>
-      </ul>`,
+      </ul>
+      <p>Look for the green <strong>✓ Saved — N chars at HH:MM</strong> pill in the top-right of each card — that's the server confirming it wrote your text. Below the Scripted Notes box, open <strong>"Saved scripted notes in database"</strong> to see the exact text the server is holding right now.</p>`,
   },
   {
     page: '/pd/review',
@@ -401,7 +402,9 @@ const teacherSteps: TourStep[] = [
         <li><strong>Practice</strong> (Steps 4-6) — rewrite that lesson so the missing Level-up signals show up, script the three high-leverage moments (opener / pivot / close), and choose one piece of student evidence you'll collect.</li>
         <li><strong>Apply</strong> (Steps 7-8) — teach the redesigned lesson, then submit the rebuilt <strong>lesson plan + student evidence artifact + 3-sentence impact note</strong>. Your supervisor verifies that bundle right in the platform.</li>
       </ul>
-      <p>The deliverable is <strong>work you keep</strong> — a lesson plan you can reuse, not a worksheet for a seminar you'll never open again. Group several modules into a <strong>PD Plan</strong> for a printable Floating PD Day agenda.</p>`,
+      <p>The deliverable is <strong>work you keep</strong> — a lesson plan you can reuse, not a worksheet for a seminar you'll never open again. Group several modules into a <strong>PD Plan</strong> for a printable Floating PD Day agenda.</p>
+      <p><strong>Works on the computer, not on paper:</strong> every "check that" becomes a clickable checkbox, every "pick one" becomes a radio button, and every answer box is an auto-saving textarea. Watch the green <em>✓ Saved (learn) at HH:MM</em> pill in the top-right — that's the server confirming every keystroke and click. You can close the browser any time; when you come back everything is exactly where you left it.</p>
+      <p><strong>Practice unlocks</strong> the moment you click <em>Mark learn complete</em>; <strong>Apply unlocks</strong> the moment you click <em>Mark practice complete</em>. If you skipped "Start module" we forward you automatically — you will never be stuck.</p>`,
   },
   {
     page: '/teacher',

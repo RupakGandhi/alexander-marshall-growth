@@ -102,7 +102,7 @@ teacherPd.get('/:id', async (c) => {
   return c.html(<TeacherPdModule user={user} e={e} reflections={refMap} msg={c.req.query('msg')} />);
 });
 
-// Save reflection for one phase (Learn / Practice / Apply)
+// Save reflection for one phase (Learn / Practice / Apply) — form post, legacy.
 teacherPd.post('/:id/reflect', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
@@ -114,6 +114,27 @@ teacherPd.post('/:id/reflect', async (c) => {
   if (!['learn','practice','apply'].includes(phase)) return c.redirect(`/teacher/pd/${id}`);
   if (text) await saveReflection(c.env.DB, id, phase, text);
   return c.redirect(`/teacher/pd/${id}?msg=Saved`);
+});
+
+// Auto-save the interactive workspace (checkboxes + per-step answers) for
+// one phase. Body is a JSON blob we store verbatim in pd_reflections.body.
+// Returns JSON so the client can show a "Saved" indicator without reloading.
+teacherPd.post('/:id/reflect-json', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const e = await c.env.DB.prepare(`SELECT teacher_id, status FROM pd_enrollments WHERE id = ?`).bind(id).first<any>();
+  if (!e || e.teacher_id !== user.id) return c.json({ ok: false, err: 'forbidden' }, 403);
+  if (e.status === 'declined' || e.status === 'verified') {
+    return c.json({ ok: false, err: 'locked' }, 409);
+  }
+  const body = await c.req.parseBody();
+  const phase = String(body.phase || '') as 'learn'|'practice'|'apply';
+  const blob = String(body.body || '').slice(0, 32_000); // hard cap
+  if (!['learn','practice','apply'].includes(phase)) return c.json({ ok: false, err: 'bad_phase' }, 400);
+  // Validate JSON before persisting so we never store junk.
+  try { JSON.parse(blob || '{}'); } catch { return c.json({ ok: false, err: 'bad_json' }, 400); }
+  await saveReflection(c.env.DB, id, phase, blob);
+  return c.json({ ok: true, saved_at: new Date().toISOString() });
 });
 
 // Phase-advance actions (button clicks: start, finish learn, finish practice, etc.)
@@ -521,19 +542,61 @@ function TeacherPdLibrary({ user, modules, indicators }: any) {
   );
 }
 
+// Parse a pedagogy_library JSON-ish field. Tolerates both a real JSON array
+// ("[\"a\",\"b\"]") and our legacy format that sometimes has stray whitespace.
+function parseJsonList(raw: any): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  try {
+    const v = JSON.parse(String(raw));
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch { return []; }
+}
+
+// Merge a reflection row back into a structured { notes, steps, checks }
+// object. If the saved body is already JSON we use it; otherwise we treat
+// the whole row as legacy free-text "notes" so teachers with old reflections
+// don't lose anything.
+function parseReflectionState(raw: string | undefined): { notes: string; steps: Record<string,string>; checks: Record<string,boolean> } {
+  const empty = { notes: '', steps: {}, checks: {} };
+  if (!raw) return empty;
+  const s = String(raw).trim();
+  if (!s) return empty;
+  if (s.startsWith('{')) {
+    try {
+      const j = JSON.parse(s);
+      return {
+        notes: typeof j.notes === 'string' ? j.notes : '',
+        steps: j.steps && typeof j.steps === 'object' ? j.steps : {},
+        checks: j.checks && typeof j.checks === 'object' ? j.checks : {},
+      };
+    } catch { /* fall through to free-text */ }
+  }
+  return { notes: s, steps: {}, checks: {} };
+}
+
 function TeacherPdModule({ user, e, reflections, msg }: any) {
   const pill = statusPill(e.status);
-  const phases = [
-    { key: 'learn',    label: 'Learn',    next: 'learn_done',    icon: 'fa-book-open', content: e.learn_content },
-    { key: 'practice', label: 'Practice', next: 'practice_done', icon: 'fa-dumbbell', content: e.practice_content },
-    { key: 'apply',    label: 'Apply',    next: 'submitted',     icon: 'fa-briefcase', content: e.apply_content },
-  ];
-  // Phase gating — teacher can't fill Apply until Learn + Practice are done
+  // Unlock rules: Learn is available as soon as the enrollment is not declined;
+  // Practice unlocks once Learn is marked done; Apply unlocks once Practice is.
   const phaseUnlocked: Record<string, boolean> = {
-    learn: !['declined'].includes(e.status),
-    practice: ['started','learn_done','practice_done','submitted','verified','needs_revision'].includes(e.status) && !!e.learn_done_at,
-    apply: ['practice_done','submitted','verified','needs_revision'].includes(e.status) && !!e.practice_done_at,
+    learn:    !['declined'].includes(e.status),
+    practice: !!e.learn_done_at    && !['declined'].includes(e.status),
+    apply:    !!e.practice_done_at && !['declined'].includes(e.status),
   };
+  const autoStarted = e.status !== 'recommended' && e.status !== 'declined';
+  // Extract per-level structured data from the pedagogy library (what the
+  // written content summarises, but in machine form so we can render it as
+  // clickable checkboxes instead of bullet text the teacher has to copy).
+  const targetSignals = parseJsonList(e.tgt_evidence_signals);
+  const targetMoves   = parseJsonList(e.tgt_teacher_next_moves);
+  const targetCoach   = parseJsonList(e.tgt_coaching_considerations);
+
+  // Parsed per-phase workspace state (notes + per-step answers + per-signal checkboxes).
+  const learnState    = parseReflectionState(reflections.learn);
+  const practiceState = parseReflectionState(reflections.practice);
+  const applyState    = parseReflectionState(reflections.apply);
+
   return (
     <Layout title={e.title} user={user} activeNav="t-pd">
       <div class="mb-2"><a href="/teacher/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>My PD LMS</a></div>
@@ -545,64 +608,186 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
         <span class="text-xs text-slate-500"><i class="far fa-clock mr-1"></i>Estimated {e.est_minutes} minutes</span>
         {e.source === 'auto' && <span class="text-xs text-amber-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Auto-recommended from your observation</span>}
         {e.source === 'assigned' && <span class="text-xs text-sky-700"><i class="fas fa-user-tie mr-1"></i>Assigned by a supervisor</span>}
+        <span id="aps-pd-autosave-status" class="text-xs px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-500 ml-auto whitespace-nowrap" aria-live="polite">{(reflections.learn || reflections.practice || reflections.apply) ? '✓ Your answers are saved' : 'Your answers will save automatically'}</span>
       </div>
       {msg && <div class="mt-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
 
-      {e.status === 'recommended' && (
-        <Card class="mt-4" title="Ready to start?" icon="fas fa-play">
-          <p class="text-sm text-slate-600 mb-3">When you click Start, your progress will be tracked. You can save and come back anytime.</p>
-          <form method="post" action={`/teacher/pd/${e.id}/advance`} class="inline">
+      {/* How this module works — always visible so teachers know the flow. */}
+      <Card class="mt-4" title="How this module works" icon="fas fa-circle-info">
+        <ol class="text-sm text-slate-700 space-y-1 list-decimal ml-5">
+          <li><strong>Learn</strong> — pick an upcoming lesson, read the rubric side-by-side, check off which Level-{e.target_level + 1} evidence signals are already in that lesson and which are missing. <em>(Your answers auto-save as you type.)</em></li>
+          <li><strong>Practice</strong> — rebuild the lesson using the research-backed moves for this indicator, script the opener / pivot / close, and pick one student-evidence artifact to collect.</li>
+          <li><strong>Apply</strong> — teach the rebuilt lesson, then submit your lesson plan + student evidence + 3-sentence impact note. Your supervisor verifies right in the platform.</li>
+        </ol>
+        {!autoStarted && (
+          <form method="post" action={`/teacher/pd/${e.id}/advance`} class="mt-3 inline-block">
             <input type="hidden" name="to" value="started" />
             <button class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-play mr-1"></i>Start module</button>
           </form>
-          <form method="post" action={`/teacher/pd/${e.id}/advance`} class="inline ml-2">
+        )}
+        {!autoStarted && (
+          <form method="post" action={`/teacher/pd/${e.id}/advance`} class="mt-3 ml-2 inline-block">
             <input type="hidden" name="to" value="declined" />
             <button class="text-xs text-slate-500 hover:underline">Not right now</button>
           </form>
-        </Card>
-      )}
+        )}
+      </Card>
 
       {e.research_basis && (
-        <Card title="Research basis" icon="fas fa-book" class="mt-4">
-          <div class="text-sm text-slate-700 whitespace-pre-wrap">{e.research_basis}</div>
-        </Card>
+        <details class="mt-4 bg-white rounded-lg border border-slate-200 p-4">
+          <summary class="cursor-pointer text-aps-navy font-display"><i class="fas fa-book mr-2"></i>Research basis &amp; what Level {e.target_level + 1} looks like</summary>
+          <div class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed mt-3">{e.research_basis}</div>
+        </details>
       )}
 
-      {phases.map((ph, idx) => {
-        const unlocked = phaseUnlocked[ph.key];
-        const doneStamp = ph.key === 'learn' ? e.learn_done_at : ph.key === 'practice' ? e.practice_done_at : e.submitted_at;
-        const canAdvance = unlocked && !doneStamp && e.status !== 'declined';
-        return (
-          <Card title={`${idx + 1}. ${ph.label} phase`} icon={`fas ${ph.icon}`} class="mt-4">
-            {!unlocked ? (
-              <p class="text-sm text-slate-500"><i class="fas fa-lock mr-1"></i>Finish the previous phase to unlock this one.</p>
-            ) : (
-              <>
-                <div class="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">{ph.content}</div>
-                {ph.key !== 'apply' && (
-                  <form method="post" action={`/teacher/pd/${e.id}/reflect`} class="mt-3">
-                    <input type="hidden" name="phase" value={ph.key} />
-                    <label class="text-xs text-slate-600 block mb-1">Your reflection (optional — appears in your supervisor's review):</label>
-                    <textarea name="reflection" rows={3} class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">{reflections[ph.key] || ''}</textarea>
-                    <div class="mt-2 flex items-center gap-2">
-                      <button class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-800 px-2 py-1 rounded"><i class="far fa-save mr-1"></i>Save reflection</button>
-                      {canAdvance && (
-                        <button type="submit" formaction={`/teacher/pd/${e.id}/advance`} class="text-xs bg-aps-navy text-white px-2 py-1 rounded hover:bg-aps-blue" name="to" value={ph.next}>
-                          <i class="fas fa-check mr-1"></i>Mark {ph.label.toLowerCase()} complete
-                        </button>
-                      )}
-                      {doneStamp && <span class="text-xs text-emerald-700"><i class="fas fa-check-circle mr-1"></i>Completed {formatDate(doneStamp)}</span>}
-                    </div>
-                  </form>
-                )}
-                {ph.key === 'apply' && unlocked && (
-                  <ApplyPhase e={e} reflection={reflections.apply || ''} />
-                )}
-              </>
-            )}
-          </Card>
-        );
-      })}
+      {/* ============================ LEARN ============================ */}
+      <Card title={`1. Learn phase — pick the lesson, read the rubric, spot the gap`} icon="fas fa-book-open" class="mt-4">
+        {!phaseUnlocked.learn ? (
+          <p class="text-sm text-slate-500"><i class="fas fa-lock mr-1"></i>Finish the previous phase to unlock this one.</p>
+        ) : (
+          <div class="space-y-4" data-pd-phase="learn">
+            <LearnStep num={1} title="Pick the lesson you will rebuild" state={learnState}>
+              <p class="text-sm text-slate-700 mb-2">Open your lesson plans for the next 1-2 weeks. Choose <strong>ONE</strong> upcoming lesson where this indicator matters most — <em>{e.indicator_name}</em>. Describe it below:</p>
+              <StepAnswer phase="learn" step={1} placeholder="Grade / subject / unit / exact lesson date — and one sentence on why THIS indicator matters in THAT lesson."
+                value={learnState.steps['1'] || ''} rows={3} />
+            </LearnStep>
+
+            <LearnStep num={2} title={`Read the rubric side-by-side (10 min)`} state={learnState}>
+              <div class="grid md:grid-cols-2 gap-3 text-sm">
+                <div class="border border-slate-200 rounded-md p-3 bg-slate-50">
+                  <div class="text-xs font-semibold text-slate-600 mb-1">Your current level ({e.target_level}):</div>
+                  <div class="text-slate-800 whitespace-pre-wrap">{e.cur_interpretation || '—'}</div>
+                </div>
+                <div class="border border-emerald-200 rounded-md p-3 bg-emerald-50">
+                  <div class="text-xs font-semibold text-emerald-800 mb-1">Your target level ({e.target_level + 1}):</div>
+                  <div class="text-slate-800 whitespace-pre-wrap">{e.tgt_interpretation || '—'}</div>
+                </div>
+              </div>
+              <div class="mt-3">
+                <label class="text-xs text-slate-600 block mb-1">In your own words, what is the biggest difference between the two?</label>
+                <StepAnswer phase="learn" step={2} placeholder="e.g. At Level 2 I explain; at Level 3 the students explain to each other…" value={learnState.steps['2'] || ''} rows={2} />
+              </div>
+            </LearnStep>
+
+            <LearnStep num={3} title="Spot the evidence gap — check what's already in your lesson">
+              {targetSignals.length === 0 ? (
+                <p class="text-xs text-slate-500">(No evidence signals recorded for this indicator yet — skip this step and describe the gap below.)</p>
+              ) : (
+                <>
+                  <p class="text-sm text-slate-700 mb-2">These are the Level {e.target_level + 1} signals an observer would write down. <strong>Check each signal that's already in the lesson you picked in Step 1.</strong> Unchecked = what your redesign has to introduce.</p>
+                  <ul class="space-y-1.5">
+                    {targetSignals.map((sig: string, i: number) => {
+                      const key = `learn_sig_${i}`;
+                      return (
+                        <li>
+                          <label class="flex items-start gap-2 text-sm cursor-pointer hover:bg-slate-50 rounded px-1 py-0.5">
+                            <input type="checkbox" data-pd-check={key} data-pd-phase="learn" class="mt-0.5 h-4 w-4 text-aps-navy" checked={!!learnState.checks[key]} />
+                            <span>{sig}</span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              )}
+              <div class="mt-3">
+                <label class="text-xs text-slate-600 block mb-1">Write out the 1-2 specific signals that are <strong>missing</strong> — those are exactly what your redesigned lesson has to introduce:</label>
+                <StepAnswer phase="learn" step={3} placeholder="e.g. I don't currently do a student-to-student discourse move during the pivot." value={learnState.steps['3'] || ''} rows={3} />
+              </div>
+            </LearnStep>
+
+            <PhaseFooter e={e} phase="learn" nextLabel="Mark learn complete" nextStatus="learn_done" doneStamp={e.learn_done_at} />
+          </div>
+        )}
+      </Card>
+
+      {/* ============================ PRACTICE ============================ */}
+      <Card title={`2. Practice phase — rebuild the lesson & script the moves`} icon="fas fa-dumbbell" class="mt-4">
+        {!phaseUnlocked.practice ? (
+          <p class="text-sm text-slate-500"><i class="fas fa-lock mr-1"></i>Finish Learn first to unlock this one.</p>
+        ) : (
+          <div class="space-y-4" data-pd-phase="practice">
+            <LearnStep num={4} title="Rewrite the lesson (25 min)">
+              <p class="text-sm text-slate-700 mb-2">Take the lesson from Learn Step 1 and rebuild it so the missing Level {e.target_level + 1} signals show up. <strong>Check every research-backed move you're going to use in the rebuild:</strong></p>
+              {targetMoves.length === 0 ? (
+                <p class="text-xs text-slate-500">(No specific research moves are recorded for this indicator yet — describe your moves in the answer box below.)</p>
+              ) : (
+                <ul class="space-y-1.5">
+                  {targetMoves.map((m: string, i: number) => {
+                    const key = `practice_move_${i}`;
+                    return (
+                      <li>
+                        <label class="flex items-start gap-2 text-sm cursor-pointer hover:bg-slate-50 rounded px-1 py-0.5">
+                          <input type="checkbox" data-pd-check={key} data-pd-phase="practice" class="mt-0.5 h-4 w-4 text-aps-navy" checked={!!practiceState.checks[key]} />
+                          <span>{m}</span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <div class="mt-3">
+                <label class="text-xs text-slate-600 block mb-1">Paste or sketch your rebuilt lesson plan (or a link to it). Bold / highlight what changed:</label>
+                <StepAnswer phase="practice" step={4} placeholder={`Rebuilt plan — objective, opening, main task, checks for understanding, close, materials.\n\nOr paste a link to your Google Doc / plan.`} value={practiceState.steps['4'] || ''} rows={8} />
+              </div>
+            </LearnStep>
+
+            <LearnStep num={5} title="Script the 3 high-leverage moments">
+              <p class="text-sm text-slate-700 mb-2">Write down — <strong>word for word</strong> — what you will say or do at these three moments:</p>
+              <div class="space-y-3">
+                <div>
+                  <label class="text-xs font-semibold text-slate-700 block mb-1">① Opening (first 3 minutes): What question or task launches the lesson so Level {e.target_level + 1} is visible immediately?</label>
+                  <StepAnswer phase="practice" step={5} placeholder={`e.g. "Turn to your partner and tell them — in one sentence — what yesterday's lesson was really about. I want to hear YOUR words, not mine."`} value={practiceState.steps['5'] || ''} rows={3} />
+                </div>
+                <div>
+                  <label class="text-xs font-semibold text-slate-700 block mb-1">② Pivot moment (middle): Where will student thinking most likely go sideways? What's your move when it does?</label>
+                  <StepAnswer phase="practice" step={6} placeholder='e.g. "I will notice if three or more students skip the units on their answer — then I will call on Maya to explain her method to the class."' value={practiceState.steps['6'] || ''} rows={3} />
+                </div>
+                <div>
+                  <label class="text-xs font-semibold text-slate-700 block mb-1">③ Close (last 5 minutes): How will students DEMONSTRATE the Level {e.target_level + 1} signal for you?</label>
+                  <StepAnswer phase="practice" step={7} placeholder={`e.g. "Exit ticket: In two sentences, explain to next year's student what today's rule is and WHEN to use it."`} value={practiceState.steps['7'] || ''} rows={3} />
+                </div>
+              </div>
+            </LearnStep>
+
+            <LearnStep num={6} title="Pick ONE student-evidence artifact you will keep">
+              <p class="text-sm text-slate-700 mb-2">Decide now — before you teach — which single artifact you'll keep as proof the redesign worked. <strong>Pick one:</strong></p>
+              <div class="space-y-1.5">
+                {[
+                  { key: 'exit_ticket',  label: 'A completed exit ticket showing student mastery of the indicator' },
+                  { key: 'board_photo',  label: 'An annotated photo of the board / anchor chart' },
+                  { key: 'work_sample',  label: 'A student work sample (with name redacted)' },
+                  { key: 'transcript',   label: '3-5 student utterances during the pivot moment (short transcript)' },
+                  { key: 'other',        label: 'Something else (describe in your answer)' },
+                ].map((o) => {
+                  const key = `practice_art_${o.key}`;
+                  return (
+                    <label class="flex items-start gap-2 text-sm cursor-pointer hover:bg-slate-50 rounded px-1 py-0.5">
+                      <input type="radio" name="practice_artifact" data-pd-check={key} data-pd-check-group="practice_artifact" data-pd-phase="practice" class="mt-0.5 h-4 w-4 text-aps-navy" checked={!!practiceState.checks[key]} />
+                      <span>{o.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div class="mt-3">
+                <label class="text-xs text-slate-600 block mb-1">Note (1 sentence) — where/when in the lesson you'll capture it:</label>
+                <StepAnswer phase="practice" step={8} placeholder="e.g. Board photo right after the close, before students leave." value={practiceState.steps['8'] || ''} rows={2} />
+              </div>
+            </LearnStep>
+
+            <PhaseFooter e={e} phase="practice" nextLabel="Mark practice complete" nextStatus="practice_done" doneStamp={e.practice_done_at} />
+          </div>
+        )}
+      </Card>
+
+      {/* ============================ APPLY ============================ */}
+      <Card title={`3. Apply phase — teach the lesson & submit your bundle`} icon="fas fa-briefcase" class="mt-4">
+        {!phaseUnlocked.apply ? (
+          <p class="text-sm text-slate-500"><i class="fas fa-lock mr-1"></i>Finish Practice first to unlock this one.</p>
+        ) : (
+          <ApplyPhase e={e} applyState={applyState} targetCoach={targetCoach} />
+        )}
+      </Card>
 
       {e.status === 'needs_revision' && (
         <Card title="Revision requested" icon="fas fa-rotate-left" class="mt-4">
@@ -619,34 +804,208 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
           </div>
         </Card>
       )}
+
+      {/* Client-side engine: auto-save every [data-pd-step-answer] textarea
+          and every [data-pd-check] checkbox into the reflection for its phase.
+          Debounce typing; fire immediately on blur / check change. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        (function() {
+          const ENROLL_ID = ${JSON.stringify(e.id)};
+          const URL = '/teacher/pd/' + ENROLL_ID + '/reflect-json';
+          const status = document.getElementById('aps-pd-autosave-status');
+          function setStatus(text, bg, fg, border) {
+            if (!status) return;
+            status.textContent = text;
+            if (bg)     status.style.backgroundColor = bg;
+            if (fg)     status.style.color = fg;
+            if (border) status.style.borderColor = border;
+          }
+          // State by phase (learn/practice/apply): { notes, steps{}, checks{} }.
+          const initial = ${JSON.stringify({ learn: learnState, practice: practiceState, apply: applyState })};
+          const state = initial;
+          const timers = {};
+          async function flush(phase) {
+            try {
+              setStatus('Saving…', '#f1f5f9', '#64748b', '#cbd5e1');
+              const fd = new FormData();
+              fd.set('phase', phase);
+              fd.set('body', JSON.stringify(state[phase]));
+              const r = await fetch(URL, { method: 'POST', body: fd, credentials: 'same-origin' });
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              const j = await r.json();
+              if (!j.ok) throw new Error(j.err || 'save_failed');
+              const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              setStatus('✓ Saved (' + phase + ') at ' + t, '#d1fae5', '#065f46', '#6ee7b7');
+            } catch (err) {
+              setStatus('⚠ Not saved — try again', '#fee2e2', '#991b1b', '#fca5a5');
+            }
+          }
+          function scheduleFlush(phase, immediate) {
+            if (timers[phase]) clearTimeout(timers[phase]);
+            if (immediate) { flush(phase); return; }
+            timers[phase] = setTimeout(() => flush(phase), 700);
+          }
+          document.querySelectorAll('[data-pd-step-answer]').forEach(el => {
+            const phase = el.getAttribute('data-pd-phase');
+            const step = el.getAttribute('data-pd-step-answer');
+            el.addEventListener('input', () => {
+              state[phase].steps[step] = el.value;
+              setStatus('Typing… (will save in 1s)', '#f1f5f9', '#475569', '#cbd5e1');
+              scheduleFlush(phase, false);
+            });
+            el.addEventListener('blur', () => {
+              state[phase].steps[step] = el.value;
+              scheduleFlush(phase, true);
+            });
+          });
+          document.querySelectorAll('[data-pd-check]').forEach(el => {
+            const phase = el.getAttribute('data-pd-phase');
+            const key = el.getAttribute('data-pd-check');
+            const group = el.getAttribute('data-pd-check-group');
+            el.addEventListener('change', () => {
+              if (group && el.type === 'radio') {
+                // clear other keys in the same group before setting this one
+                document.querySelectorAll('[data-pd-check-group="' + group + '"]').forEach(other => {
+                  const k = other.getAttribute('data-pd-check');
+                  if (k && k !== key) state[phase].checks[k] = false;
+                });
+              }
+              state[phase].checks[key] = !!el.checked;
+              scheduleFlush(phase, true);
+            });
+          });
+          const notesEl = document.querySelector('[data-pd-notes]');
+          if (notesEl) {
+            const phase = notesEl.getAttribute('data-pd-phase') || 'apply';
+            notesEl.addEventListener('input', () => {
+              state[phase].notes = notesEl.value;
+              setStatus('Typing… (will save in 1s)', '#f1f5f9', '#475569', '#cbd5e1');
+              scheduleFlush(phase, false);
+            });
+            notesEl.addEventListener('blur', () => {
+              state[phase].notes = notesEl.value;
+              scheduleFlush(phase, true);
+            });
+          }
+        })();
+      ` }}></script>
     </Layout>
   );
 }
 
-function ApplyPhase({ e, reflection }: any) {
-  const canSubmit = ['practice_done','needs_revision'].includes(e.status);
-  const isSubmittedOrDone = ['submitted','verified'].includes(e.status);
+// Small labelled section inside a phase that renders one STEP with an icon.
+function LearnStep({ num, title, children }: { num: number; title: string; state?: any; children: any }) {
   return (
-    <div class="mt-3">
-      <div class="p-3 rounded bg-amber-50 border border-amber-200 text-sm">
-        <div class="font-semibold text-amber-900 mb-1"><i class="fas fa-clipboard-list mr-1"></i>Deliverable prompt</div>
-        <div class="text-amber-900 whitespace-pre-wrap">{e.deliverable_prompt}</div>
-        {e.deliverable_rubric && (
-          <details class="mt-2 text-xs text-amber-900/80">
-            <summary class="cursor-pointer">What a good deliverable looks like</summary>
-            <div class="mt-1 whitespace-pre-wrap">{e.deliverable_rubric}</div>
-          </details>
-        )}
+    <div class="border-l-4 border-aps-navy/20 pl-4 py-1">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-aps-navy text-white text-xs font-bold">{num}</span>
+        <h3 class="font-display text-aps-navy">STEP {num} — {title}</h3>
       </div>
-      <form method="post" action={`/teacher/pd/${e.id}/submit`} class="mt-3">
-        <label class="text-sm">Title <input name="title" value={e.deliverable_title || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" required disabled={isSubmittedOrDone && e.status === 'verified'} /></label>
-        <label class="block mt-3 text-sm">Your deliverable
-          <textarea name="body" rows={10} required disabled={isSubmittedOrDone && e.status === 'verified'} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed">{e.deliverable_body || ''}</textarea>
-        </label>
-        <p class="text-xs text-slate-500 mt-1">Paste the artifact right here — an exit ticket, rubric, lesson plan, anti-bias checklist, etc. Markdown is fine. Your supervisor will read this page to verify.</p>
-        {canSubmit && <button class="mt-3 bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-paper-plane mr-1"></i>{e.status === 'needs_revision' ? 'Resubmit' : 'Submit for review'}</button>}
-        {e.status === 'submitted' && <span class="ml-2 text-xs text-violet-700"><i class="fas fa-inbox mr-1"></i>Awaiting supervisor review</span>}
-      </form>
+      <div class="ml-9">{children}</div>
+    </div>
+  );
+}
+
+// An auto-saving inline text box bound to a (phase, step).
+function StepAnswer({ phase, step, placeholder, value, rows }: { phase: string; step: number; placeholder: string; value: string; rows: number }) {
+  return (
+    <textarea
+      data-pd-step-answer={String(step)}
+      data-pd-phase={phase}
+      rows={rows}
+      placeholder={placeholder}
+      class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm focus:border-aps-navy focus:outline-none focus:ring-1 focus:ring-aps-navy/30"
+    >{value}</textarea>
+  );
+}
+
+// Footer with "Mark phase complete" button. Hidden once the phase has been
+// marked done. Posts through /advance with the correct target status; the
+// state machine auto-bridges recommended → learn_done if the teacher never
+// pressed "Start module" explicitly.
+function PhaseFooter({ e, phase, nextLabel, nextStatus, doneStamp }: any) {
+  if (doneStamp) {
+    return (
+      <div class="mt-3 text-sm text-emerald-700 flex items-center gap-2">
+        <i class="fas fa-check-circle"></i>
+        <span>{phase[0].toUpperCase() + phase.slice(1)} marked complete on {formatDate(doneStamp)}.</span>
+      </div>
+    );
+  }
+  return (
+    <form method="post" action={`/teacher/pd/${e.id}/advance`} class="mt-3 flex items-center gap-2">
+      <input type="hidden" name="to" value={nextStatus} />
+      <button class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue">
+        <i class="fas fa-check mr-1"></i>{nextLabel}
+      </button>
+      <span class="text-xs text-slate-500">Your answers are already saved — this unlocks the next phase.</span>
+    </form>
+  );
+}
+
+function ApplyPhase({ e, applyState, targetCoach }: any) {
+  const canSubmit = ['practice_done','needs_revision','learn_done'].includes(e.status);
+  const isFinal = e.status === 'verified';
+  const steps = applyState?.steps || {};
+  return (
+    <div class="space-y-4" data-pd-phase="apply">
+      <LearnStep num={7} title="Teach the redesigned lesson — then answer these 3 reflection prompts">
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs font-semibold text-slate-700 block mb-1">Which of the Level {e.target_level + 1} moves actually happened in the room?</label>
+            <StepAnswer phase="apply" step={1} placeholder="e.g. The student-to-student explain move worked in Period 3 but not in Period 5 because…" value={steps['1'] || ''} rows={3} />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-700 block mb-1">What did students say or do that surprised you?</label>
+            <StepAnswer phase="apply" step={2} placeholder="Quote a student if you can remember the words." value={steps['2'] || ''} rows={3} />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-700 block mb-1">What would you change before teaching this lesson again?</label>
+            <StepAnswer phase="apply" step={3} placeholder="One concrete change — not a wish list." value={steps['3'] || ''} rows={3} />
+          </div>
+        </div>
+      </LearnStep>
+
+      {targetCoach && targetCoach.length > 0 && (
+        <details class="text-xs text-slate-600 border border-slate-200 rounded p-3 bg-slate-50">
+          <summary class="cursor-pointer text-slate-700">Coaching considerations your supervisor will look for</summary>
+          <ul class="mt-2 space-y-1 list-disc ml-5">
+            {targetCoach.map((c: string) => <li>{c}</li>)}
+          </ul>
+        </details>
+      )}
+
+      <LearnStep num={8} title="Bundle the artifact & submit">
+        <div class="p-3 rounded bg-amber-50 border border-amber-200 text-sm mb-3">
+          <div class="font-semibold text-amber-900 mb-1"><i class="fas fa-clipboard-list mr-1"></i>Your deliverable should contain:</div>
+          <ol class="text-amber-900 list-decimal ml-5 space-y-0.5">
+            <li><strong>Lesson context</strong> — grade, subject, unit, date taught, class composition (one paragraph).</li>
+            <li><strong>Rebuilt lesson plan</strong> — paste or link. Bold the Level {e.target_level + 1} moves you added.</li>
+            <li><strong>The 3 scripted moments</strong> — word-for-word opener, pivot, close (you wrote these in Practice).</li>
+            <li><strong>Student evidence artifact</strong> — exit ticket text + responses, board photo link, student quotes, or work sample.</li>
+            <li><strong>Impact note</strong> — 3 sentences: what moved, what fell short, ONE next classroom move.</li>
+          </ol>
+          {e.deliverable_rubric && (
+            <details class="mt-2 text-xs text-amber-900/80">
+              <summary class="cursor-pointer">What your supervisor will check</summary>
+              <div class="mt-1 whitespace-pre-wrap">{e.deliverable_rubric}</div>
+            </details>
+          )}
+        </div>
+        <form method="post" action={`/teacher/pd/${e.id}/submit`} class="space-y-3">
+          <label class="block text-sm">Title<br/>
+            <input name="title" value={e.deliverable_title || `Rebuilt lesson — ${e.indicator_name} (Level ${e.target_level} → ${e.target_level + 1})`} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" required disabled={isFinal} />
+          </label>
+          <label class="block text-sm">Your full deliverable (all 5 sections above)<br/>
+            <textarea name="body" rows={14} required disabled={isFinal} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5 font-mono text-xs leading-relaxed" placeholder={`1) LESSON CONTEXT\n\n2) REBUILT LESSON PLAN\n\n3) THE 3 SCRIPTED MOMENTS\n\n4) STUDENT EVIDENCE\n\n5) IMPACT NOTE`}>{e.deliverable_body || ''}</textarea>
+          </label>
+          <p class="text-xs text-slate-500">You can paste Google Doc / Canvas links instead of full text. Markdown is fine. Your supervisor will read this page to verify.</p>
+          {canSubmit && !isFinal && (
+            <button class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-paper-plane mr-1"></i>{e.status === 'needs_revision' ? 'Resubmit for review' : 'Submit for review'}</button>
+          )}
+          {e.status === 'submitted' && <span class="ml-2 text-xs text-violet-700"><i class="fas fa-inbox mr-1"></i>Awaiting supervisor review</span>}
+        </form>
+      </LearnStep>
     </div>
   );
 }

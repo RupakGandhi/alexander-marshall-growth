@@ -420,6 +420,33 @@ When you submit, your principal (and coach) get a notification and a review queu
 
 In short: you produce a usable artifact for your classroom every time you finish a module, and you level up on a specific Marshall indicator.
 
+### How you actually "do" a module on the computer (interactive, auto‑saving)
+
+Every step inside a module has a **typing box** (for your answer) and, where the rubric uses phrases like *"circle this"* or *"check that"*, the platform shows **real clickable checkboxes** — you don't copy‑paste bullet points anywhere. Specifically:
+
+- **Learn STEP 3** ("Spot the evidence gap"): the Level‑N+1 observable signals appear as a list of check boxes. Click each one that's already in your lesson; the unchecked ones are what your redesign has to introduce.
+- **Practice STEP 4** ("Rewrite the lesson"): the research‑backed next moves appear as check boxes. Tick every move you're going to use.
+- **Practice STEP 6** ("Pick your artifact"): a radio group — pick exactly one of Exit ticket / Board photo / Work sample / Transcript / Other.
+
+Everything — every typed answer, every checkbox, every radio button — **auto‑saves as you work**. Watch the pill in the top‑right corner of the module page:
+
+- Grey `Your answers will save automatically` — nothing typed yet
+- Grey `Typing… (will save in 1s)` — waiting to flush
+- Grey `Saving…` — in flight
+- **Green `✓ Saved (learn) at 10:17`** — confirmed on the server
+
+If you close the browser and come back later, every answer, every check, every radio choice is exactly where you left it. The **Mark Learn complete** / **Mark Practice complete** buttons only *advance the phase* — they don't "save" your work (that's already done).
+
+### "Practice is still locked" — what to do
+
+Practice unlocks the moment Learn is marked complete. If you see a lock icon on the Practice card:
+
+1. Scroll back up to the Learn card.
+2. At the bottom of Learn, look for a blue **Mark learn complete** button.
+3. Click it — the page reloads and Practice is now open.
+
+If you skipped "Start module" earlier, the system forwards you automatically — you will **never** see a "cannot move recommended → learn_done" error anymore (fixed April 2026).
+
 ### Don't get overloaded
 - Modules are **never duplicated** per source observation.
 - If you see too many, open the "plan" mode to bundle modules into a single **Floating PD Day** — one focused day instead of many small tasks.

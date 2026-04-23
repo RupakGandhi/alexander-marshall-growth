@@ -21,6 +21,32 @@ Complete role-specific user guides and a full technical developer guide are in *
 
 No additional setup steps are required before the district can log in and begin using the platform.
 
+## ⭐ What's New (Round 4 — April 2026, production‑ready pass)
+
+### Fool‑proof auto‑save, with visible confirmation
+- **Every text field** on an observation (Scripted notes, Private notes, Overall summary, Subject, Grade, Class context) now auto‑saves to the database on every keystroke (700 ms debounce) AND on blur — no "Save" button required.
+- Each card shows a **prominent green pill** — `✓ Saved — 412 chars at 10:17` — the moment the server confirms the write. A red pill appears if a network blip stopped the save. Three pill states: grey `Nothing saved yet`, grey `Typing…`, green `Saved — N chars at HH:MM`, red `Not saved — try again`.
+- A new **"Saved scripted notes in database"** disclosure under the Scripted Notes textarea shows the exact text the server is holding right now, so appraisers can verify at a glance — not just trust a toast.
+
+### Fully interactive PD modules (no more "how do I circle this on a computer?")
+- Rubric signals (`evidence_signals`) and research‑backed next moves (`teacher_next_moves`) are now rendered as **real HTML checkboxes**. Artifact choice is a **radio group** (Exit ticket / Board photo / Work sample / Transcript / Other). Every click saves itself.
+- Every step has an inline auto‑saving **answer box** bound to `(phase, step)` so teachers can type directly in the module. No more copy‑paste to a Google Doc.
+- A single green pill in the module header — `✓ Saved (learn) at 10:17` — confirms every input on every phase.
+- The reflection row for each phase is now a JSON blob `{notes, steps, checks}` so we can render structured UI while keeping backward compatibility with old free‑text reflections.
+
+### PD state machine no longer traps teachers
+- `advanceEnrollment` now has an explicit set of **bridge transitions**: `recommended → learn_done`, `recommended → practice_done`, `recommended → submitted`, `started → practice_done`, `started → submitted`, `learn_done → submitted`. Whatever button a teacher clicks, the state machine fast‑forwards silently and backfills the missing timestamps (`learn_done_at`, `practice_done_at`).
+- The "Start module" button is now optional — if a teacher skips it and clicks **Mark learn complete** first, the system auto‑starts the enrollment. **No more `cannot move recommended → learn_done` error.**
+- Practice unlocks the moment Learn is marked complete (verified end‑to‑end in `tmp/e2e_smoke.sh`). Same for Apply after Practice.
+
+### Guides and tours updated
+- `docs/USER_GUIDE_TEACHER.md` — new "How you actually 'do' a module on the computer" section (interactive checkboxes + radio + autosave pill).
+- `docs/USER_GUIDE_APPRAISER.md` — new "Auto‑save — your typing is never lost" section with the pill legend and the "Saved scripted notes in database" disclosure explained.
+- `src/lib/tour.ts` — guided tour stops now point at the autosave pill and the interactive widgets.
+
+### Verified end‑to‑end
+`tmp/e2e_smoke.sh` runs the full flow: appraiser logs in → creates a draft → autosaves scripted/private/summary notes → reloads and confirms each text is persisted; teacher logs in → self‑enrolls in a lesson‑plan module → verifies step answers and checkboxes render → saves a Learn JSON reflection → clicks "Mark learn complete" from `recommended` state (bridge path) → confirms Practice unlocked → saves Practice JSON → advances to practice_done → confirms Apply unlocked → submits deliverable → confirms status is Submitted → reloads and confirms all typed answers persist. **All green.**
+
 ## ⭐ What's New (Round 3 — April 2026)
 
 ### Teacher observation view redesigned for clarity

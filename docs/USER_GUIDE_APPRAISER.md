@@ -128,6 +128,20 @@ The editor is one long page with clearly-labelled sections. You can work on them
 - **Teachers NEVER see these.** Reports default to hiding them; only Super Admins can opt to include them in exports.
 - Example: *"Need to follow up with T about classroom management — 3 separate redirections I didn't write in the official script. Talk privately next week."*
 
+### Auto-save — your typing is never lost
+
+Every text field on the observation page (Scripted notes, Private notes, Overall summary, Subject, Grade, Class context) **saves to the server automatically while you type**. No "Save" button to remember. Look at the small pill in the top-right of each card:
+
+| Pill text | What it means |
+|---|---|
+| `Nothing saved yet` | (grey) No content saved yet for this field. |
+| `Typing… (will save in 1s)` | (grey) We'll flush to the server shortly. |
+| `Saving…` | (grey) In flight. |
+| `✓ Saved — 412 chars at 10:17` | (green) Confirmed written to the database. |
+| `⚠ Not saved — try again` | (red) Network blip; just click the textarea and type again. |
+
+Below the Scripted Notes box there is also a **Saved scripted notes in database** disclosure. Click it to view the exact text the server has stored right now. This is the ground-truth copy — if what's in that box matches what you typed, your notes are safe.
+
 ---
 
 ## Scoring the Rubric

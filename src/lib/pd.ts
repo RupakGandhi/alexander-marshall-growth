@@ -127,6 +127,7 @@ export async function advanceEnrollment(db: D1Database, enrollmentId: number, te
   if (!e) throw new Error('not found');
   const from = e.status as PDStatus;
 
+  // Explicit single-step transitions the UI can request.
   const ok: Record<PDStatus, PDStatus[]> = {
     recommended:    ['started', 'declined'],
     started:        ['learn_done', 'declined'],
@@ -137,15 +138,33 @@ export async function advanceEnrollment(db: D1Database, enrollmentId: number, te
     needs_revision: ['submitted'],
     declined:       ['recommended'],                 // re-open
   };
-  if (!ok[from] || !ok[from].includes(to)) {
+  // Auto-bridging transitions — if a teacher clicks "Mark learn complete" on
+  // a `recommended` enrollment (for example because they jumped straight to the
+  // Learn phase without pressing "Start module" first), we silently auto-start
+  // the enrollment and then mark Learn done. The UI never has to show a
+  // confusing "cannot move recommended → learn_done" error for a valid forward
+  // click. The map below declares which forward-jumps are safe to bridge.
+  const bridges: Partial<Record<PDStatus, PDStatus[]>> = {
+    recommended: ['learn_done', 'practice_done', 'submitted'],
+    started:     ['practice_done', 'submitted'],
+    learn_done:  ['submitted'],
+  };
+  const direct = ok[from]?.includes(to);
+  const bridge = bridges[from]?.includes(to);
+  if (!direct && !bridge) {
     throw new Error(`cannot move ${from} → ${to}`);
   }
-  // Side-effect timestamps
+
+  // Compute the timestamps we need to set. If we're bridging recommended →
+  // learn_done, we also backfill started (via the implicit visit through it).
   const now = new Date().toISOString().replace('T', ' ').replace(/\..*Z?$/, '');
   const set: string[] = [`status = ?`, `updated_at = CURRENT_TIMESTAMP`];
   const bindVals: any[] = [to];
   if (to === 'learn_done' && !e.learn_done_at)         { set.push(`learn_done_at = ?`);    bindVals.push(now); }
   if (to === 'practice_done' && !e.practice_done_at)   { set.push(`practice_done_at = ?`); bindVals.push(now); }
+  if (to === 'practice_done' && !e.learn_done_at)      { set.push(`learn_done_at = ?`);    bindVals.push(now); }
+  if (to === 'submitted' && !e.practice_done_at)       { set.push(`practice_done_at = ?`); bindVals.push(now); }
+  if (to === 'submitted' && !e.learn_done_at)          { set.push(`learn_done_at = ?`);    bindVals.push(now); }
   bindVals.push(enrollmentId);
   await db.prepare(`UPDATE pd_enrollments SET ${set.join(', ')} WHERE id = ?`).bind(...bindVals).run();
 }
@@ -322,13 +341,27 @@ export async function getEnrollment(db: D1Database, id: number) {
         fr.name                      AS framework_name,
         de.title                     AS deliverable_title,
         de.body                      AS deliverable_body,
-        de.updated_at                AS deliverable_updated
+        de.updated_at                AS deliverable_updated,
+        -- Pedagogy library rows for CURRENT and TARGET levels (JSON text),
+        -- used to render interactive checklists / move-menus in the module
+        -- workspace without the teacher having to re-read the bullet text.
+        pl_cur.interpretation        AS cur_interpretation,
+        pl_cur.evidence_signals      AS cur_evidence_signals,
+        pl_cur.teacher_next_moves    AS cur_teacher_next_moves,
+        pl_cur.coaching_considerations AS cur_coaching_considerations,
+        pl_tgt.interpretation        AS tgt_interpretation,
+        pl_tgt.evidence_signals      AS tgt_evidence_signals,
+        pl_tgt.teacher_next_moves    AS tgt_teacher_next_moves,
+        pl_tgt.coaching_considerations AS tgt_coaching_considerations,
+        pl_tgt.resources             AS tgt_resources
        FROM pd_enrollments e
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id
        LEFT JOIN frameworks fr ON fr.id = (SELECT id FROM frameworks WHERE is_active = 1 LIMIT 1)
        LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+       LEFT JOIN pedagogy_library pl_cur ON pl_cur.indicator_id = m.indicator_id AND pl_cur.level = m.target_level
+       LEFT JOIN pedagogy_library pl_tgt ON pl_tgt.indicator_id = m.indicator_id AND pl_tgt.level = m.target_level + 1
        WHERE e.id = ?`
   ).bind(id).first<any>();
 }

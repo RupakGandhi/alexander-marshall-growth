@@ -110,6 +110,45 @@ app.get('/observations/:id', async (c) => {
   return c.html(<ObservationEditor user={user} o={o} domains={domains} msg={msg} />);
 });
 
+// ---- Auto-save one field of an observation while the appraiser is typing.
+// Returns JSON so the client can show a "Saved" indicator without reloading.
+// Only allows a whitelist of plain-text fields — everything else goes through
+// the full form submit below.
+app.post('/observations/:id/autosave', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  // Enforce: only the owning appraiser may auto-save, and only on drafts.
+  const o = await c.env.DB.prepare(
+    `SELECT status, appraiser_id FROM observations WHERE id = ?`
+  ).bind(id).first<any>();
+  if (!o || o.appraiser_id !== user.id) return c.json({ ok: false, err: 'forbidden' }, 403);
+  if (!['draft','scored'].includes(o.status)) return c.json({ ok: false, err: 'published' }, 409);
+
+  const ALLOWED = new Set([
+    'scripted_notes', 'private_notes', 'overall_summary',
+    'class_context', 'subject', 'grade_level', 'location',
+  ]);
+  const body = await c.req.parseBody();
+  const field = String(body.field || '');
+  const value = String(body.value || '');
+  if (!ALLOWED.has(field)) return c.json({ ok: false, err: 'bad_field' }, 400);
+
+  // Each field is written with a dedicated prepared statement so we never
+  // interpolate a column name into SQL.
+  const col: Record<string, string> = {
+    scripted_notes:   'scripted_notes',
+    private_notes:    'private_notes',
+    overall_summary:  'overall_summary',
+    class_context:    'class_context',
+    subject:          'subject',
+    grade_level:      'grade_level',
+    location:         'location',
+  };
+  const sql = `UPDATE observations SET ${col[field]} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND appraiser_id = ?`;
+  const res = await c.env.DB.prepare(sql).bind(value, id, user.id).run();
+  return c.json({ ok: true, field, saved_at: new Date().toISOString(), changes: res.meta?.changes || 0 });
+});
+
 // ---- Save scripted/private notes and meta
 app.post('/observations/:id/save', async (c) => {
   const user = c.get('user')!;
@@ -699,14 +738,17 @@ function ObservationEditor({ user, o, domains, msg }: any) {
         </div>
       </div>
 
-      {/* Context + notes */}
+      {/* Context + notes. Each text field auto-saves individually via the
+          /autosave JSON endpoint — the "Save draft" button at the bottom is
+          now a belt-and-suspenders backup that also saves the full form and
+          the datetime/duration (which aren't in the autosave whitelist). */}
       <form method="post" action={`/appraiser/observations/${o.id}/save`}>
         <Card title="Context" icon="fas fa-circle-info">
-          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-wand-magic-sparkles mr-1 text-amber-500"></i>We pre-filled Subject, Grade, and the Date/Time from when you started. Edit anything if it changed on the day.</p>
+          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-wand-magic-sparkles mr-1 text-amber-500"></i>We pre-filled Subject, Grade, and the Date/Time from when you started. Edit anything if it changed on the day — each field auto-saves as you type.</p>
           <div class="grid md:grid-cols-3 gap-3 text-sm">
-            <label>Subject<input name="subject" value={o.subject || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
-            <label>Grade / Course<input name="grade_level" value={o.grade_level || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
-            <label>Location / Room <span class="text-slate-400">(optional)</span><input name="location" value={o.location || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. Rm 204" disabled={!editable} /></label>
+            <label>Subject<input data-autosave="subject" name="subject" value={o.subject || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
+            <label>Grade / Course<input data-autosave="grade_level" name="grade_level" value={o.grade_level || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
+            <label>Location / Room <span class="text-slate-400">(optional)</span><input data-autosave="location" name="location" value={o.location || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. Rm 204" disabled={!editable} /></label>
           </div>
           <div class="grid md:grid-cols-3 gap-3 text-sm mt-3">
             <label>Date &amp; time <span class="text-slate-400">(Central)</span>
@@ -721,32 +763,98 @@ function ObservationEditor({ user, o, domains, msg }: any) {
               </div>
             </label>
             <label>Class context <span class="text-slate-400">(optional)</span>
-              <input name="class_context" value={o.class_context || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. 22 students" disabled={!editable} />
+              <input data-autosave="class_context" name="class_context" value={o.class_context || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. 22 students" disabled={!editable} />
             </label>
           </div>
         </Card>
 
         <Card title="Scripted Notes" icon="fas fa-pen-to-square" class="mt-4">
-          <p class="text-xs text-slate-500 mb-2">Write what you see and hear — student language, teacher moves, timing. These notes are private until you publish.</p>
-          <textarea name="scripted_notes" rows={10} class="w-full border border-slate-300 rounded px-3 py-2 text-sm font-mono" placeholder="9:02 — Mr. Allard writes learning target on board..." disabled={!editable}>{o.scripted_notes || ''}</textarea>
+          <div class="flex items-center justify-between mb-2 gap-3">
+            <p class="text-xs text-slate-500">Write what you see and hear — student language, teacher moves, timing. Your notes <strong>auto-save as you type</strong>. Private until you publish.</p>
+            <span class="aps-autosave-status text-xs px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-500 whitespace-nowrap" data-for="scripted_notes" aria-live="polite">{(o.scripted_notes || '').trim() ? `✓ ${(o.scripted_notes || '').length} chars saved` : 'Nothing saved yet'}</span>
+          </div>
+          <textarea data-autosave="scripted_notes" name="scripted_notes" rows={10} class="w-full border border-slate-300 rounded px-3 py-2 text-sm font-mono" placeholder="9:02 — Mr. Allard writes learning target on board..." disabled={!editable}>{o.scripted_notes || ''}</textarea>
+          {(o.scripted_notes || '').trim() && (
+            <details class="mt-2 text-xs text-slate-600" open={!editable}>
+              <summary class="cursor-pointer text-emerald-700 hover:underline"><i class="fas fa-database mr-1"></i>Saved scripted notes in database ({(o.scripted_notes || '').length} chars){!editable ? ' — read-only after publish' : ' — this is what\'s on the server right now'}</summary>
+              <pre class="mt-2 whitespace-pre-wrap bg-emerald-50 border border-emerald-200 rounded p-2 font-mono text-slate-700">{o.scripted_notes}</pre>
+            </details>
+          )}
         </Card>
 
         <Card title="Private Appraiser Notes" icon="fas fa-lock" class="mt-4">
-          <p class="text-xs text-slate-500 mb-2">These notes are only visible to you and the super admin — never to the teacher or coach.</p>
-          <textarea name="private_notes" rows={4} class="w-full border border-slate-300 rounded px-3 py-2 text-sm" disabled={!editable}>{o.private_notes || ''}</textarea>
+          <div class="flex items-center justify-between mb-2 gap-3">
+            <p class="text-xs text-slate-500">Only visible to you and the super admin — never to the teacher or coach. Auto-saves.</p>
+            <span class="aps-autosave-status text-xs px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-500 whitespace-nowrap" data-for="private_notes" aria-live="polite">{(o.private_notes || '').trim() ? `✓ ${(o.private_notes || '').length} chars saved` : 'Nothing saved yet'}</span>
+          </div>
+          <textarea data-autosave="private_notes" name="private_notes" rows={4} class="w-full border border-slate-300 rounded px-3 py-2 text-sm" disabled={!editable}>{o.private_notes || ''}</textarea>
         </Card>
 
         <Card title="Overall Summary (visible to teacher when published)" icon="fas fa-message" class="mt-4">
-          <textarea name="overall_summary" rows={4} class="w-full border border-slate-300 rounded px-3 py-2 text-sm" placeholder="Your summary narrative." disabled={!editable}>{o.overall_summary || ''}</textarea>
+          <div class="flex items-center justify-between mb-2 gap-3">
+            <p class="text-xs text-slate-500">This summary appears at the top of the teacher's view. Auto-saves.</p>
+            <span class="aps-autosave-status text-xs px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-500 whitespace-nowrap" data-for="overall_summary" aria-live="polite">{(o.overall_summary || '').trim() ? `✓ ${(o.overall_summary || '').length} chars saved` : 'Nothing saved yet'}</span>
+          </div>
+          <textarea data-autosave="overall_summary" name="overall_summary" rows={4} class="w-full border border-slate-300 rounded px-3 py-2 text-sm" placeholder="Your summary narrative." disabled={!editable}>{o.overall_summary || ''}</textarea>
         </Card>
 
         {editable && (
           <div class="mt-4 flex items-center justify-between gap-2 bg-sky-50 border border-sky-200 rounded p-3">
-            <div class="text-xs text-sky-800"><i class="fas fa-floppy-disk mr-1"></i>You can save your work as a draft at any time and return to finish later. Your notes, scores, and feedback will be preserved. Nothing is shared with the teacher until you sign and publish below.</div>
+            <div class="text-xs text-sky-800"><i class="fas fa-floppy-disk mr-1"></i>Fields auto-save as you type. Use <strong>Save draft</strong> below only if you changed the date/time or duration (those don't auto-save). Nothing is shared with the teacher until you sign and publish.</div>
             <button type="submit" class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm whitespace-nowrap"><i class="fas fa-save mr-1"></i>Save draft</button>
           </div>
         )}
       </form>
+
+      {/* Auto-save engine — picks up every [data-autosave] input/textarea in
+          the page and POSTs to /observations/:id/autosave on every change. */}
+      {editable && (
+        <script dangerouslySetInnerHTML={{ __html: `
+          (function() {
+            const OBS_ID = ${JSON.stringify(o.id)};
+            const URL = '/appraiser/observations/' + OBS_ID + '/autosave';
+            const timers = new Map();
+            function setStatus(field, text, bg, fg, border) {
+              document.querySelectorAll('.aps-autosave-status[data-for="'+field+'"]').forEach(el => {
+                el.textContent = text;
+                if (bg)     el.style.backgroundColor = bg;
+                if (fg)     el.style.color = fg;
+                if (border) el.style.borderColor = border;
+              });
+            }
+            async function save(field, value) {
+              try {
+                setStatus(field, 'Saving…', '#f1f5f9', '#64748b', '#cbd5e1');
+                const fd = new FormData();
+                fd.set('field', field);
+                fd.set('value', value);
+                const r = await fetch(URL, { method: 'POST', body: fd, credentials: 'same-origin' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.err || 'save_failed');
+                const when = new Date();
+                const t = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                // Prominent green pill so the user has no doubt it's saved.
+                setStatus(field, '✓ Saved — ' + value.length + ' chars at ' + t, '#d1fae5', '#065f46', '#6ee7b7');
+              } catch (err) {
+                setStatus(field, '⚠ Not saved — try again', '#fee2e2', '#991b1b', '#fca5a5');
+              }
+            }
+            document.querySelectorAll('[data-autosave]').forEach(el => {
+              const field = el.getAttribute('data-autosave');
+              el.addEventListener('input', () => {
+                setStatus(field, 'Typing…', '#94a3b8');
+                if (timers.has(field)) clearTimeout(timers.get(field));
+                timers.set(field, setTimeout(() => save(field, el.value), 700));
+              });
+              el.addEventListener('blur', () => {
+                if (timers.has(field)) { clearTimeout(timers.get(field)); timers.delete(field); }
+                save(field, el.value);
+              });
+            });
+          })();
+        ` }}></script>
+      )}
 
       {/* Scoring grid */}
       <h2 class="font-display text-xl text-aps-navy mt-8 mb-3">Marshall Rubric Scoring</h2>
