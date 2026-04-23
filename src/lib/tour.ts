@@ -162,11 +162,15 @@ const superAdminSteps: TourStep[] = [
   {
     page: '/admin/pd',
     noHighlight: true,
-    title: 'PD Modules — your in-platform LMS',
+    title: 'PD Modules — the in-platform LMS',
     body: `
-      <p>This is where you <strong>build the PD curriculum</strong> teachers see on their "My PD LMS" page. Each module is attached to a specific Marshall rubric indicator at a target level.</p>
-      <p>When a teacher gets scored at that level or below, the platform <em>auto-enrolls</em> them in the module — no manual assignment needed. You control the Learn / Practice / Apply content, the deliverable prompt, and the rubric used to judge the submission.</p>
-      <p>The seed migration ships 120 research-based modules (60 indicators × levels 1 & 2). Edit, add, or retire them freely.</p>`,
+      <p>This is where you <strong>build the PD curriculum</strong> teachers see on their "My PD LMS" page. Each module is attached to a specific Marshall rubric indicator at a target level, and the seed ships <strong>120 lesson-plan-driven modules</strong> (60 indicators × levels 1 & 2) built around an 8-step Learn → Practice → Apply protocol:</p>
+      <ul>
+        <li><strong>Learn</strong> — teacher picks an upcoming lesson, reads the rubric side-by-side (current level vs. target), and identifies the evidence gap.</li>
+        <li><strong>Practice</strong> — teacher rebuilds that lesson, scripts opener / pivot / close, and picks one piece of student evidence to collect.</li>
+        <li><strong>Apply</strong> — teacher teaches the rebuilt lesson and submits <em>plan + evidence + 3-sentence impact note</em> for supervisor verification.</li>
+      </ul>
+      <p>When a teacher scores 1 or 2 on an indicator in a published observation, the platform auto-enrolls them in up to three matching modules — no manual assignment needed. You can edit, add, or retire any module here.</p>`,
   },
   {
     page: '/admin',
@@ -280,10 +284,19 @@ const appraiserSteps: TourStep[] = [
   {
     page: '/pd/review',
     noHighlight: true,
-    title: 'PD review queue (in-platform, no email)',
+    title: 'PD review queue — verify the rebuilt lesson',
     body: `
-      <p>Teachers don't need a separate LMS — every module lives inside this platform. When one of your teachers submits a classroom deliverable for a PD module, it appears here as a <strong>pending review</strong>.</p>
-      <p>You can accept it as <em>verified</em> (success notification fires to the teacher) or ask for a revision (the teacher gets a nudge with your note). All without leaving the app.</p>`,
+      <p>Teachers don't need a separate LMS — every module lives inside this platform. When one of your teachers submits a PD deliverable, it appears here as a <strong>pending review</strong>.</p>
+      <p>Each submission is a <strong>rebuilt lesson plan</strong> for the exact indicator where you scored them a 1 or 2 — plus a student-evidence artifact (exit ticket, board photo, student quotes) and a 3-sentence impact note. You're looking for six specific things (shown at the top of every review page):</p>
+      <ul>
+        <li>The lesson is real — one they taught or are about to teach.</li>
+        <li>At least two of the target-level moves are built into the plan.</li>
+        <li>Opener / pivot / close are scripted in their own voice.</li>
+        <li>Student evidence is concrete (work sample, exit ticket, transcript).</li>
+        <li>The impact note names both what worked and what didn't.</li>
+        <li>They identify one concrete next classroom move.</li>
+      </ul>
+      <p>Click <em>verified</em> (success notification fires to the teacher) or ask for a revision with a note. No email, no external LMS.</p>`,
   },
   {
     page: '/appraiser',
@@ -358,15 +371,16 @@ const teacherSteps: TourStep[] = [
   {
     page: '/teacher/observations',
     noHighlight: true,
-    title: 'Acknowledging an observation',
+    title: 'Acknowledging an observation — read first, sign after',
     body: `
-      <p>When you open a published observation you'll see:</p>
+      <p>When you open a published observation the <strong>blue banner at the very top</strong> tells you exactly how many strengths, growth areas, next steps, and rubric scores are waiting below — before you're asked to sign anything.</p>
       <ul>
-        <li><strong>Scores</strong> on every indicator the appraiser marked, with evidence notes.</li>
-        <li><strong>Strengths (Glows)</strong>, <strong>Growth areas (Grows)</strong>, <strong>Focus areas</strong>, and <strong>Next steps</strong>.</li>
-        <li>A place to <strong>type your response</strong> and <strong>sign</strong> — that officially acknowledges the observation.</li>
+        <li><strong>Rubric Scores</strong> — every indicator the appraiser marked, with evidence notes.</li>
+        <li><strong>Strengths (Glows)</strong>, <strong>Growth areas (Grows)</strong>, and <strong>Next steps</strong>.</li>
+        <li><strong>Focus areas</strong> opened for you.</li>
+        <li>A place to <strong>type your response</strong> and <strong>sign</strong> at the bottom.</li>
       </ul>
-      <p>Acknowledging doesn't mean "I agree with every rating" — it means "I've read this and had a chance to respond."</p>`,
+      <p><strong>Signing = "seen and discussed"</strong> — not "I agree with every rating." If there's a dispute, use the response box; the signature is only the legal record that the conversation happened.</p>`,
   },
   {
     page: '/teacher/focus',
@@ -379,11 +393,15 @@ const teacherSteps: TourStep[] = [
     page: '/teacher/pd',
     selector: '[data-tour="t-pd-home"]',
     placement: 'auto',
-    title: 'My PD LMS — your Floating PD Day engine',
+    title: 'My PD LMS — rebuild a real lesson, level up the rubric',
     body: `
-      <p>When an observation scores you at Level 1 or 2 on an indicator, the system automatically queues a research-based <strong>Learn &rarr; Practice &rarr; Apply</strong> module for that exact indicator here — no subscriptions, no outside tools.</p>
-      <p>You can also browse the full library and add modules yourself. Group several modules into a <strong>PD Plan</strong> for a floating PD day and you've got a printable agenda for the whole day.</p>
-      <p>Each module ends with a <strong>classroom deliverable</strong> (an exit ticket, lesson plan, rubric…) that your supervisor verifies inside the platform.</p>`,
+      <p>Every module here is tied to one specific Marshall indicator where your last observation was scored 1 or 2. When you open a module you follow a simple 8-step protocol:</p>
+      <ul>
+        <li><strong>Learn</strong> (Steps 1-3) — pick an upcoming lesson you'll actually teach, read the rubric side-by-side for your current level vs. your target level, and spot the evidence gap.</li>
+        <li><strong>Practice</strong> (Steps 4-6) — rewrite that lesson so the missing Level-up signals show up, script the three high-leverage moments (opener / pivot / close), and choose one piece of student evidence you'll collect.</li>
+        <li><strong>Apply</strong> (Steps 7-8) — teach the redesigned lesson, then submit the rebuilt <strong>lesson plan + student evidence artifact + 3-sentence impact note</strong>. Your supervisor verifies that bundle right in the platform.</li>
+      </ul>
+      <p>The deliverable is <strong>work you keep</strong> — a lesson plan you can reuse, not a worksheet for a seminar you'll never open again. Group several modules into a <strong>PD Plan</strong> for a printable Floating PD Day agenda.</p>`,
   },
   {
     page: '/teacher',

@@ -408,12 +408,23 @@ The district now owns its own in‑app + Web Push notification system. No Resend
 
 ---
 
-## 🎓 PD Module management (new)
+## 🎓 PD Module management (new — v2 redesign, April 2026)
 
 Open **PD Modules** in the main nav (`/admin/pd`). The page lists all 120 seeded modules (60 indicators × 2 growth levels) with:
 - Active / archived toggle
 - Enrollment counts (recommended / started / submitted / verified)
 - Full CRUD on module metadata, Learn/Practice/Apply content, deliverable prompt, rubric, and resources
+
+### What each module looks like (v2 lesson‑plan redesign)
+Every module is anchored to **one Marshall indicator at one target level** (the level the teacher's observation scored, which the module pushes to level+1). Rather than a generic PD activity, each module walks the teacher through 8 concrete steps tied to the rubric and pedagogy library:
+
+| Phase | Steps | What the teacher actually does |
+|-------|-------|--------------------------------|
+| **Learn** (~10 min) | 1 – 3 | Picks a specific upcoming lesson; reads the current vs. target rubric side‑by‑side (pulled from `pedagogy_library.interpretation`); marks which target‑level evidence signals (`pedagogy_library.evidence_signals`) are already in the lesson and which are missing. |
+| **Practice** (~25 min) | 4 – 6 | Rewrites the lesson plan using the pedagogy library's `teacher_next_moves` for the target level; scripts the opener, pivot moment, and close word‑for‑word; picks one student‑evidence artifact to collect. |
+| **Apply** | 7 – 8 | Teaches the rebuilt lesson, then submits a 5‑minute review package: context paragraph + rebuilt lesson plan with next‑level moves highlighted + the three scripted moments + student‑evidence artifact + 3‑sentence impact note. |
+
+The research basis on each module cites Marshall (2014/2023), Saphier et al. (Skillful Teacher 7th ed.), Hattie (Visible Learning for Teachers), Wiggins & McTighe (UbD), Wiliam (Embedded Formative Assessment), and Lemov (Teach Like a Champion 3.0) — generated from the district's own pedagogy library so editing a library entry automatically updates every module tied to that indicator.
 
 ### How auto‑enrollment works
 When an appraiser publishes an observation, `autoEnrollForObservation(db, obsId, env)` runs:
@@ -423,6 +434,11 @@ When an appraiser publishes an observation, `autoEnrollForObservation(db, obsId,
 4. Sends the teacher a `pd_module_recommended` notification.
 
 To change the threshold, edit `AUTO_ENROLL_THRESHOLD` in `src/lib/pd.ts`.
+
+### Keeping content in sync with the rubric
+Because the v2 modules derive their Learn / Practice text from `pedagogy_library` at seed time, the way to push a rubric update into PD is a **two‑step** process:
+1. Edit the cell(s) on `/admin/pedagogy`.
+2. Re‑run the seed: `npx wrangler d1 execute alexander-marshall-growth-production --remote --file=seed/004_pd_modules.sql`. The seed is idempotent — it UPDATEs existing `pd_modules` rows in place, preserving FK relationships from `pd_enrollments`, and only INSERTs new rows for indicator/level pairs that don't have a module yet. Existing teacher enrollments and deliverables are untouched.
 
 ### PD Completion Report
 `/reports/pd` and `/reports/pd.csv` give district‑wide views of every enrollment — auto, self, and assigned — filterable by teacher, school, domain, indicator, status, source, and date. Drill‑down at `/reports/pd/:enrollmentId` shows the teacher's actual classroom deliverable plus reflections.

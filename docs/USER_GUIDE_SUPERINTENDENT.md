@@ -258,3 +258,12 @@ Open **Reports** and switch the pill to **PD Completion Report**. District‑wid
 - Click any row to read the teacher's **actual classroom deliverable** and reflections.
 - Download the filtered rows as CSV for board packets.
 - Sort by submission date, verification date, teacher last name, rubric indicator, status, or module.
+
+### What "PD completion" actually means (redesigned April 2026)
+Every one of our 120 PD modules now asks the teacher to take an upcoming lesson they were already going to teach and rebuild it so the observer would score them one rubric level higher on a specific Marshall indicator. A **verified** completion in this report therefore means three things simultaneously:
+
+1. The teacher submitted an **actual rebuilt lesson plan** (with the target‑level rubric moves visibly highlighted), plus a real student‑evidence artifact (exit ticket, work sample, student quotes, or board photo).
+2. Their supervisor (principal or coach) checked the bundle against a six‑point rubric — real lesson, next‑level moves visible, scripted opener/pivot/close, real evidence, honest impact note, one concrete next move — and clicked **Verified**.
+3. The teacher now has a reusable lesson artifact in their classroom that is tied back to the exact rubric indicator the district wants to see move.
+
+In short: the column reads **Verified** only when the teacher's next lesson is measurably different because of the module. That is the number you can take to the board.

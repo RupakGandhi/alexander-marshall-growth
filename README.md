@@ -11,6 +11,16 @@ Complete role-specific user guides and a full technical developer guide are in *
 - [Teacher Guide](docs/USER_GUIDE_TEACHER.md)
 - [**Technical Developer Guide**](docs/TECHNICAL_DEVELOPER_GUIDE.md) — architecture, schema, API reference, and step-by-step replication guide
 
+## ✅ Production Transmittal Status (April 2026)
+
+- **Cloudflare Pages**: live at https://alexander-marshall-growth.pages.dev — deployed from `main`.
+- **Production D1** (`alexander-marshall-growth-production`, id `7ad58a8f-621b-41e8-aa9a-dc27069eb039`): all 4 migrations applied, all 4 seeds loaded — **including the v2 PD seed (120 lesson‑plan modules)**.
+- **GitHub**: https://github.com/RupakGandhi/alexander-marshall-growth (synced with deploy).
+- **Default password for seeded accounts**: `Alexander2026!` (forced change on first login).
+- **Built for**: Dr. Rupak Gandhi / OptimizED Strategic Solutions.
+
+No additional setup steps are required before the district can log in and begin using the platform.
+
 ## ⭐ What's New (Round 3 — April 2026)
 
 ### Teacher observation view redesigned for clarity
@@ -20,6 +30,8 @@ Complete role-specific user guides and a full technical developer guide are in *
 
 ### PD modules redesigned: lesson‑plan‑driven, not generic PD
 All 120 modules now follow a Pick → Read rubric → Spot gap → Rewrite → Script → Pick evidence → Teach → Submit template. Every module guides the teacher to redesign a real upcoming lesson so the next observation scores one rubric level higher on that specific Marshall indicator. The deliverable is a usable classroom artifact (lesson plan + scripted moments + real student evidence + impact note) — not a journal entry.
+
+Research basis for every module: Marshall (2014/2023), Saphier et al. *The Skillful Teacher* (7th ed.), Hattie *Visible Learning for Teachers*, Wiggins & McTighe *Understanding by Design*, Wiliam *Embedded Formative Assessment*, Lemov *Teach Like a Champion 3.0*. Content is derived from the district's own pedagogy library at seed time — editing a library cell and re‑running `seed/004_pd_modules.sql` safely updates every affected module without invalidating existing teacher enrollments.
 
 ### Bug fix — PD LMS now works end‑to‑end
 `src/lib/pd.ts:getEnrollment` was using `SELECT e.*, m.*` which collapsed the `e.id` column to `m.id` in SQLite/D1 — every Save/Advance/Submit form in the module workspace was posting to the wrong URL. Query now enumerates each column with an alias; Learn → Practice → Apply → Submit now verified working end‑to‑end for auto‑enrolled, self‑enrolled, and assigned modules.
@@ -286,13 +298,14 @@ Super Admin → `/admin/pedagogy` → pick a domain → click any cell in the 60
 
 - **Platform**: Cloudflare Pages + Cloudflare Workers + Cloudflare D1
 - **Framework**: Hono 4 + TypeScript JSX (server‑rendered)
-- **Status**: ✅ Deployed to Cloudflare Pages (edge worker live); ⚠️ Production D1 database binding pending (requires D1 write permission on the Cloudflare API token)
+- **Status**: ✅ Fully deployed and transmittal‑ready — edge worker live, production D1 bound and seeded (users, framework, pedagogy, 120 v2 PD modules).
 - **Production URL**: https://alexander-marshall-growth.pages.dev
-- **Latest Deploy**: https://ff5e9bd7.alexander-marshall-growth.pages.dev
 - **Cloudflare project name**: `alexander-marshall-growth`
-- **Sandbox preview (local D1, fully seeded)**: https://3000-iz4zjax2wz4mwitsuv97o-b9b802c4.sandbox.novita.ai
+- **Cloudflare D1 database**: `alexander-marshall-growth-production` (id `7ad58a8f-621b-41e8-aa9a-dc27069eb039`)
+- **GitHub repository**: https://github.com/RupakGandhi/alexander-marshall-growth
+- **Sandbox preview (local D1 mirror)**: https://3000-iz4zjax2wz4mwitsuv97o-b9b802c4.sandbox.novita.ai
 - **Tech stack**: Hono 4 · Cloudflare D1 (SQLite) · Tailwind CDN · FontAwesome · bcryptjs · PM2 (dev) · Vite 6 · Wrangler 4
-- **Last Updated**: 2026-04-22
+- **Last Updated**: 2026-04-23
 
 ## Mobile & PWA (Installable App)
 The platform is fully mobile‑responsive and installable as a Progressive Web App on iOS, Android, Windows, macOS, and Chromebooks.
@@ -358,8 +371,6 @@ npx wrangler pages deploy dist --project-name <project-name>
 ```
 
 ## Features NOT Yet Implemented (v1.1 roadmap)
-- Production D1 database creation + binding to the deployed Pages project (the edge worker is live, but the current Cloudflare API token lacks D1 write permission — see "Finish production D1 setup" below)
-- GitHub repository push (blocked — `setup_github_environment` reported the GitHub session was not set up; user must authorize in the #github tab)
 - Full APS staff roster beyond the 7 seeded teachers (current migration seeds page 1 of the public directory; additional teachers can be added via `/admin/users/create` or by extending `seed/003_alexander_staff.sql`)
 - Annual rollover automation (manual via school_years table for now)
 - ND state teacher‑evaluation export format
@@ -367,42 +378,31 @@ npx wrangler pages deploy dist --project-name <project-name>
 - Offline queueing in the service worker
 - Superintendent pedagogy‑usage analytics (which library entries trigger most often)
 
-## Finish production D1 setup (required before prod login works)
+## Transmittal Checklist for the District (April 2026)
 
-The worker is deployed, but it cannot read/write users until a production D1 database is bound. The current Cloudflare API token has Pages permission but not D1 permission.
+All of the following are complete and deployed; this checklist is for your own walkthrough before go‑live.
 
-**Option A — fix the API token (recommended, fully CLI):**
-1. Go to https://dash.cloudflare.com/profile/api-tokens → edit the token used by this sandbox → add permissions:
-   - Account · D1 · Edit
-   - Account · Cloudflare Pages · Edit (already present)
-2. In the sandbox:
-   ```bash
-   cd /home/user/webapp
-   npx wrangler d1 create alexander-marshall-growth-production
-   # copy the database_id it prints
-   # paste it into wrangler.jsonc → d1_databases[0].database_id
-   npx wrangler d1 migrations apply alexander-marshall-growth-production
-   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/001_district_and_framework.sql
-   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/002_pedagogy_library.sql
-   npx wrangler d1 execute alexander-marshall-growth-production --file=./seed/003_alexander_staff.sql
-   npm run build
-   npx wrangler pages deploy dist --project-name alexander-marshall-growth --branch main
-   ```
+1. Log into https://alexander-marshall-growth.pages.dev as super admin (`admin@alexanderschoolnd.us` / `Alexander2026!`) and change the password.
+2. Reset every other seeded account to a fresh district‑chosen password from `/admin/users` (each user is still forced to change on first login).
+3. Import the rest of the APS staff via `/admin/users` → *Bulk Import*; link appraiser + coach assignments via `/admin/assignments`.
+4. From the principal's login, run a practice observation on a test teacher and publish it — verify the teacher receives an in‑app alert (and a push alert after they install the PWA).
+5. From the teacher's login, open the published observation, read the banner, and acknowledge — verify the signature appears and a PD module auto‑enrolls if any score is ≤ 2.
+6. Walk the teacher through one PD module end‑to‑end: Learn → Practice → Apply → Submit. Have the principal verify it from `/pd/review`.
+7. Open `/reports/pd` as superintendent or super admin to confirm the completion appears in the district report.
+8. Walk the superintendent through `/superintendent` for sign‑off.
 
-**Option B — via the Cloudflare dashboard (no CLI perms needed):**
-1. Workers & Pages → D1 → Create database `alexander-marshall-growth-production`
-2. Copy the `database_id`
-3. Workers & Pages → `alexander-marshall-growth` → Settings → Bindings → D1 → add binding name `DB` → database `alexander-marshall-growth-production`
-4. D1 → your DB → Console → paste the three seed files in order (`001_district_and_framework.sql`, `002_pedagogy_library.sql`, `003_alexander_staff.sql`), then apply `migrations/0001_initial_schema.sql` first (before seeds)
-5. Redeploy from the Pages dashboard so the new binding takes effect
+## Re‑seeding production from the sandbox (for future updates)
 
-## Recommended Next Steps
-1. Complete the production D1 setup above so `/login` works at https://alexander-marshall-growth.pages.dev
-2. Authorize GitHub in the #github tab, then the sandbox can push this repo for you
-3. In production, log in as super admin (`admin@alexanderschoolnd.us` / `Alexander2026!`), force‑change the seeded password, then reset all other seeded accounts to fresh passwords the district can distribute in person
-4. Import the rest of the APS staff via `/admin/users` and link appraiser + coach assignments via `/admin/assignments`
-5. Walk the superintendent through `/superintendent` for sign‑off
-6. Replace the default‑password pattern with a district‑chosen seed phrase in `seed/003_alexander_staff.sql` if you prefer
+```bash
+cd /home/user/webapp
+# Apply any new migrations
+npx wrangler d1 migrations apply alexander-marshall-growth-production --remote
+# Re‑seed (all seeds are idempotent — safe to re‑run)
+npx wrangler d1 execute alexander-marshall-growth-production --remote --file=seed/004_pd_modules.sql
+# Build + deploy
+npm run build
+npx wrangler pages deploy dist --project-name alexander-marshall-growth --branch main
+```
 
 ---
 © Alexander Public School District · Built by OptimizED Strategic Solutions · Marshall Growth Platform v1.0

@@ -272,4 +272,16 @@ Turn individual alerts off on `/profile#notifications` — there's a master push
 ### PD Review (coach mode)
 Open **PD Review** in the main nav. You'll see submitted PD deliverables from every teacher on your coach caseload. You can **verify** a deliverable (teacher gets a success ping) or **request revision** with a short note (teacher gets a revision ping). You can also assign a module directly from the module library (`PD Review → Assign a module`).
 
+### What a "good" PD deliverable looks like (redesigned April 2026)
+Every module now asks the teacher to take an **upcoming lesson they were already going to teach** and rebuild it so the observer would score them one level higher on a specific Marshall indicator. When you open a submission, you are looking for six things:
+
+1. **A real lesson** — grade, subject, unit, and a date the teacher taught or is about to teach it this week. Not a generic activity from a book.
+2. **At least two next‑level moves** visibly built into the plan (bolded or highlighted). These come from the pedagogy library's `teacher_next_moves` for the target rubric level.
+3. **Three scripted moments** — word‑for‑word opener, pivot move, and close in the teacher's own voice (not paraphrased rubric language).
+4. **A real student‑evidence artifact** — exit‑ticket responses, a work sample, student quotes from the pivot moment, or a board photo.
+5. **An honest 3‑sentence impact note** — names what worked, what did not, and where the redesign fell short.
+6. **One concrete next classroom move** on the indicator so the teacher can stack progress on their next lesson.
+
+If any of those are missing, click **Request revision** and leave a short, specific note. The teacher gets a notification, fixes the issue, and resubmits.
+
 All of this rolls into **Reports → PD Completion Report** (`/reports/pd`) so you can show a principal exactly what modules your teachers completed and what they produced.
