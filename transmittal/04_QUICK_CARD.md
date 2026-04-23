@@ -7,8 +7,8 @@
 
 ## Login as you (Leslie)
 **Email:** leslie.bieber@k12.nd.us
-**Password:** PreviewAlexander2026
-(You will **NOT** be asked to change it. This is a demo login.)
+**First‑login password:** Alexander2026!
+(You'll be prompted to set your own password on first login — the same first‑day experience your staff will have. Can be reset any time from **Profile → Change Password**, or text me.)
 
 ## The 60‑second story
 Principal walks into Ms. Stahosky's room with their phone. Types scripted notes — auto‑saves. Clicks 2 on "Student ownership of learning." Clicks Generate Feedback. Glows, grows, next steps appear. Signs once. Ms. Stahosky gets a push notification, opens the observation, reads strengths + growth + scores + next steps (all before the signature block), signs, optionally leaves a comment. Because she scored a 2, the platform auto‑enrolls her in three lesson‑plan‑driven PD modules for that exact Marshall indicator. She picks one, works through Learn → Practice → Apply (checkboxes, radios, auto‑saving answer boxes — no paper, no "save" button to forget), submits her rebuilt lesson plan + student evidence + impact note. Principal gets a ping, verifies it, module is marked complete. Level‑up, on that specific indicator.

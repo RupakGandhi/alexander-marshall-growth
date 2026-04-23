@@ -25,3 +25,6 @@ logs/
 *.tar.gz
 *.zip
 tmp/
+
+# Word-format transmittal exports (delivered out-of-band to Leslie)
+transmittal/word/
