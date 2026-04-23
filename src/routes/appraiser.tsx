@@ -51,22 +51,32 @@ app.get('/teachers/:id', async (c) => {
 });
 
 // ---- Start a new observation
+// Auto-prefills subject/grade from the teacher's title when not explicitly set, and stamps
+// observed_at with the current server time (which will display in US Central via formatDateTime).
 app.post('/teachers/:id/observations/start', async (c) => {
   const user = c.get('user')!;
   const teacherId = Number(c.req.param('id'));
   const body = await c.req.parseBody();
   const type = (String(body.observation_type || 'mini')) as any;
+  // Look up the teacher's profile so we can auto-fill subject/grade from their title.
+  const teacher = await c.env.DB.prepare('SELECT title FROM users WHERE id = ?').bind(teacherId).first<any>();
+  const titleText = String(teacher?.title || '');
+  // Heuristic: extract a parenthetical grade span, e.g., "Art (PK-12)" → grade "PK-12", subject "Art"
+  const m = titleText.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+  const autoSubject = m ? m[1].trim() : titleText.trim();
+  const autoGrade = m ? m[2].trim() : '';
+  const subject = (String(body.subject || '').trim() || autoSubject) || null;
+  const gradeLevel = (String(body.grade_level || '').trim() || autoGrade) || null;
   const location = String(body.location || '').trim() || null;
-  const subject = String(body.subject || '').trim() || null;
   const context = String(body.class_context || '').trim() || null;
   const fw = await getActiveFramework(c.env.DB);
   const sy = await getCurrentSchoolYear(c.env.DB);
   if (!fw) return c.text('No active framework', 500);
   const res = await c.env.DB.prepare(
     `INSERT INTO observations (teacher_id, appraiser_id, school_year_id, framework_id,
-      observation_type, class_context, subject, location, observed_at, status)
-     VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,'draft')`
-  ).bind(teacherId, user.id, (sy as any)?.id || null, (fw as any).id, type, context, subject, location).run();
+      observation_type, class_context, subject, grade_level, location, observed_at, status)
+     VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,'draft')`
+  ).bind(teacherId, user.id, (sy as any)?.id || null, (fw as any).id, type, context, subject, gradeLevel, location).run();
   const obsId = (res.meta as any)?.last_row_id;
   await logActivity(c.env.DB, user.id, 'observation', Number(obsId), 'start', { teacherId, type });
   return c.redirect(`/appraiser/observations/${obsId}`);
@@ -111,12 +121,40 @@ app.post('/observations/:id/save', async (c) => {
   const grade = String(body.grade_level || '');
   const loc = String(body.location || '');
   const duration = Number(body.duration_minutes || 0) || null;
-  await c.env.DB.prepare(
-    `UPDATE observations SET scripted_notes=?, private_notes=?, overall_summary=?,
-       class_context=?, subject=?, grade_level=?, location=?, duration_minutes=?,
-       updated_at=CURRENT_TIMESTAMP
-     WHERE id=? AND appraiser_id=?`
-  ).bind(scripted, priv, summary, context, subject, grade, loc, duration, id, user.id).run();
+  // observed_at is editable via a datetime-local input. The value comes in as "YYYY-MM-DDTHH:MM"
+  // in the appraiser's local (Central) time. We convert it to a UTC SQLite timestamp string
+  // so it can be stored and later rendered back correctly.
+  const observedAtRaw = String(body.observed_at || '').trim();
+  let observedAtSql: string | null = null;
+  if (observedAtRaw) {
+    // Treat input as America/Chicago wall-clock time, convert to UTC.
+    const parts = observedAtRaw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    if (parts) {
+      const [, y, mo, d, h, mi] = parts;
+      // Work out the Chicago offset at that moment (handles DST).
+      const probe = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)));
+      const tzShort = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', timeZoneName: 'short' })
+        .formatToParts(probe).find(p => p.type === 'timeZoneName')?.value || 'CST';
+      const offsetHours = tzShort === 'CDT' ? 5 : 6;
+      const utcMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h) + offsetHours, Number(mi));
+      observedAtSql = new Date(utcMs).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+    }
+  }
+  if (observedAtSql) {
+    await c.env.DB.prepare(
+      `UPDATE observations SET scripted_notes=?, private_notes=?, overall_summary=?,
+         class_context=?, subject=?, grade_level=?, location=?, duration_minutes=?,
+         observed_at=?, updated_at=CURRENT_TIMESTAMP
+       WHERE id=? AND appraiser_id=?`
+    ).bind(scripted, priv, summary, context, subject, grade, loc, duration, observedAtSql, id, user.id).run();
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE observations SET scripted_notes=?, private_notes=?, overall_summary=?,
+         class_context=?, subject=?, grade_level=?, location=?, duration_minutes=?,
+         updated_at=CURRENT_TIMESTAMP
+       WHERE id=? AND appraiser_id=?`
+    ).bind(scripted, priv, summary, context, subject, grade, loc, duration, id, user.id).run();
+  }
   await logActivity(c.env.DB, user.id, 'observation', id, 'save_notes');
   return c.redirect(`/appraiser/observations/${id}?msg=Saved`);
 });
@@ -341,10 +379,26 @@ function AppraiserHome({ user, teachers, latest, welcome }: any) {
                 </div>
                 <div class="mt-3 flex flex-wrap gap-2" data-tour="ap-start-obs">
                   <a href={`/appraiser/teachers/${t.id}`} class="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md border border-aps-navy text-aps-navy hover:bg-slate-50"><i class="fas fa-folder-open"></i>View data</a>
-                  <form method="post" action={`/appraiser/teachers/${t.id}/observations/start`} class="inline">
-                    <input type="hidden" name="observation_type" value="mini" />
-                    <button class="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md bg-aps-navy text-white hover:bg-aps-blue"><i class="fas fa-play"></i>Start mini-observation</button>
-                  </form>
+                  {/* Dropdown: start any of the three observation types without leaving this screen.
+                      Subject/grade are auto-filled server-side from the teacher's title, so the
+                      appraiser just has to click one item and can edit details on the next page. */}
+                  <details class="relative inline-block">
+                    <summary class="list-none cursor-pointer inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md bg-aps-navy text-white hover:bg-aps-blue select-none"><i class="fas fa-play"></i>Start observation<i class="fas fa-caret-down ml-1"></i></summary>
+                    <div class="absolute z-20 mt-1 right-0 w-56 bg-white border border-slate-200 rounded-md shadow-lg overflow-hidden">
+                      <form method="post" action={`/appraiser/teachers/${t.id}/observations/start`}>
+                        <input type="hidden" name="observation_type" value="mini" />
+                        <button class="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100"><i class="fas fa-bolt text-amber-500 mr-2 w-4"></i>Mini observation</button>
+                      </form>
+                      <form method="post" action={`/appraiser/teachers/${t.id}/observations/start`}>
+                        <input type="hidden" name="observation_type" value="formal" />
+                        <button class="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100"><i class="fas fa-file-lines text-sky-600 mr-2 w-4"></i>Formal observation</button>
+                      </form>
+                      <form method="post" action={`/appraiser/teachers/${t.id}/observations/start`}>
+                        <input type="hidden" name="observation_type" value="annual_summary" />
+                        <button class="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"><i class="fas fa-calendar-check text-emerald-600 mr-2 w-4"></i>Annual summary</button>
+                      </form>
+                    </div>
+                  </details>
                 </div>
               </Card>
             );
@@ -556,6 +610,22 @@ function ObservationEditor({ user, o, domains, msg }: any) {
     focus_area: feedback.filter((f:any)=>f.category==='focus_area'),
     next_step: feedback.filter((f:any)=>f.category==='next_step'),
   };
+  // Prepare the observed_at value for <input type="datetime-local"> — must be "YYYY-MM-DDTHH:MM"
+  // expressed in Central Time (the appraiser's wall-clock). The DB stores UTC.
+  let observedAtLocal = '';
+  if (o.observed_at) {
+    try {
+      const raw = String(o.observed_at);
+      const utc = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(raw)
+        ? new Date(raw.replace(' ', 'T') + 'Z') : new Date(raw);
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(utc);
+      const g = (t: string) => parts.find(p => p.type === t)?.value || '00';
+      observedAtLocal = `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`;
+    } catch { observedAtLocal = ''; }
+  }
 
   return (
     <Layout title="Observation" user={user} activeNav="ap-obs">
@@ -583,15 +653,28 @@ function ObservationEditor({ user, o, domains, msg }: any) {
       {/* Context + notes */}
       <form method="post" action={`/appraiser/observations/${o.id}/save`}>
         <Card title="Context" icon="fas fa-circle-info">
-          <div class="grid md:grid-cols-4 gap-3 text-sm">
+          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-wand-magic-sparkles mr-1 text-amber-500"></i>We pre-filled Subject, Grade, and the Date/Time from when you started. Edit anything if it changed on the day.</p>
+          <div class="grid md:grid-cols-3 gap-3 text-sm">
             <label>Subject<input name="subject" value={o.subject || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
             <label>Grade / Course<input name="grade_level" value={o.grade_level || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
-            <label>Location / Room<input name="location" value={o.location || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
-            <label>Duration (min)<input type="number" name="duration_minutes" value={o.duration_minutes || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} /></label>
+            <label>Location / Room <span class="text-slate-400">(optional)</span><input name="location" value={o.location || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. Rm 204" disabled={!editable} /></label>
           </div>
-          <label class="block mt-3 text-sm">Class context
-            <input name="class_context" value={o.class_context || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. 3rd period Algebra I, 24 students" disabled={!editable} />
-          </label>
+          <div class="grid md:grid-cols-3 gap-3 text-sm mt-3">
+            <label>Date &amp; time <span class="text-slate-400">(Central)</span>
+              <input type="datetime-local" name="observed_at" value={observedAtLocal} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" disabled={!editable} />
+            </label>
+            <label>Duration (min)
+              <div class="mt-1 flex items-center gap-2">
+                <input id="aps-duration-input" type="number" name="duration_minutes" value={o.duration_minutes || ''} class="flex-1 border border-slate-300 rounded px-2 py-1.5" placeholder="auto" disabled={!editable} />
+                {editable && !o.duration_minutes ? (
+                  <button type="button" id="aps-duration-toggle" class="text-xs px-2 py-1 rounded border border-aps-navy text-aps-navy hover:bg-slate-50" data-started-at={o.observed_at || ''}><i class="fas fa-stopwatch mr-1"></i>Auto</button>
+                ) : null}
+              </div>
+            </label>
+            <label>Class context <span class="text-slate-400">(optional)</span>
+              <input name="class_context" value={o.class_context || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="e.g. 22 students" disabled={!editable} />
+            </label>
+          </div>
         </Card>
 
         <Card title="Scripted Notes" icon="fas fa-pen-to-square" class="mt-4">
@@ -684,6 +767,28 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           </form>
         )}
       </Card>
+
+      {/* Client-side helper: "Auto" button next to Duration auto-calculates elapsed minutes
+          from when the observation was started. The appraiser can still override manually. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        (function(){
+          var btn = document.getElementById('aps-duration-toggle');
+          var inp = document.getElementById('aps-duration-input');
+          if (!btn || !inp) return;
+          btn.addEventListener('click', function(){
+            var startedAt = btn.getAttribute('data-started-at');
+            if (!startedAt) { inp.value = 0; return; }
+            // DB timestamps are UTC wall-clock without suffix; add Z so JS parses them as UTC.
+            var d = startedAt.replace(' ','T');
+            if (!/Z$|[+-]\\d\\d:?\\d\\d$/.test(d)) d += 'Z';
+            var start = new Date(d).getTime();
+            if (isNaN(start)) return;
+            var mins = Math.max(1, Math.round((Date.now() - start) / 60000));
+            inp.value = mins;
+            inp.focus();
+          });
+        })();
+      `}} />
     </Layout>
   );
 }

@@ -221,13 +221,15 @@ function navItems(role: string) {
         { key: 'admin-import',   label: 'Bulk Import',       href: '/admin/import/users', icon: 'fas fa-file-import' },
         { key: 'admin-reports',  label: 'Reports',           href: '/reports',            icon: 'fas fa-file-export' },
         { key: 'admin-district', label: 'District',          href: '/admin/district',     icon: 'fas fa-building-columns' },
+        { key: 'data',           label: 'Data Management',   href: '/admin/data',         icon: 'fas fa-database' },
       ];
     case 'superintendent':
       return [
-        { key: 'supt-home',   label: 'District Overview', href: '/superintendent',          icon: 'fas fa-gauge' },
-        { key: 'supt-schools',label: 'By School',         href: '/superintendent/schools',  icon: 'fas fa-school' },
-        { key: 'supt-teacher',label: 'By Teacher',        href: '/superintendent/teachers', icon: 'fas fa-chalkboard-user' },
-        { key: 'supt-reports',label: 'Reports',           href: '/reports',                 icon: 'fas fa-file-export' },
+        { key: 'supt-home',    label: 'District Overview', href: '/superintendent',          icon: 'fas fa-gauge' },
+        { key: 'supt-insights',label: 'Insights',          href: '/superintendent/insights', icon: 'fas fa-chart-line' },
+        { key: 'supt-schools', label: 'By School',         href: '/superintendent/schools',  icon: 'fas fa-school' },
+        { key: 'supt-teacher', label: 'By Teacher',        href: '/superintendent/teachers', icon: 'fas fa-chalkboard-user' },
+        { key: 'supt-reports', label: 'Reports',           href: '/reports',                 icon: 'fas fa-file-export' },
       ];
     case 'appraiser':
       return [

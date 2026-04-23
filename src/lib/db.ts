@@ -8,8 +8,54 @@ export async function getActiveFramework(db: D1Database) {
   return db.prepare('SELECT * FROM frameworks WHERE is_active = 1 LIMIT 1').first();
 }
 
+// Picks the current school year automatically based on today's date in US Central Time:
+// - If a row's date range covers today, prefer that row and mark it is_current.
+// - Otherwise, if a row already has is_current=1, use it.
+// - Otherwise, auto-create a new row for today's school year (Aug 1 - Jul 31) and return it.
+// This makes the current-year selection truly dynamic year-over-year with no admin intervention.
 export async function getCurrentSchoolYear(db: D1Database) {
-  return db.prepare('SELECT * FROM school_years WHERE is_current = 1 LIMIT 1').first();
+  // Compute today's date in America/Chicago so rollovers happen at midnight Central.
+  const now = new Date();
+  const centralParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const y = Number(centralParts.find(p => p.type === 'year')?.value || 0);
+  const m = Number(centralParts.find(p => p.type === 'month')?.value || 0);
+  const d = Number(centralParts.find(p => p.type === 'day')?.value || 0);
+  const todayIso = `${y.toString().padStart(4,'0')}-${m.toString().padStart(2,'0')}-${d.toString().padStart(2,'0')}`;
+
+  // 1. Find a row that contains today's date.
+  const covering = await db.prepare(
+    `SELECT * FROM school_years
+       WHERE date(?) BETWEEN date(start_date) AND date(end_date)
+       ORDER BY start_date DESC LIMIT 1`
+  ).bind(todayIso).first();
+  if (covering) {
+    if (!(covering as any).is_current) {
+      await db.prepare(`UPDATE school_years SET is_current = CASE WHEN id = ? THEN 1 ELSE 0 END`).bind((covering as any).id).run();
+      (covering as any).is_current = 1;
+    }
+    return covering;
+  }
+
+  // 2. Fall back to whichever row is flagged is_current.
+  const flagged = await db.prepare('SELECT * FROM school_years WHERE is_current = 1 LIMIT 1').first();
+  if (flagged) return flagged;
+
+  // 3. Auto-create a new row (August 1 - July 31 school-year convention).
+  const startYear = m >= 8 ? y : y - 1;
+  const label = `${startYear}-${startYear + 1}`;
+  const startDate = `${startYear}-08-01`;
+  const endDate = `${startYear + 1}-07-31`;
+  await db.prepare(`UPDATE school_years SET is_current = 0`).run();
+  const ins = await db.prepare(
+    `INSERT INTO school_years (district_id, label, start_date, end_date, is_current)
+     VALUES (1, ?, ?, ?, 1)`
+  ).bind(label, startDate, endDate).run();
+  return {
+    id: Number((ins.meta as any)?.last_row_id),
+    district_id: 1, label, start_date: startDate, end_date: endDate, is_current: 1,
+  };
 }
 
 export async function getDomainsWithIndicators(db: D1Database, frameworkId: number) {

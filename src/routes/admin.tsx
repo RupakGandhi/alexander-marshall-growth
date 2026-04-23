@@ -367,6 +367,44 @@ app.post('/district/update', async (c) => {
   return c.redirect('/admin/district?msg=Saved');
 });
 
+// Manage school years manually. The auto-selector in lib/db.ts still picks the row
+// whose date range covers today, so most years this page is informational only.
+app.post('/district/school-years/create', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const label = String(body.label || '').trim();
+  const start = String(body.start_date || '').trim();
+  const end = String(body.end_date || '').trim();
+  if (!label || !start || !end) return c.redirect('/admin/district?msg=Label%2C+start%2C+and+end+dates+required');
+  await c.env.DB.prepare(
+    `INSERT OR IGNORE INTO school_years (district_id, label, start_date, end_date, is_current) VALUES (1, ?, ?, ?, 0)`
+  ).bind(label, start, end).run();
+  await logActivity(c.env.DB, user.id, 'school_year', 0, 'create', { label, start, end });
+  return c.redirect('/admin/district?msg=' + encodeURIComponent(`Added school year ${label}`));
+});
+
+app.post('/district/school-years/:id/update', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  const label = String(body.label || '').trim();
+  const start = String(body.start_date || '').trim();
+  const end = String(body.end_date || '').trim();
+  await c.env.DB.prepare(
+    `UPDATE school_years SET label=?, start_date=?, end_date=? WHERE id=?`
+  ).bind(label, start, end, id).run();
+  await logActivity(c.env.DB, user.id, 'school_year', id, 'update');
+  return c.redirect('/admin/district?msg=' + encodeURIComponent('School year updated'));
+});
+
+app.post('/district/school-years/:id/set-current', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  await c.env.DB.prepare('UPDATE school_years SET is_current = CASE WHEN id = ? THEN 1 ELSE 0 END').bind(id).run();
+  await logActivity(c.env.DB, user.id, 'school_year', id, 'set_current');
+  return c.redirect('/admin/district?msg=' + encodeURIComponent('Set as current school year (manual override)'));
+});
+
 // ============================================================================
 // BULK IMPORT — Users (teachers, principals, coaches, etc.)
 // ============================================================================
@@ -799,6 +837,88 @@ function splitPipe(s: string | undefined): string[] {
   return String(s).split('|').map(x => x.trim()).filter(Boolean);
 }
 
+// ============================================================================
+// DATA MANAGEMENT
+// ----------------------------------------------------------------------------
+// Super-admin tools to wipe demo data before handing the platform to the client,
+// and to edit/delete any individual observation regardless of status. These
+// routes are guarded by a "CONFIRM" phrase typed in the UI and by the existing
+// requireRole('super_admin') middleware at the top of this file.
+// ============================================================================
+
+app.get('/data', async (c) => {
+  const user = c.get('user')!;
+  const msg = c.req.query('msg');
+  const counts = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM observations)        AS observations,
+       (SELECT COUNT(*) FROM observation_scores)  AS scores,
+       (SELECT COUNT(*) FROM feedback_items)      AS feedback_items,
+       (SELECT COUNT(*) FROM focus_areas)         AS focus_areas,
+       (SELECT COUNT(*) FROM activity_log)        AS activity_log`
+  ).first<any>();
+  const recentObs = await c.env.DB.prepare(
+    `SELECT o.id, o.observation_type, o.observed_at, o.status,
+            t.first_name AS t_first, t.last_name AS t_last,
+            a.first_name AS a_first, a.last_name AS a_last
+     FROM observations o
+     JOIN users t ON t.id = o.teacher_id
+     JOIN users a ON a.id = o.appraiser_id
+     ORDER BY o.observed_at DESC
+     LIMIT 200`
+  ).all();
+  return c.html(<DataManagementPage user={user} counts={counts || {}} rows={(recentObs.results as any[]) || []} msg={msg} />);
+});
+
+// Delete a single observation (any status) including scores & feedback & derived focus areas.
+app.post('/data/observations/:id/delete', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  if (!id) return c.redirect('/admin/data?msg=Invalid+id');
+  await c.env.DB.prepare(`DELETE FROM observation_scores WHERE observation_id = ?`).bind(id).run();
+  await c.env.DB.prepare(`DELETE FROM feedback_items WHERE observation_id = ?`).bind(id).run();
+  await c.env.DB.prepare(`UPDATE focus_areas SET opened_observation_id = NULL WHERE opened_observation_id = ?`).bind(id).run();
+  await c.env.DB.prepare(`DELETE FROM observations WHERE id = ?`).bind(id).run();
+  await logActivity(c.env.DB, user.id, 'observation', id, 'admin_delete');
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`Deleted observation #${id}`));
+});
+
+// Clear ALL observations + scores + feedback + focus areas. Pedagogy library,
+// users, schools, rubric, and district settings are preserved.
+app.post('/data/clear-observations', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  if (confirm !== 'CLEAR OBSERVATIONS') {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "CLEAR OBSERVATIONS" exactly to confirm.'));
+  }
+  await c.env.DB.prepare('DELETE FROM observation_scores').run();
+  await c.env.DB.prepare('DELETE FROM feedback_items').run();
+  await c.env.DB.prepare('DELETE FROM focus_areas').run();
+  await c.env.DB.prepare('DELETE FROM observations').run();
+  await logActivity(c.env.DB, user.id, 'system', 0, 'clear_observations');
+  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observations, scores, feedback and focus areas have been cleared.'));
+});
+
+// Full demo reset: clear everything above PLUS deactivate non-real users (anything created after seed).
+// Keeps users explicitly created by import (identified by email domains outside of k12.nd.us and
+// alexanderschoolnd.us) untouched — we simply clear the dynamic data. Admin can then delete users manually.
+app.post('/data/clear-all-demo', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  if (confirm !== 'CLEAR ALL DEMO DATA') {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "CLEAR ALL DEMO DATA" exactly to confirm.'));
+  }
+  await c.env.DB.prepare('DELETE FROM observation_scores').run();
+  await c.env.DB.prepare('DELETE FROM feedback_items').run();
+  await c.env.DB.prepare('DELETE FROM focus_areas').run();
+  await c.env.DB.prepare('DELETE FROM observations').run();
+  await c.env.DB.prepare('DELETE FROM activity_log').run();
+  await logActivity(c.env.DB, user.id, 'system', 0, 'clear_all_demo');
+  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observation data and activity log cleared. Users, schools, rubric and pedagogy library preserved.'));
+});
+
 export default app;
 
 // ============================== VIEWS ==============================
@@ -843,6 +963,7 @@ function AdminHome({ user, byRole, byStatus, recent, welcome }: any) {
           <Button href="/admin/import/rubric" variant="secondary"><i class="fas fa-file-import"></i>Bulk Import Rubric</Button>
           <Button href="/reports" variant="secondary"><i class="fas fa-file-export"></i>Reports</Button>
           <Button href="/admin/district" variant="secondary"><i class="fas fa-building-columns"></i>District Info</Button>
+          <Button href="/admin/data" variant="secondary"><i class="fas fa-database"></i>Data Management</Button>
         </div>
       </Card>
     </Layout>
@@ -919,7 +1040,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
               <tr class="border-b border-slate-100">
                 <td class="py-2">
                   <details>
-                    <summary class="cursor-pointer font-medium">{u.first_name} {u.last_name}{!u.active && <span class="ml-2 text-xs text-slate-400">(inactive)</span>}</summary>
+                    <summary class="cursor-pointer font-medium">{u.first_name} {u.last_name}{!u.active ? <span class="ml-2 text-xs text-slate-400">(inactive)</span> : null}</summary>
                     <form method="post" action={`/admin/users/${u.id}/update`} class="mt-2 grid md:grid-cols-4 gap-2 bg-slate-50 p-2 rounded text-xs">
                       <label>First<input name="first_name" value={u.first_name} class="mt-1 w-full border rounded px-1 py-1" /></label>
                       <label>Last<input name="last_name" value={u.last_name} class="mt-1 w-full border rounded px-1 py-1" /></label>
@@ -941,11 +1062,11 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                       <input name="password" placeholder="New password (blank = Alexander2026!)" class="flex-1 border rounded px-1 py-1" />
                       <button class="bg-amber-600 text-white px-3 py-1 rounded text-xs"><i class="fas fa-key mr-1"></i>Reset password</button>
                     </form>
-                    {u.active && u.id !== user.id && (
+                    {u.active && u.id !== user.id ? (
                       <form method="post" action={`/admin/users/${u.id}/delete`} class="mt-2" onsubmit="return confirm('Deactivate this user?')">
                         <button class="text-xs text-red-700 hover:underline"><i class="fas fa-user-slash mr-1"></i>Deactivate user</button>
                       </form>
-                    )}
+                    ) : null}
                   </details>
                 </td>
                 <td class="text-slate-600">{u.email}</td>
@@ -954,7 +1075,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                   {(u.schools && u.schools.length) ? (
                     <div class="flex flex-wrap gap-1">
                       {u.schools.map((s: any) => (
-                        <span class={`text-[11px] px-2 py-0.5 rounded-full border ${s.is_primary ? 'bg-aps-navy text-white border-aps-navy' : 'bg-slate-100 border-slate-200 text-slate-700'}`} title={s.is_primary ? 'Primary school' : 'Additional school'}>{s.name}{s.is_primary && <i class="fas fa-star ml-1 text-[9px]"></i>}</span>
+                        <span class={`text-[11px] px-2 py-0.5 rounded-full border ${s.is_primary ? 'bg-aps-navy text-white border-aps-navy' : 'bg-slate-100 border-slate-200 text-slate-700'}`} title={s.is_primary ? 'Primary school' : 'Additional school'}>{s.name}{s.is_primary ? <i class="fas fa-star ml-1 text-[9px]"></i> : null}</span>
                       ))}
                     </div>
                   ) : <span class="text-slate-400">—</span>}
@@ -1272,9 +1393,36 @@ function DistrictPage({ user, d, years, msg }: any) {
         </form>
       </Card>
       <Card title="School years" icon="fas fa-calendar" class="mt-4">
-        <ul class="space-y-1 text-sm">
-          {years.map((y: any) => <li>{y.label} {y.is_current ? <span class="text-xs text-emerald-700 ml-1">(current)</span> : null} · {formatDate(y.start_date)} – {formatDate(y.end_date)}</li>)}
-        </ul>
+        <p class="text-xs text-slate-500 mb-3"><i class="fas fa-circle-info mr-1"></i>The platform automatically marks the school year whose date range covers today as <strong>current</strong>. If no year covers today, a new one is auto-created using the Aug 1&ndash;Jul 31 convention. Edit a year's dates or add a future one below; the system will pick it up automatically when it starts.</p>
+
+        {years.length === 0 ? <p class="text-sm text-slate-500 mb-3">No school years yet.</p> : (
+          <div class="space-y-2 mb-4">
+            {years.map((y: any) => (
+              <div class="flex flex-wrap items-center gap-2 bg-slate-50 border border-slate-200 rounded p-2 text-sm">
+                <form method="post" action={`/admin/district/school-years/${y.id}/update`} class="flex flex-wrap items-center gap-2 flex-1">
+                  <input name="label" value={y.label} class="border rounded px-2 py-1 text-sm w-28" />
+                  <input type="date" name="start_date" value={y.start_date} class="border rounded px-2 py-1 text-sm" />
+                  <span class="text-xs text-slate-400">→</span>
+                  <input type="date" name="end_date" value={y.end_date} class="border rounded px-2 py-1 text-sm" />
+                  {y.is_current ? <span class="text-xs text-emerald-700 ml-2"><i class="fas fa-check-circle mr-1"></i>Current</span> : <span class="text-xs text-slate-400 ml-2">—</span>}
+                  <button class="ml-auto text-xs bg-aps-navy text-white px-2 py-1 rounded hover:bg-aps-blue"><i class="fas fa-save mr-1"></i>Save</button>
+                </form>
+                {!y.is_current ? (
+                  <form method="post" action={`/admin/district/school-years/${y.id}/set-current`}>
+                    <button class="text-xs px-2 py-1 rounded border border-emerald-600 text-emerald-700 hover:bg-emerald-50"><i class="fas fa-star mr-1"></i>Set current</button>
+                  </form>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <form method="post" action="/admin/district/school-years/create" class="flex flex-wrap items-end gap-2 bg-slate-50 border border-slate-200 rounded p-3">
+          <label class="text-xs"><span class="block text-slate-600 mb-1">Label</span><input name="label" placeholder="2026-2027" class="border rounded px-2 py-1 text-sm" /></label>
+          <label class="text-xs"><span class="block text-slate-600 mb-1">Start date</span><input type="date" name="start_date" class="border rounded px-2 py-1 text-sm" /></label>
+          <label class="text-xs"><span class="block text-slate-600 mb-1">End date</span><input type="date" name="end_date" class="border rounded px-2 py-1 text-sm" /></label>
+          <button class="bg-aps-navy text-white px-3 py-1.5 rounded text-sm hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>Add school year</button>
+        </form>
       </Card>
     </Layout>
   );
@@ -1383,6 +1531,76 @@ function ImportRubricPage({ user, msg, result, framework }: any) {
       <Card title="Prefer the single-cell editor?" icon="fas fa-pen-to-square" class="mt-4">
         <p class="text-sm text-slate-600">For one-off edits to a single indicator/level cell, use the built-in editor at <a href="/admin/pedagogy" class="text-aps-blue hover:underline">Pedagogy Library</a>. The bulk importer is for large revisions.</p>
       </Card>
+    </Layout>
+  );
+}
+
+// ------------------------------------------------------------------
+// Data Management view — wipe demo data, delete single observations.
+// ------------------------------------------------------------------
+function DataManagementPage({ user, counts, rows, msg }: any) {
+  return (
+    <Layout title="Data Management" user={user} activeNav="data">
+      <h1 class="font-display text-2xl text-aps-navy mb-1">Data Management</h1>
+      <p class="text-slate-600 text-sm mb-4">Edit or delete any observation, or wipe all demo data before handing the platform to the client. Users, schools, rubric, and pedagogy library are <strong>never</strong> touched by the clear actions below.</p>
+      {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
+
+      <div class="grid md:grid-cols-5 gap-3 mb-6">
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Observations</div><div class="text-2xl font-display text-aps-navy">{counts.observations || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Scores</div><div class="text-2xl font-display text-aps-navy">{counts.scores || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Feedback items</div><div class="text-2xl font-display text-aps-navy">{counts.feedback_items || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Focus areas</div><div class="text-2xl font-display text-aps-navy">{counts.focus_areas || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Activity log entries</div><div class="text-2xl font-display text-aps-navy">{counts.activity_log || 0}</div></div>
+      </div>
+
+      <Card title="All observations (latest 200)" icon="fas fa-list">
+        {rows.length === 0 ? (
+          <p class="text-sm text-slate-500">No observations currently exist in the database.</p>
+        ) : (
+          <div class="overflow-x-auto"><table class="w-full text-sm">
+            <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+              <tr><th class="py-2">ID</th><th>Type</th><th>Teacher</th><th>Appraiser</th><th>When</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+              {rows.map((o: any) => (
+                <tr class="border-b border-slate-100">
+                  <td class="py-2 text-slate-500 text-xs">#{o.id}</td>
+                  <td class="capitalize">{String(o.observation_type || '').replace('_',' ')}</td>
+                  <td>{o.t_first} {o.t_last}</td>
+                  <td>{o.a_first} {o.a_last}</td>
+                  <td class="text-xs text-slate-500">{formatDateTime(o.observed_at)}</td>
+                  <td><span class={`text-xs px-2 py-0.5 rounded-full border ${o.status === 'published' ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : o.status === 'acknowledged' ? 'bg-teal-50 border-teal-300 text-teal-800' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>{o.status}</span></td>
+                  <td class="text-right">
+                    <a href={`/appraiser/observations/${o.id}`} class="text-xs text-aps-blue hover:underline mr-3"><i class="fas fa-eye mr-1"></i>View</a>
+                    <form method="post" action={`/admin/data/observations/${o.id}/delete`} class="inline" onsubmit="return confirm('Delete this observation and all its scores, feedback, and focus areas opened from it? This cannot be undone.')">
+                      <button class="text-xs text-red-700 hover:underline"><i class="fas fa-trash mr-1"></i>Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        )}
+      </Card>
+
+      <div class="grid md:grid-cols-2 gap-4 mt-6">
+        <Card title="Clear all observations" icon="fas fa-broom">
+          <p class="text-sm text-slate-600 mb-3">Wipes every observation, score, feedback item, and focus area in one action. Useful after demoing the product to the client so they start with a clean slate. <strong>Users, schools, rubric, and pedagogy library are preserved.</strong></p>
+          <form method="post" action="/admin/data/clear-observations" onsubmit="return confirm('Really wipe ALL observation data? This cannot be undone.')">
+            <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAR OBSERVATIONS</code> to confirm</label>
+            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm hover:bg-amber-700"><i class="fas fa-broom mr-1"></i>Clear observations</button>
+          </form>
+        </Card>
+        <Card title="Clear all demo data" icon="fas fa-eraser">
+          <p class="text-sm text-slate-600 mb-3">Wipes all observations <em>plus</em> the activity log. Does not touch users, schools, rubric, or pedagogy library. Use this right before handing the live site to the district.</p>
+          <form method="post" action="/admin/data/clear-all-demo" onsubmit="return confirm('Really wipe ALL demo observation data AND the activity log? This cannot be undone.')">
+            <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAR ALL DEMO DATA</code> to confirm</label>
+            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <button class="bg-red-700 text-white px-3 py-1.5 rounded text-sm hover:bg-red-800"><i class="fas fa-eraser mr-1"></i>Clear all demo data</button>
+          </form>
+        </Card>
+      </div>
     </Layout>
   );
 }

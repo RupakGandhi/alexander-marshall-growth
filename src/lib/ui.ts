@@ -25,16 +25,60 @@ export const levelDot: Record<number, string> = {
   1: 'bg-red-500',
 };
 
+// All DB timestamps are stored in UTC by SQLite (CURRENT_TIMESTAMP → "YYYY-MM-DD HH:MM:SS" with no TZ suffix).
+// We explicitly append 'Z' so the JS Date is parsed as UTC, then format in US Central Time.
+const APS_TZ = 'America/Chicago';
+
+function toUtcDate(d: string): Date {
+  // Accept formats: "2026-04-22 15:30:00", "2026-04-22T15:30:00", ISO with Z, ISO with offset.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(d)) {
+    return new Date(d.replace(' ', 'T') + 'Z');
+  }
+  return new Date(d);
+}
+
 export function formatDate(d: string | null | undefined): string {
   if (!d) return '—';
-  try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); }
-  catch { return d; }
+  try {
+    return toUtcDate(d).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric', timeZone: APS_TZ,
+    });
+  } catch { return d; }
 }
 
 export function formatDateTime(d: string | null | undefined): string {
   if (!d) return '—';
-  try { return new Date(d).toLocaleString('en-US', { year:'numeric', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }); }
-  catch { return d; }
+  try {
+    return toUtcDate(d).toLocaleString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      timeZone: APS_TZ, timeZoneName: 'short',
+    });
+  } catch { return d; }
+}
+
+// Returns "YYYY-MM-DDTHH:MM" string suitable for <input type="datetime-local"> in US Central Time.
+export function nowCentralForDateTimeLocal(): string {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: APS_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find(p => p.type === t)?.value || '00';
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
+
+// Determine the current school year label based on today's date in Central Time.
+// Rule: August 1 - July 31 defines a school year. E.g., Aug 2025 - Jul 2026 → "2025-2026".
+export function computeCurrentSchoolYearLabel(today: Date = new Date()): string {
+  const centralParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: APS_TZ, year: 'numeric', month: '2-digit',
+  }).formatToParts(today);
+  const year = Number(centralParts.find(p => p.type === 'year')?.value || 0);
+  const month = Number(centralParts.find(p => p.type === 'month')?.value || 0);
+  // If we're in Aug-Dec → school year started this calendar year; Jan-Jul → started previous year
+  const startYear = month >= 8 ? year : year - 1;
+  return `${startYear}-${startYear + 1}`;
 }
 
 export function statusBadge(s: string): string {
