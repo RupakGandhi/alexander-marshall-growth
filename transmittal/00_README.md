@@ -49,6 +49,16 @@ All accounts use the starter password **`Alexander2026!`** and will **force a pa
 
 Text or email Dr. Gandhi "reset Alexander demo data" — one SQL command wipes test observations, scores, PD enrollments, deliverables, and reflections in 30 seconds, and re‑enables the "change password on first login" prompt for every account. Staff list, rubric, pedagogy library, and 120 PD modules stay.
 
+## Late‑April 2026 upgrade (live as of April 23)
+
+Three enrichments that came out of your feedback + the *Teacher Evaluation System* spec are **already live** on the preview site — nothing for you to do:
+
+1. **Rubric cells refreshed** for indicators **B·d (SEL)**, **B·e (Routines)**, and **E·c (Family communication)** — new research‑backed teacher next moves, coaching considerations, resources, and feedback starters. Every cell is still editable in `/admin/pedagogy`.
+2. **PD modules now carry four enrichment fields** per module — *Modeling example*, *Collaboration prompt*, *Family engagement note*, *Elementary vs. secondary differentiation*. All 120 modules have starter content you can edit in `/admin/pd/:id`, export to CSV (`/admin/pd/export-csv`), bulk‑edit in Excel, and re‑import.
+3. **Evidence‑based deliverable rubric** in the PD review queue. Principals score the teacher's submitted artifact 1–4 on Alignment / Completeness / Student Impact / Reflection; weighted average rolls up at the top. Criteria are editable at `/admin/pd-rubric`.
+
+Plus three **polish** items you mentioned: (a) Domain E now opens by default on the observation page, (b) "Generate feedback" no longer jumps you to the top of the page — it's async with a toast and scroll is preserved, (c) any unsaved rubric score now has a red outline and the Save button pulses red until you save.
+
 ## Next step
 
 Log in, click through the preview guide, then text Dr. Gandhi to schedule the team demo.

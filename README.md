@@ -1,5 +1,51 @@
 # Alexander Public Schools — Marshall Growth Platform
 
+## ⭐ What's New (April 23 2026 upgrade — evidence-based PD enrichment)
+
+This round implements the specification in `Teacher Evaluation System.pdf` (see `seed/rubric_improvement_suggestions.csv` for the anchor data). **All existing workflows — auto-save, Learn → Practice → Apply phase gating, auto-enrollment at score ≤ 2, dashboards, role permissions, and the forced-first-login password flow — are preserved exactly as they were.** What changed:
+
+### Pedagogy Library content refresh (indicators B·d, B·e, E·c)
+- Migration `0005_rubric_improvements.sql` updates `pedagogy_library.teacher_next_moves`, `coaching_considerations`, `resources`, and `feedback_starter` for **B.d level 2-3** (social-emotional learning), **B.e level 3** (classroom routines), and **E.c level 1-2** (communication with families), keyed on `(domain_code, indicator_code, level)`.
+- All other rubric cells are untouched. Every cell remains editable in `/admin/pedagogy/:indicator/:level`, and the `/admin/import/rubric` CSV round-trip now handles these four columns identically for any future bulk update.
+
+### PD modules now carry four enrichment fields
+- Migration `0006_pd_module_enrichments.sql` adds four nullable `TEXT` columns to `pd_modules`:
+  - `modeling_examples` — a textual mini-case study / scripted example of what good looks like.
+  - `collaboration_prompts` — a PLC / peer-rehearsal invitation.
+  - `family_engagement_notes` — equity-first, accessible-language communication guidance.
+  - `contextual_differentiation` — elementary vs. secondary adaptation.
+- Migration `0006` seeds purpose-built defaults for B.d, B.e, and E.c (pulled directly from the CSV).
+- Migration `0007_pd_module_default_enrichments.sql` back-fills sensible `(DEFAULT — edit in /admin/pd)`-marked starter text for the remaining 114 modules so every module has enrichment out of the box. Admins can leave the defaults, tighten them, or replace them entirely via `/admin/pd/:id`.
+- Teacher view: a new `<EnrichmentBlock>` renders these four fields as collapsible "details" panels below each phase (`Modeling example` + `Elementary vs. secondary` under Learn; `Collaborate` + `Re-read modeling` under Practice; `Family engagement` + `Differentiation` under Apply). Empty fields are silently skipped.
+
+### Evidence-based deliverable rubric in the PD review queue
+- Migration `0006` also creates `pd_deliverable_rubric_criteria` (4 seeded criteria: Alignment, Completeness, Student Impact, Reflection — each editable) and `pd_deliverable_scores` (one row per enrollment × criterion, upsert-keyed).
+- Principals / coaches now see a per-criterion 1-4 rubric card on `/pd/review/:id` with a weighted-average roll-up and optional notes. Scores save independently of the final Verify / Ask-for-revision decision.
+- A new super-admin page `/admin/pd-rubric` lets super-admins rename labels, rewrite descriptions, reweight, reorder, or deactivate criteria — and add brand-new criteria — without touching code.
+
+### UI polish (every change the spec called for)
+- Observation editor (`/appraiser/observations/:id`):
+  - **All rubric domains open by default** — Domain E (Professional Responsibilities) no longer hides behind a closed `<details>`.
+  - **Async "Generate / refresh feedback"** — the button now POSTs with `fetch`, shows an inline "Organizing feedback… → ✓ Feedback refreshed" toast right next to itself, preserves the appraiser's exact scroll position via `sessionStorage`, and only refreshes the feedback list (no full-page jump to the top).
+  - **Unsaved-score red outline** — the moment an appraiser picks a new radio level or types in an evidence note without hitting Save, the indicator row gets a 2-px red outline and the Save button turns red + pulses + rewords to `Save score (unsaved)`. All clears the moment Save is clicked.
+  - **Post-publish jump-back links** — once an observation is published or acknowledged, three new buttons appear: `Back to <teacher>'s page`, `All my teachers`, and `PD review queue`.
+- Auto-save on scripted notes, private notes, overall summary, subject, grade, class context, and PD textareas is unchanged and remains on every keystroke + blur.
+
+### CSV import / export
+- **Pedagogy**: `/admin/import/rubric/current-csv` (export all four pedagogy columns for the active framework) and `/admin/import/rubric` (import edited CSV back). Template at `/admin/import/rubric/template`.
+- **PD modules**: new `/admin/pd/export-csv` emits all 120 modules with every column including the four enrichment fields; new `/admin/pd/import-csv` re-imports the edited CSV, updating existing rows by `id` and creating new rows where `id` is blank. Verified locally: 120 updated / 0 created / 0 skipped on a round-trip.
+- **Users**: existing `/admin/import/users` unchanged.
+
+### Why the workflow feels identical
+- Login, role routing, Marshall rubric structure (60 indicators × 4 levels), auto-enrollment at score ≤ 2 for up to 3 modules per indicator, state-machine bridges (`recommended → learn_done` etc.), scripted-notes autosave, sign-and-acknowledge, Floating PD Day LMS, reports, notifications, and tour scripts are **byte-for-byte unchanged**. The upgrade is additive.
+
+### Live deployment
+- Production URL: https://alexander-marshall-growth.pages.dev (deploy `2f1c2dd7`).
+- Production D1 migrations 0005, 0006, 0007 applied remote (verified via `npx wrangler d1 migrations list … --remote`).
+- GitHub `main` at commit `4b901fb` (and subsequent commits with doc updates).
+
+---
+
 ## 📚 Documentation
 
 Complete role-specific user guides and a full technical developer guide are in **[`docs/`](docs/README.md)**:
