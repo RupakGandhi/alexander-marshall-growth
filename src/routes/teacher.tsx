@@ -179,6 +179,8 @@ function TeacherObservationView({ user, o, msg }: any) {
   const grows = feedback.filter((f) => f.category === 'grow');
   const focus = feedback.filter((f) => f.category === 'focus_area');
   const next = feedback.filter((f) => f.category === 'next_step');
+  const hasContent = glows.length + grows.length + focus.length + next.length + scores.length > 0 || !!o.overall_summary;
+  const needsAck = o.status === 'published';
   return (
     <Layout title="Observation" user={user} activeNav="t-obs">
       {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
@@ -196,37 +198,68 @@ function TeacherObservationView({ user, o, msg }: any) {
         <span class={`px-2 py-0.5 rounded-full text-xs border ${statusBadge(o.status)}`}>{statusLabel(o.status)}</span>
       </div>
 
+      {/* Prominent read-first banner so teachers always see the feedback before the signature block */}
+      {needsAck && (
+        <div class="mb-4 p-4 rounded-md bg-sky-50 border border-sky-200">
+          <div class="flex items-start gap-3">
+            <i class="fas fa-circle-info text-sky-700 mt-0.5"></i>
+            <div class="flex-1">
+              <div class="font-semibold text-sky-900">Please read the full observation below before signing.</div>
+              <p class="text-sm text-sky-900/80 mt-1">
+                Your signature confirms you have <em>seen and discussed</em> this observation with your appraiser. It does <strong>not</strong> mean you agree with every part — you can leave an optional comment at the bottom. All feedback, scores, focus areas, and next steps are below.
+              </p>
+              <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                {o.overall_summary && <a href="#obs-summary" class="px-2 py-1 rounded-full border border-sky-300 bg-white text-sky-900 hover:bg-sky-100"><i class="fas fa-message mr-1"></i>Overall summary</a>}
+                {glows.length > 0 && <a href="#obs-glows" class="px-2 py-1 rounded-full border border-emerald-300 bg-white text-emerald-900 hover:bg-emerald-50"><i class="fas fa-star mr-1"></i>Strengths ({glows.length})</a>}
+                {grows.length > 0 && <a href="#obs-grows" class="px-2 py-1 rounded-full border border-sky-300 bg-white text-sky-900 hover:bg-sky-100"><i class="fas fa-seedling mr-1"></i>Growth areas ({grows.length})</a>}
+                {next.length > 0 && <a href="#obs-next" class="px-2 py-1 rounded-full border border-indigo-300 bg-white text-indigo-900 hover:bg-indigo-50"><i class="fas fa-forward mr-1"></i>Next steps ({next.length})</a>}
+                {focus.length > 0 && <a href="#obs-focus" class="px-2 py-1 rounded-full border border-amber-300 bg-white text-amber-900 hover:bg-amber-50"><i class="fas fa-bullseye mr-1"></i>Focus areas ({focus.length})</a>}
+                {scores.length > 0 && <a href="#obs-scores" class="px-2 py-1 rounded-full border border-slate-300 bg-white text-slate-800 hover:bg-slate-50"><i class="fas fa-table-list mr-1"></i>Rubric scores ({scores.length})</a>}
+                <a href="#obs-sign" class="px-2 py-1 rounded-full border border-aps-navy bg-aps-navy text-white hover:bg-aps-blue"><i class="fas fa-signature mr-1"></i>Sign &amp; acknowledge</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasContent && (
+        <div class="mb-4 p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
+          <i class="fas fa-triangle-exclamation mr-2"></i>
+          This observation was published without written feedback or rubric scores. Please speak with your appraiser if you believe this is in error — you may still acknowledge below to confirm you received it.
+        </div>
+      )}
+
       {o.overall_summary && (
-        <Card title="Overall Summary from your Appraiser" icon="fas fa-message">
+        <Card id="obs-summary" title="Overall Summary from your Appraiser" icon="fas fa-message">
           <p class="whitespace-pre-wrap text-slate-700">{o.overall_summary}</p>
         </Card>
       )}
 
       <div class="grid md:grid-cols-2 gap-4 mt-4">
         {glows.length > 0 && (
-          <Card title="Strengths" icon="fas fa-star" class="border-emerald-200">
+          <Card id="obs-glows" title={`Strengths (${glows.length})`} icon="fas fa-star" class="border-emerald-200">
             <ul class="space-y-2">{glows.map((f) => <li class="text-sm"><span class="font-medium">{f.title || 'Strength'}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
           </Card>
         )}
         {grows.length > 0 && (
-          <Card title="Growth Areas" icon="fas fa-seedling" class="border-sky-200">
+          <Card id="obs-grows" title={`Growth Areas (${grows.length})`} icon="fas fa-seedling" class="border-sky-200">
             <ul class="space-y-2">{grows.map((f) => <li class="text-sm"><span class="font-medium">{f.title || 'Growth area'}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
           </Card>
         )}
         {next.length > 0 && (
-          <Card title="Suggested Next Steps" icon="fas fa-forward" class="border-aps-sky">
-            <ul class="space-y-2">{next.map((f) => <li class="text-sm"><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
+          <Card id="obs-next" title={`Suggested Next Steps (${next.length})`} icon="fas fa-forward" class="border-aps-sky">
+            <ul class="space-y-2">{next.map((f) => <li class="text-sm"><span class="font-medium">{f.title || ''}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
           </Card>
         )}
         {focus.length > 0 && (
-          <Card title="Focus Areas" icon="fas fa-bullseye" class="border-aps-gold">
+          <Card id="obs-focus" title={`Focus Areas (${focus.length})`} icon="fas fa-bullseye" class="border-aps-gold">
             <ul class="space-y-2">{focus.map((f) => <li class="text-sm"><span class="font-medium">{f.title}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
           </Card>
         )}
       </div>
 
       {scores.length > 0 && (
-        <Card title="Rubric Scores" icon="fas fa-table-list" class="mt-4">
+        <Card id="obs-scores" title={`Rubric Scores (${scores.length})`} icon="fas fa-table-list" class="mt-4">
           <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
             <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Domain</th><th>Indicator</th><th>Rating</th><th>Evidence Note</th></tr></thead>
             <tbody>
@@ -243,7 +276,7 @@ function TeacherObservationView({ user, o, msg }: any) {
         </Card>
       )}
 
-      <Card title="Signatures" icon="fas fa-signature" class="mt-4">
+      <Card id="obs-sign" title="Signatures" icon="fas fa-signature" class="mt-4">
         <div class="grid md:grid-cols-2 gap-6">
           <div>
             <div class="text-sm font-medium text-slate-700">Appraiser</div>
@@ -272,14 +305,17 @@ function TeacherObservationView({ user, o, msg }: any) {
 function AcknowledgeForm({ o }: any) {
   return (
     <form method="post" action={`/teacher/observations/${o.id}/acknowledge`} class="mt-2 space-y-2" id="ack-form">
-      <div class="text-xs text-slate-500 mb-1">Your signature indicates you have seen and discussed this observation. It does not necessarily denote agreement.</div>
+      <div class="text-xs p-2 rounded bg-slate-50 border border-slate-200 text-slate-700 mb-1">
+        <i class="fas fa-circle-info mr-1"></i>
+        Your signature confirms you have <strong>seen and discussed</strong> this observation. It does <strong>not</strong> mean you agree with every part. If you disagree with anything, use the comment box below to put that on record.
+      </div>
       <canvas id="sig-pad" class="border border-slate-300 rounded w-full h-32 bg-white touch-none"></canvas>
       <input type="hidden" name="signature" id="sig-data" />
       <div class="flex items-center gap-2">
         <button type="button" onclick="window.SigPad.clear('sig-pad','sig-data')" class="text-sm text-slate-600 hover:underline"><i class="fas fa-eraser"></i> Clear</button>
       </div>
       <label class="block">
-        <span class="block text-sm font-medium text-slate-700 mb-1">Optional teacher response</span>
+        <span class="block text-sm font-medium text-slate-700 mb-1">Optional teacher response <span class="text-slate-400">(put disagreements or clarifying notes here)</span></span>
         <textarea name="response" rows={3} class="w-full border border-slate-300 rounded-md px-3 py-2" placeholder="Any comment you want on record (optional)"></textarea>
       </label>
       <button type="submit" onclick="return window.SigPad.submit('sig-pad','sig-data')" class="bg-aps-navy text-white px-4 py-2 rounded-md text-sm hover:bg-aps-blue"><i class="fas fa-signature mr-1"></i>Sign &amp; Acknowledge</button>

@@ -283,9 +283,9 @@ function navItems(role: string) {
   }
 }
 
-export function Card(props: { title?: string; icon?: string; children: any; class?: string; ['data-tour']?: string }) {
+export function Card(props: { id?: string; title?: string; icon?: string; children: any; class?: string; ['data-tour']?: string }) {
   return (
-    <section class={`bg-white rounded-lg shadow-sm border border-slate-200 ${props.class || ''}`} data-tour={props['data-tour']}>
+    <section id={props.id} class={`bg-white rounded-lg shadow-sm border border-slate-200 ${props.class || ''} scroll-mt-24`} data-tour={props['data-tour']}>
       {props.title && (
         <header class="px-5 py-3 border-b border-slate-100 flex items-center gap-2">
           {props.icon && <i class={`${props.icon} text-aps-navy`}></i>}

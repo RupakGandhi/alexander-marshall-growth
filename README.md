@@ -11,6 +11,19 @@ Complete role-specific user guides and a full technical developer guide are in *
 - [Teacher Guide](docs/USER_GUIDE_TEACHER.md)
 - [**Technical Developer Guide**](docs/TECHNICAL_DEVELOPER_GUIDE.md) — architecture, schema, API reference, and step-by-step replication guide
 
+## ⭐ What's New (Round 3 — April 2026)
+
+### Teacher observation view redesigned for clarity
+- **"Please read the full observation below before signing"** banner at the top of every published observation, with chip‑links to Strengths / Growth Areas / Next Steps / Focus Areas / Rubric Scores / Signatures (each showing the count so nothing is missed).
+- Warning banner if an observation was published with no feedback or scores, so the teacher can raise it with their appraiser before signing.
+- Clearer acknowledgement block: signing means "seen and discussed", not agreement — and the optional response field is explicitly for disagreements or clarifying notes.
+
+### PD modules redesigned: lesson‑plan‑driven, not generic PD
+All 120 modules now follow a Pick → Read rubric → Spot gap → Rewrite → Script → Pick evidence → Teach → Submit template. Every module guides the teacher to redesign a real upcoming lesson so the next observation scores one rubric level higher on that specific Marshall indicator. The deliverable is a usable classroom artifact (lesson plan + scripted moments + real student evidence + impact note) — not a journal entry.
+
+### Bug fix — PD LMS now works end‑to‑end
+`src/lib/pd.ts:getEnrollment` was using `SELECT e.*, m.*` which collapsed the `e.id` column to `m.id` in SQLite/D1 — every Save/Advance/Submit form in the module workspace was posting to the wrong URL. Query now enumerates each column with an alias; Learn → Practice → Apply → Submit now verified working end‑to‑end for auto‑enrolled, self‑enrolled, and assigned modules.
+
 ## ⭐ What's New (Round 2)
 
 ### In‑app notifications + Web Push (replaces all email/SMS)

@@ -368,4 +368,15 @@ When you publish a formal/mini observation, the platform **auto‑recommends PD 
 3. **Verify** (teacher gets a success ping) or **Request revision** with a short note (teacher gets a ↺ ping).
 4. **Assign a specific module** from the module library if you want a teacher to tackle a growth area that wasn't flagged by an observation yet.
 
+### What a "good" deliverable looks like (redesigned April 2026)
+Every PD module is now lesson‑plan‑driven. The teacher's deliverable should include:
+
+1. **Lesson context** — one paragraph (grade, subject, unit, date taught, class composition).
+2. **Rebuilt lesson plan** — the actual plan the teacher used, with the rubric next‑level moves visibly bolded/highlighted.
+3. **Three scripted moments** — word‑for‑word opener, pivot move, and close in the teacher's own voice.
+4. **Real student evidence** — exit‑ticket responses, work sample, quoted student talk, or a board photo.
+5. **Impact note (3 sentences)** — what worked, what did not, and one concrete next classroom move on the indicator.
+
+When you click **Verify**, you are confirming the lesson was a real lesson, at least two next‑level rubric moves are visibly built into the plan, scripted moments are in the teacher's voice, evidence is real, and the impact note is honest. If any of those are missing, use **Request revision** and write a short note — the teacher gets an alert with your note and can resubmit.
+
 All PD completion data rolls into **Reports → PD Completion Report** (`/reports/pd`), filterable by teacher, school, rubric domain/indicator, status, source, and date, with drill‑down to the deliverable itself.

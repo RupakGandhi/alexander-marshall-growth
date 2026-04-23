@@ -278,12 +278,51 @@ export async function teacherEnrollments(db: D1Database, teacherId: number) {
 }
 
 export async function getEnrollment(db: D1Database, id: number) {
+  // IMPORTANT: explicit column list — never use `e.*, m.*` together because
+  // both tables have an `id` column and the duplicate-named column in D1/SQLite
+  // collapses to the last one (module id), which silently broke every form
+  // that points at /teacher/pd/{e.id}/advance.
   return db.prepare(
-    `SELECT e.*, m.*,
-            i.code AS indicator_code, i.name AS indicator_name,
-            d.code AS domain_code, d.name AS domain_name,
-            fr.name AS framework_name,
-            de.title AS deliverable_title, de.body AS deliverable_body, de.updated_at AS deliverable_updated
+    `SELECT
+        e.id                         AS id,
+        e.teacher_id                 AS teacher_id,
+        e.module_id                  AS module_id,
+        e.source                     AS source,
+        e.source_observation_id      AS source_observation_id,
+        e.source_score_level         AS source_score_level,
+        e.assigned_by                AS assigned_by,
+        e.status                     AS status,
+        e.learn_done_at              AS learn_done_at,
+        e.practice_done_at           AS practice_done_at,
+        e.submitted_at               AS submitted_at,
+        e.verified_at                AS verified_at,
+        e.declined_at                AS declined_at,
+        e.verified_by                AS verified_by,
+        e.verification_note          AS verification_note,
+        e.decline_reason             AS decline_reason,
+        e.created_at                 AS created_at,
+        e.updated_at                 AS updated_at,
+        m.id                         AS module_ref_id,
+        m.indicator_id               AS indicator_id,
+        m.target_level               AS target_level,
+        m.title                      AS title,
+        m.subtitle                   AS subtitle,
+        m.est_minutes                AS est_minutes,
+        m.research_basis             AS research_basis,
+        m.learn_content              AS learn_content,
+        m.practice_content           AS practice_content,
+        m.apply_content              AS apply_content,
+        m.deliverable_prompt         AS deliverable_prompt,
+        m.deliverable_rubric         AS deliverable_rubric,
+        m.resources                  AS resources,
+        i.code                       AS indicator_code,
+        i.name                       AS indicator_name,
+        d.code                       AS domain_code,
+        d.name                       AS domain_name,
+        fr.name                      AS framework_name,
+        de.title                     AS deliverable_title,
+        de.body                      AS deliverable_body,
+        de.updated_at                AS deliverable_updated
        FROM pd_enrollments e
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id

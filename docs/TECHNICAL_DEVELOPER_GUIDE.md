@@ -1368,7 +1368,7 @@ Dead endpoints (`404 / 410`) are auto‑pruned from `push_subscriptions` on the 
 
 ```
 pd_modules
-  indicator_id, target_level (1 or 2 = the next level up from low score),
+  indicator_id, target_level (= the observation SCORE this module is for; 1 or 2),
   title, subtitle, est_minutes,
   research_basis, learn_content, practice_content, apply_content,
   deliverable_prompt, deliverable_rubric, resources,
@@ -1384,20 +1384,36 @@ pd_enrollments
 
 pd_reflections       — one per (enrollment, phase)
 pd_deliverables      — one per enrollment (title, body, attachment_url)
-pd_plans + pd_plan_items — multi‑module “Floating PD Day”
+pd_plans + pd_plan_items — multi‑module "Floating PD Day"
 ```
 
 Idempotency: `pd_enrollments(teacher_id, module_id, source_observation_id)` is UNIQUE — a given observation can never spam duplicate modules on re‑publish.
+
+**Important semantic note on `pd_modules.target_level`:** the column stores the **observation score** the module is triggered by, *not* the level the teacher is reaching for. A module with `target_level=1` is the module we hand a teacher who scored Level 1 on that indicator; its job is to get them to Level 2. A module with `target_level=2` is handed to a Level‑2 scorer to get them to Level 3. This matches `autoEnrollForObservation`'s bind of `score` → `target_level`. The module content itself references `level + 1` internally so teachers always see the rubric cell they are climbing to.
 
 ## 15.2 Auto‑enrollment logic
 
 `src/lib/pd.ts:autoEnrollForObservation(db, obsId, env)`:
 1. Select every `observation_scores` row with `score <= AUTO_ENROLL_THRESHOLD (= 2)`.
-2. For each scored indicator, look up up to 3 `pd_modules WHERE indicator_id = ? AND target_level = score+1 AND is_active = 1`.
+2. For each scored indicator, look up up to 3 `pd_modules WHERE indicator_id = ? AND target_level = score AND is_active = 1`.
 3. `INSERT OR IGNORE` into `pd_enrollments` with `source='auto'`, carrying `source_observation_id` and `source_score_level`.
 4. For each new enrollment, `notify(... 'pd_module_recommended')`.
 
 **No AI.** Same deterministic pattern as the feedback engine — the database *is* the logic.
+
+## 15.2.1 Module content design (v2, lesson‑plan‑driven)
+
+`seed/004_pd_modules.sql` generates one module per (indicator × score ∈ {1,2}) — 120 modules total. The content template for every module is lesson‑plan‑driven, not generic PD:
+
+| Phase | Steps | Purpose |
+| --- | --- | --- |
+| Learn (~10 min) | 1. Pick the upcoming lesson 2. Read rubric side‑by‑side (current vs. target interpretations from `pedagogy_library`) 3. Spot the evidence gap | Pick the exact lesson, then internalise the specific observable signals the next level requires. |
+| Practice (~25 min) | 4. Rewrite the lesson using next‑level `teacher_next_moves` from `pedagogy_library` 5. Script the opener, pivot, and close 6. Decide on one student‑evidence artifact | Turn the reading into a revised plan for a real classroom. |
+| Apply (~10 min + lesson delivery) | 7. Teach the rebuilt lesson 8. Submit lesson plan + scripted moments + real student evidence + 3‑sentence impact note | Produce a deliverable usable in the classroom. |
+
+The deliverable rubric (what a supervisor verifies against) is baked into every module: the lesson must be a real one, at least two next‑level moves must be visible, scripted moments must be in the teacher's voice, a real evidence artifact must be attached, the impact note must be honest, and one next classroom move on the indicator must be named.
+
+The seed re‑applies **FK‑safely** via a staging table (`pd_modules_v2`) so existing `pd_enrollments.module_id` FKs are never invalidated. See the top of `seed/004_pd_modules.sql` for the UPSERT pattern.
 
 ## 15.3 State machine
 
@@ -1411,11 +1427,32 @@ Idempotency: `pd_enrollments(teacher_id, module_id, source_observation_id)` is U
 
 Implemented in `advanceEnrollment`, `submitDeliverable`, `verifyDeliverable`. Illegal transitions throw.
 
-## 15.4 Routes
+## 15.4 Routes (actual implementation, see `src/routes/pd.tsx`)
 
-- **Teacher**: `/teacher/pd` (My PD LMS), `/teacher/pd/library`, `/teacher/pd/enroll/:id` (workspace with Learn/Practice/Apply tabs), `/teacher/pd/enroll/:id/submit`, `/teacher/pd/plans`.
-- **Supervisor**: `/pd/review` (queue), `/pd/review/:enrollmentId` (read deliverable + reflections), `/pd/review/:enrollmentId/verify`, `/pd/review/:enrollmentId/revision`, `/pd/review/assign`.
-- **Super‑admin**: `/admin/pd`, `/admin/pd/new`, `/admin/pd/:id`, `/admin/pd/:id/archive`.
+- **Teacher** (all gated `requireRole(['teacher'])`):
+  - `GET  /teacher/pd` — My PD LMS home (active modules, completed, suggestions, plan builder)
+  - `GET  /teacher/pd/library` — browse all active modules
+  - `POST /teacher/pd/library/:moduleId/enroll` — self‑enroll, redirects to workspace
+  - `GET  /teacher/pd/:id` — module workspace (enrollment id), Learn/Practice/Apply phases
+  - `POST /teacher/pd/:id/reflect` — save reflection for one phase
+  - `POST /teacher/pd/:id/advance` — advance state machine (`to=started|learn_done|practice_done|declined`)
+  - `POST /teacher/pd/:id/submit` — submit deliverable (→ `submitted` state)
+  - `POST /teacher/pd/plans/create` — build a Floating PD Day plan bundle
+  - `GET  /teacher/pd/plans/:id` — view a plan
+- **Supervisor** (`requireRole(['appraiser','coach','super_admin'])`):
+  - `GET  /pd/review` — review queue scoped to caseload (or district for super_admin)
+  - `GET  /pd/review/:id` — open an enrollment (reads deliverable + reflections)
+  - `POST /pd/review/:id/verify` — `action=verify|revise` with optional note
+  - `POST /pd/review/:id/assign` — hand a module to a teacher
+- **Super‑admin** (`requireRole(['super_admin'])`):
+  - `GET  /admin/pd` — list all modules + enrollment counts
+  - `GET  /admin/pd/new` — new module form
+  - `GET  /admin/pd/:id` — edit form (all phases)
+  - `POST /admin/pd/save` — create or update
+  - `POST /admin/pd/:id/delete` — remove (confirms enrollments will break)
+
+### 15.4.1 Known bug fixed April 2026 — SQL column‑name collision
+`src/lib/pd.ts:getEnrollment` used to do `SELECT e.*, m.* FROM pd_enrollments e JOIN pd_modules m …`. Both tables have an `id` column; D1/SQLite collapses duplicate names to the last one, so `e.id` (the enrollment id) was silently being overwritten by `m.id` (the module id). Every `action="/teacher/pd/{e.id}/advance"` form in `TeacherPdModule` therefore posted to the wrong URL and returned 403/404. The fix (line 285 of `pd.ts`) is to enumerate every column with an alias (`e.id AS id`, `m.id AS module_ref_id`, …). Do not revert.
 
 ## 15.5 Reporting — `/reports/pd`
 
@@ -1436,5 +1473,6 @@ A principal is `role=appraiser` AND `user_schools={building}`; a district apprai
 
 ## Changelog
 
-- **Round 2 (this batch)** — In‑app + Web Push notifications (migration 0003), per‑user master switches (migration 0004), 120 deterministic PD modules (seed 004), Floating PD Day LMS, PD Review queue, PD Completion Report with CSV + drill‑down, schools↔appraisers clarified, all guided tours and all user guides updated.
+- **Round 3 (this batch)** — Fixed PD LMS enrollment id collision in `getEnrollment` (forms now post to the correct `/teacher/pd/:enrollmentId/…` URLs). Redesigned all 120 PD modules to be lesson‑plan‑driven, rubric‑anchored: each module walks the teacher through Pick → Read rubric → Spot gap → Rewrite → Script moments → Pick evidence → Teach → Submit, with a deliverable rubric that verifies a real classroom artifact. Teacher observation view now opens with a prominent "read first" banner listing every section with anchor links + counts, a warning banner when an observation has no feedback, and a clearer acknowledgement form. Card component supports `id` for in‑page anchors (`scroll-mt-24`).
+- **Round 2** — In‑app + Web Push notifications (migration 0003), per‑user master switches (migration 0004), 120 deterministic PD modules (seed 004), Floating PD Day LMS, PD Review queue, PD Completion Report with CSV + drill‑down, schools↔appraisers clarified, all guided tours and all user guides updated.
 - **Round 1** — Mobile responsiveness, installable PWA, role‑specific guided tour, multi‑school support, multi‑select assignments, bulk CSV imports, Report Builder.

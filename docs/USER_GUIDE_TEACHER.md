@@ -141,7 +141,11 @@ Specific, short-term things to try before the next observation.
 
 ## Acknowledging an Observation
 
-Once you've read an observation marked **Published**:
+When you open a Published observation you will see a **blue "Please read the full observation below before signing" banner** at the top. That banner lists chips for every section that was filled in (Strengths, Growth Areas, Next Steps, Focus Areas, Rubric Scores, Signatures) so you can jump to any of them, and it has a prominent **Sign & Acknowledge** link that scrolls you straight to the signature box once you are ready.
+
+If an observation was published without any written feedback or scores, a yellow banner will warn you — you are still allowed to sign, but you should raise it with your appraiser first.
+
+Once you've read it:
 
 1. Scroll to the bottom — you'll see a **"Sign & Acknowledge"** box.
 2. Optionally type a **response** in the text area. This is your chance to:
@@ -384,13 +388,37 @@ Open **My PD LMS** in the main menu (or `/teacher/pd`).
 - **Assigned** — your principal or coach can assign a specific module.
 - **Self‑enrolled** — browse the full library from the "Module library" button and pick anything you want.
 
-### Working a module
-Each module has three tabs:
-1. **Learn** — short research summary + linked resources (Marshall, Marzano, Hattie, Lemov, etc.)
-2. **Practice** — a concrete classroom plan to try once before submitting
-3. **Apply** — write/describe your actual classroom deliverable and submit it inside the platform
+### What a module actually asks you to do (important — redesigned April 2026)
+Every module is built around one promise: **take the next upcoming lesson you were already going to teach and rebuild it so the observer would score you one level higher on that Marshall indicator.** The whole module is grounded in the Kim Marshall rubric and the pedagogy library; the research reading is short and the real work is classroom work.
 
-When you submit, your principal (and coach) get a notification and a review queue entry. They'll either **verify** (you get a 🎉 alert) or **request revision** (you get a ↺ alert with their note).
+The three phases look like this:
+
+1. **Learn** — three steps, ~10 minutes total:
+   - STEP 1: Pick the exact upcoming lesson you will rebuild (grade, subject, unit, date).
+   - STEP 2: Read the rubric side‑by‑side — your current level vs. the level you are reaching for — pulled from our pedagogy library.
+   - STEP 3: Spot the evidence gap. The module lists the specific observable signals an observer would write down at the next level; you mark which ones are already in your lesson and which are missing.
+
+2. **Practice** — three steps, ~25 minutes total:
+   - STEP 4: Rewrite the lesson plan so the missing next‑level signals are visible, using a list of research‑backed next moves for this exact indicator (from Marshall, Saphier, Hattie, Wiliam, Lemov, Wiggins & McTighe).
+   - STEP 5: Script — word‑for‑word — what you will say/do at the opening, the pivot moment, and the close of the lesson.
+   - STEP 6: Decide which ONE student‑evidence artifact you will keep (exit ticket, work sample, board photo, or student quotes).
+
+3. **Apply** — teach the rebuilt lesson, then submit a single 5‑minute read that includes:
+   - A one‑paragraph lesson context
+   - The rebuilt lesson plan with changes highlighted
+   - Your scripted opener / pivot / close
+   - The real student‑evidence artifact
+   - A 3‑sentence impact note
+
+When you submit, your principal (and coach) get a notification and a review queue entry. They'll either **verify** (you get a 🎉 alert) or **request revision** (you get a ↺ alert with their note). Their verification rubric checks for:
+- The lesson is a real lesson you are teaching this week.
+- At least two next‑level moves are visible in the plan.
+- Your three scripted moments are in your own voice.
+- A real student‑evidence artifact is attached.
+- An honest impact note naming what worked and what did not.
+- One concrete next classroom move on the indicator.
+
+In short: you produce a usable artifact for your classroom every time you finish a module, and you level up on a specific Marshall indicator.
 
 ### Don't get overloaded
 - Modules are **never duplicated** per source observation.
