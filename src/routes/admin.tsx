@@ -128,24 +128,63 @@ function parseMultiIds(raw: any): number[] {
   return Array.from(new Set(out));
 }
 
+// Dedicated standalone reset-password page (GET).
+// Previously /admin/users/:id/reset-password was only a POST target used by
+// an inline form. A direct browser navigation (e.g., from a bookmark) produced
+// an Internal Server Error. This GET handler renders a proper page with a
+// password field, visibility toggle, and match indicator.
+app.get('/users/:id/reset-password', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  if (!Number.isFinite(id) || id <= 0) return c.redirect('/admin/users?msg=Unknown+user');
+  const target = await c.env.DB.prepare(
+    `SELECT id, email, first_name, last_name, role, active FROM users WHERE id = ?`
+  ).bind(id).first<any>();
+  if (!target) return c.redirect('/admin/users?msg=Unknown+user');
+  const msg = c.req.query('msg');
+  const err = c.req.query('err');
+  return c.html(<ResetPasswordPage user={user} target={target} msg={msg} err={err} />);
+});
+
 app.post('/users/:id/reset-password', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
   const body = await c.req.parseBody();
-  const pw = String(body.password || '').trim() || 'Alexander2026!';
+  const rawPw = String(body.password || '').trim();
+  // If no password is provided (blank), fall back to the district default so
+  // staff can always get back in with Alexander2026!
+  const pw = rawPw || 'Alexander2026!';
+  const confirm = String(body.confirm_password || '').trim();
+  // Only enforce match when a confirm field was submitted (standalone page).
+  // The legacy inline form on /admin/users doesn't submit confirm — preserve
+  // that behavior so we don't break existing UX.
+  if (confirm !== '' && confirm !== rawPw) {
+    return c.redirect(`/admin/users/${id}/reset-password?err=` + encodeURIComponent('Passwords do not match'));
+  }
+  if (rawPw && rawPw.length < 8) {
+    return c.redirect(`/admin/users/${id}/reset-password?err=` + encodeURIComponent('Password must be at least 8 characters'));
+  }
   const hash = await hashPassword(pw);
+  // April 2026: do NOT force-change anymore. Admin-set password is usable
+  // immediately; user can change it later from Profile whenever they want.
   await c.env.DB.prepare(
-    `UPDATE users SET password_hash=?, must_change_password=1, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+    `UPDATE users SET password_hash=?, must_change_password=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`
   ).bind(hash, id).run();
-  // kill active sessions
+  // kill active sessions so the reset password takes effect immediately
   await c.env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
   await logActivity(c.env.DB, user.id, 'user', id, 'reset_password');
   await notify(c.env.DB, {
     user_id: id, kind: 'password_reset',
     title: 'Your password was reset by an administrator',
-    body: 'You will be asked to set a new password the next time you sign in.',
+    body: 'You can sign in with the new password. Change it any time from Profile.',
     url: '/profile', entity_type: 'user', entity_id: id, actor_user_id: user.id,
   }, c.env);
+  // If the request came from the standalone reset page, go back there with a
+  // success message; otherwise use the legacy users-list redirect.
+  const referer = c.req.header('referer') || '';
+  if (referer.includes(`/admin/users/${id}/reset-password`)) {
+    return c.redirect(`/admin/users/${id}/reset-password?msg=` + encodeURIComponent(`Password reset to "${pw}"`));
+  }
   return c.redirect('/admin/users?msg=Password+reset+to+' + encodeURIComponent(pw));
 });
 
@@ -997,6 +1036,126 @@ function Stat({ label, value, icon }: any) {
   );
 }
 
+// Standalone reset-password page — navigating directly to
+// /admin/users/:id/reset-password lands here (fixes the previous 500 error
+// that happened when a GET request hit a POST-only route). Includes the new
+// password UX: visibility toggle, match indicator, disable-submit-until-valid,
+// plus a one-click "Use Alexander2026!" button for fast previews.
+function ResetPasswordPage({ user, target, msg, err }: any) {
+  const fullName = [target.first_name, target.last_name].filter(Boolean).join(' ') || target.email;
+  return (
+    <Layout title="Reset password" user={user} activeNav="admin-users">
+      <div class="mb-4 flex items-center gap-3 text-sm">
+        <a href="/admin/users" class="text-aps-navy hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to Users</a>
+      </div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-key mr-2 text-aps-gold"></i>Reset password</h1>
+      <p class="text-sm text-slate-600 mb-4">
+        for <strong>{fullName}</strong> <span class="text-slate-500">({target.email})</span>
+        <span class="ml-2 text-xs bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5">{target.role}</span>
+      </p>
+      {msg && <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+      {err && <div class="mb-4 p-3 rounded bg-red-50 border border-red-200 text-red-800 text-sm">{err}</div>}
+
+      <Card title="Set a new password" icon="fas fa-shield-halved">
+        <div class="p-3 mb-4 rounded bg-sky-50 border border-sky-200 text-sky-900 text-xs">
+          <i class="fas fa-circle-info mr-1"></i>
+          The new password takes effect immediately. The user will be signed out of any active sessions
+          and can change the password themselves any time from their <em>Profile</em> page.
+        </div>
+
+        <form method="post" action={`/admin/users/${target.id}/reset-password`} class="space-y-4 max-w-lg" id="aps-reset-form">
+          <div>
+            <label for="aps-pw" class="block text-sm font-medium text-slate-700 mb-1">New password</label>
+            <div class="relative">
+              <input id="aps-pw" name="password" type="password" autocomplete="new-password" minlength={8}
+                class="w-full border border-slate-300 rounded-md px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-aps-blue"
+                placeholder="At least 8 characters" />
+              <button type="button" id="aps-pw-eye"
+                class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 p-1"
+                aria-label="Show password" title="Show / hide password">
+                <i class="fas fa-eye"></i>
+              </button>
+            </div>
+            <div id="aps-pw-hint" class="text-xs text-slate-500 mt-1">Minimum 8 characters.</div>
+          </div>
+
+          <div>
+            <label for="aps-pw2" class="block text-sm font-medium text-slate-700 mb-1">Confirm new password</label>
+            <div class="relative">
+              <input id="aps-pw2" name="confirm_password" type="password" autocomplete="new-password"
+                class="w-full border border-slate-300 rounded-md px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-aps-blue"
+                placeholder="Type the same password again" />
+              <button type="button" id="aps-pw2-eye"
+                class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 p-1"
+                aria-label="Show password" title="Show / hide password">
+                <i class="fas fa-eye"></i>
+              </button>
+            </div>
+            <div id="aps-pw2-match" class="text-xs mt-1 min-h-[1rem]"></div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3 pt-2">
+            <button id="aps-pw-submit" type="submit"
+              class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled>
+              <i class="fas fa-save mr-1"></i>Save new password
+            </button>
+            <button id="aps-pw-default" type="button"
+              class="bg-amber-500 text-white px-3 py-2 rounded hover:bg-amber-600 text-sm"
+              title="Prefill both fields with the district default password Alexander2026!">
+              <i class="fas fa-wand-magic-sparkles mr-1"></i>Use Alexander2026!
+            </button>
+            <a href="/admin/users" class="text-sm text-slate-600 hover:underline">Cancel</a>
+          </div>
+        </form>
+      </Card>
+
+      {/* Client-side UX:
+          - Eye icons toggle visibility on each field independently.
+          - Live match indicator + disable-until-valid on submit.
+          - "Use Alexander2026!" fills both fields and enables submit instantly. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        (function(){
+          var pw   = document.getElementById('aps-pw');
+          var pw2  = document.getElementById('aps-pw2');
+          var eye1 = document.getElementById('aps-pw-eye');
+          var eye2 = document.getElementById('aps-pw2-eye');
+          var match= document.getElementById('aps-pw2-match');
+          var btn  = document.getElementById('aps-pw-submit');
+          var dflt = document.getElementById('aps-pw-default');
+          if (!pw || !pw2 || !btn) return;
+          function toggle(input, btn){
+            if (input.type === 'password') { input.type = 'text';  btn.innerHTML = '<i class="fas fa-eye-slash"></i>'; btn.setAttribute('aria-label','Hide password'); }
+            else                           { input.type = 'password'; btn.innerHTML = '<i class="fas fa-eye"></i>';       btn.setAttribute('aria-label','Show password'); }
+          }
+          if (eye1) eye1.addEventListener('click', function(){ toggle(pw,  eye1); });
+          if (eye2) eye2.addEventListener('click', function(){ toggle(pw2, eye2); });
+          function update(){
+            var a = pw.value, b = pw2.value;
+            var longEnough = a.length >= 8;
+            var matches = a === b && a.length > 0;
+            if (!a) { match.textContent = ''; match.className = 'text-xs mt-1 min-h-[1rem]'; }
+            else if (!longEnough) { match.textContent = 'Password must be at least 8 characters.'; match.className = 'text-xs mt-1 min-h-[1rem] text-amber-700'; }
+            else if (!b) { match.textContent = 'Type it again to confirm.'; match.className = 'text-xs mt-1 min-h-[1rem] text-slate-500'; }
+            else if (!matches) { match.textContent = '✗ Passwords do not match.'; match.className = 'text-xs mt-1 min-h-[1rem] text-red-700'; }
+            else { match.textContent = '✓ Passwords match.'; match.className = 'text-xs mt-1 min-h-[1rem] text-emerald-700'; }
+            btn.disabled = !(longEnough && matches);
+          }
+          pw.addEventListener('input', update);
+          pw2.addEventListener('input', update);
+          if (dflt) dflt.addEventListener('click', function(){
+            pw.value = 'Alexander2026!';
+            pw2.value = 'Alexander2026!';
+            update();
+            pw2.focus();
+          });
+          update();
+        })();
+      `}} />
+    </Layout>
+  );
+}
+
 function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
   return (
     <Layout title="Users" user={user} activeNav="admin-users">
@@ -1073,10 +1232,15 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                       <label class="flex items-center gap-2 mt-5"><input type="checkbox" name="active" checked={!!u.active} /> Active</label>
                       <div class="md:col-span-4 flex flex-wrap gap-2"><button class="bg-aps-navy text-white px-3 py-1 rounded text-xs"><i class="fas fa-save mr-1"></i>Save</button></div>
                     </form>
-                    <form method="post" action={`/admin/users/${u.id}/reset-password`} class="mt-2 flex items-center gap-2 bg-amber-50 p-2 rounded text-xs">
-                      <input name="password" placeholder="New password (blank = Alexander2026!)" class="flex-1 border rounded px-1 py-1" />
-                      <button class="bg-amber-600 text-white px-3 py-1 rounded text-xs"><i class="fas fa-key mr-1"></i>Reset password</button>
-                    </form>
+                    <div class="mt-2 flex flex-wrap items-center gap-2 bg-amber-50 p-2 rounded text-xs">
+                      <form method="post" action={`/admin/users/${u.id}/reset-password`} class="flex items-center gap-2 flex-1">
+                        <input name="password" placeholder="New password (blank = Alexander2026!)" class="flex-1 border rounded px-1 py-1" />
+                        <button class="bg-amber-600 text-white px-3 py-1 rounded text-xs" title="Quick reset from this row"><i class="fas fa-key mr-1"></i>Quick reset</button>
+                      </form>
+                      <a href={`/admin/users/${u.id}/reset-password`} class="text-xs text-aps-navy hover:underline" title="Open full reset page with confirm, eye-toggle, match indicator">
+                        <i class="fas fa-arrow-up-right-from-square mr-1"></i>Full page
+                      </a>
+                    </div>
                     {u.active && u.id !== user.id ? (
                       <form method="post" action={`/admin/users/${u.id}/delete`} class="mt-2" onsubmit="return confirm('Deactivate this user?')">
                         <button class="text-xs text-red-700 hover:underline"><i class="fas fa-user-slash mr-1"></i>Deactivate user</button>

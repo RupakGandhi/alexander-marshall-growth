@@ -72,6 +72,49 @@ export function Layout(props: { title: string; user: User | null; children: any;
       </head>
       <body class="bg-aps-wheat min-h-screen font-sans text-slate-800 aps-body">
         {nav}
+        {/* April 2026: dismissible sign-in banner that informs users they can
+            keep Alexander2026! for testing or change it any time from Profile.
+            Rendered client-side so it doesn't require plumbing state through
+            every route; remembered per-user in localStorage once dismissed. */}
+        {user && (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `(function(){
+  try {
+    var p = new URLSearchParams(location.search);
+    if (p.get('pwreminder') !== '1') return;
+    var KEY = 'aps-pwreminder-dismissed-${user.id}';
+    if (localStorage.getItem(KEY)) return;
+    var wrap = document.createElement('div');
+    wrap.id = 'aps-pwreminder';
+    wrap.className = 'max-w-7xl mx-auto px-3 sm:px-4 pt-4';
+    wrap.innerHTML =
+      '<div class="p-3 rounded border border-sky-200 bg-sky-50 text-sky-900 text-sm flex flex-wrap items-start gap-3">' +
+        '<i class="fas fa-circle-info mt-0.5"></i>' +
+        '<div class="flex-1 min-w-[200px]">' +
+          "<strong>You're signed in.</strong> You can keep the current password " +
+          "(<code class=\\"bg-white border border-sky-200 rounded px-1 py-0.5 text-xs\\">Alexander2026!</code>) " +
+          'for testing, or change it any time from <a href="/profile" class="underline font-medium">Profile</a>.' +
+        '</div>' +
+        '<button type="button" id="aps-pwreminder-dismiss" class="text-xs text-sky-800 hover:text-sky-950 px-2 py-1 rounded hover:bg-sky-100" aria-label="Dismiss"><i class="fas fa-xmark mr-1"></i>Dismiss</button>' +
+      '</div>';
+    var main = document.querySelector('main');
+    if (main && main.parentNode) main.parentNode.insertBefore(wrap, main);
+    var btn = document.getElementById('aps-pwreminder-dismiss');
+    if (btn) btn.addEventListener('click', function(){
+      localStorage.setItem(KEY, String(Date.now()));
+      var n = document.getElementById('aps-pwreminder');
+      if (n && n.parentNode) n.parentNode.removeChild(n);
+      // Clean the URL so refresh doesn't re-show it.
+      try { p.delete('pwreminder'); var q = p.toString();
+        history.replaceState({}, '', location.pathname + (q ? '?'+q : '') + location.hash);
+      } catch(e) {}
+    });
+  } catch(e) { /* never block the page */ }
+})();`,
+            }}
+          />
+        )}
         <main class="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">{children}</main>
         <footer class="max-w-7xl mx-auto px-3 sm:px-4 py-6 text-xs text-slate-500 flex flex-wrap gap-2 sm:gap-3 justify-between items-center">
           <div>© {new Date().getFullYear()} Alexander Public School District · 601 Delaney St, Alexander, ND 58831 · 701-828-3334</div>

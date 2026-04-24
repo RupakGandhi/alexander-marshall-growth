@@ -1546,7 +1546,24 @@ function AdminPdList({ user, rows, indicators, msg }: any) {
       </Card>
 
       <Card title={`Modules (${rows.length})`} icon="fas fa-list">
-        {rows.length === 0 ? <p class="text-sm text-slate-500">No modules yet. Click <em>New module</em> above to create the first one.</p> : (
+        {rows.length === 0 ? (
+          <div class="text-center py-10 px-4 border-2 border-dashed border-slate-200 rounded-lg">
+            <i class="fas fa-graduation-cap text-4xl text-slate-300 mb-3"></i>
+            <h3 class="font-display text-lg text-aps-navy mb-1">No PD modules yet</h3>
+            <p class="text-sm text-slate-600 max-w-md mx-auto mb-4">
+              PD modules are the three-phase (Learn → Practice → Apply) lessons
+              teachers see when an appraiser scores them at Level 1 or 2 on an
+              indicator. You can add them one at a time, or import a CSV.
+            </p>
+            <div class="flex flex-wrap items-center justify-center gap-2 text-sm">
+              <a href="/admin/pd/new" class="bg-aps-navy text-white px-3 py-1.5 rounded hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>Create your first module</a>
+              <a href="/admin/pd/export-csv" class="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded hover:bg-slate-50"><i class="fas fa-file-csv mr-1"></i>Download CSV template</a>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-3">
+              Tip: a good first module targets a Level 1 or 2 score on a common indicator (e.g., <em>A.a Knowledge</em> or <em>B.a Expectations</em>).
+            </p>
+          </div>
+        ) : (
           <div class="overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="text-xs text-slate-500 text-left border-b">

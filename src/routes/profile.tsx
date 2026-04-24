@@ -113,9 +113,10 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
     <Layout title="Profile" user={user}>
       <h1 class="font-display text-2xl text-aps-navy mb-4">Profile &amp; Password</h1>
       {first && (
-        <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm">
-          <i class="fas fa-triangle-exclamation mr-2"></i>
-          Welcome. For security, please set a new password before you continue.
+        <div class="mb-4 p-3 rounded bg-sky-50 border border-sky-200 text-sky-900 text-sm">
+          <i class="fas fa-circle-info mr-2"></i>
+          Welcome! Changing your password is optional — you can keep the district default
+          or pick your own below. Either works for sign-in.
         </div>
       )}
       {err && <div class="mb-4 p-3 rounded bg-red-50 border border-red-200 text-red-800 text-sm">{err}</div>}
@@ -139,14 +140,55 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
         </Card>
 
         <Card title="Change Password" icon="fas fa-key">
-          <form method="post" action="/profile/password" class="space-y-4">
-            {!user.must_change_password && (
-              <Field label="Current password" name="current_password" type="password" autocomplete="current-password" />
-            )}
-            <Field label="New password" name="new_password" type="password" autocomplete="new-password" hint="Minimum 8 characters." />
-            <Field label="Confirm new password" name="confirm_password" type="password" autocomplete="new-password" />
-            <Button type="submit" variant="primary"><i class="fas fa-shield-halved"></i>Update password</Button>
+          <div class="p-3 mb-3 rounded bg-sky-50 border border-sky-200 text-sky-900 text-xs">
+            <i class="fas fa-circle-info mr-1"></i>
+            Changing your password is <strong>optional</strong>. You can keep
+            the district default (<code class="bg-white border border-sky-200 rounded px-1 py-0.5">Alexander2026!</code>)
+            or pick your own below. The password eye icon lets you see what
+            you've typed.
+          </div>
+          <form method="post" action="/profile/password" class="space-y-4" id="aps-profile-pw-form">
+            <PasswordField id="aps-cur-pw" label="Current password" name="current_password" autocomplete="current-password" />
+            <PasswordField id="aps-new-pw" label="New password" name="new_password" autocomplete="new-password" hint="Minimum 8 characters." />
+            <PasswordField id="aps-new-pw2" label="Confirm new password" name="confirm_password" autocomplete="new-password" />
+            <div id="aps-new-pw-match" class="text-xs min-h-[1rem]"></div>
+            <Button type="submit" variant="primary" id="aps-profile-pw-submit"><i class="fas fa-shield-halved"></i>Update password</Button>
           </form>
+          {/* UX: eye-toggle on every password field, live match indicator,
+              submit stays disabled until both fields are ≥ 8 chars and match. */}
+          <script dangerouslySetInnerHTML={{ __html: `
+            (function(){
+              // Generic eye-toggle — attach to any button with data-eye-for pointing at an input id.
+              document.querySelectorAll('button[data-eye-for]').forEach(function(btn){
+                var id = btn.getAttribute('data-eye-for');
+                var input = document.getElementById(id);
+                if (!input) return;
+                btn.addEventListener('click', function(){
+                  if (input.type === 'password') { input.type = 'text';  btn.innerHTML = '<i class="fas fa-eye-slash"></i>'; btn.setAttribute('aria-label','Hide password'); }
+                  else                           { input.type = 'password'; btn.innerHTML = '<i class="fas fa-eye"></i>';       btn.setAttribute('aria-label','Show password'); }
+                });
+              });
+              var pw  = document.getElementById('aps-new-pw');
+              var pw2 = document.getElementById('aps-new-pw2');
+              var match = document.getElementById('aps-new-pw-match');
+              var btn = document.getElementById('aps-profile-pw-submit');
+              if (!pw || !pw2 || !match || !btn) return;
+              function update(){
+                var a = pw.value, b = pw2.value;
+                var longEnough = a.length >= 8;
+                var matches = a === b && a.length > 0;
+                if (!a) { match.textContent = ''; match.className = 'text-xs min-h-[1rem]'; }
+                else if (!longEnough) { match.textContent = 'At least 8 characters.'; match.className = 'text-xs min-h-[1rem] text-amber-700'; }
+                else if (!b) { match.textContent = 'Type the new password again to confirm.'; match.className = 'text-xs min-h-[1rem] text-slate-500'; }
+                else if (!matches) { match.textContent = '✗ Passwords do not match.'; match.className = 'text-xs min-h-[1rem] text-red-700'; }
+                else { match.textContent = '✓ Passwords match.'; match.className = 'text-xs min-h-[1rem] text-emerald-700'; }
+                btn.disabled = !(longEnough && matches);
+              }
+              pw.addEventListener('input', update);
+              pw2.addEventListener('input', update);
+              update();
+            })();
+          `}} />
         </Card>
       </div>
 
@@ -279,6 +321,26 @@ function Field(props: { label: string; name: string; value?: string; type?: stri
       <span class="block text-sm font-medium text-slate-700 mb-1">{props.label}</span>
       <input name={props.name} type={props.type || 'text'} value={props.value || ''} autocomplete={props.autocomplete} placeholder={props.placeholder}
         class="w-full border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-aps-blue" />
+      {props.hint && <span class="block text-xs text-slate-500 mt-1">{props.hint}</span>}
+    </label>
+  );
+}
+
+// PasswordField: a text field plus an "eye" icon so the user can see what
+// they're typing (reduces typos during sign-in and change-password).
+function PasswordField(props: { id: string; label: string; name: string; autocomplete?: string; hint?: string; required?: boolean }) {
+  return (
+    <label class="block">
+      <span class="block text-sm font-medium text-slate-700 mb-1">{props.label}</span>
+      <div class="relative">
+        <input id={props.id} name={props.name} type="password" autocomplete={props.autocomplete}
+          class="w-full border border-slate-300 rounded-md px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-aps-blue" />
+        <button type="button" data-eye-for={props.id}
+          class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 p-1"
+          aria-label="Show password" title="Show / hide password">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
       {props.hint && <span class="block text-xs text-slate-500 mt-1">{props.hint}</span>}
     </label>
   );

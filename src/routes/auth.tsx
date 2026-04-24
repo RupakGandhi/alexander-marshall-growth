@@ -30,10 +30,19 @@ app.post('/login', async (c) => {
   await c.env.DB.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?').bind(u.id).run();
   await logActivity(c.env.DB, u.id, 'user', u.id, 'login');
 
-  if (u.must_change_password) return c.redirect('/profile?first=1');
+  // NOTE (April 2026): The forced-change flow was removed per the district's
+  // preview-testing feedback. Users can keep `Alexander2026!` for demos, or
+  // change their password any time from Profile. If the DB still has the
+  // legacy flag set, we clear it here instead of redirecting — so existing
+  // sessions aren't bounced to /profile every sign-in.
+  if (u.must_change_password) {
+    await c.env.DB.prepare('UPDATE users SET must_change_password = 0 WHERE id = ?').bind(u.id).run();
+  }
   // Pass welcome=1 on login — each role's home page uses this to auto-launch
   // the guided tour on the user's very first sign-in (gated by localStorage).
-  return c.redirect(roleHomeUrl(u.role) + '?welcome=1');
+  // pwreminder=1 shows a one-time "You can change your password anytime"
+  // banner on the role home page (dismissable client-side via localStorage).
+  return c.redirect(roleHomeUrl(u.role) + '?welcome=1&pwreminder=1');
 });
 
 app.post('/logout', async (c) => {
@@ -64,13 +73,33 @@ function LoginPage(props: { err?: string; msg?: string }) {
             </label>
             <label class="block">
               <span class="block text-sm font-medium text-slate-700 mb-1">Password</span>
-              <input name="password" type="password" required autocomplete="current-password" class="w-full border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-aps-blue" />
+              <div class="relative">
+                <input id="aps-login-pw" name="password" type="password" required autocomplete="current-password"
+                  class="w-full border border-slate-300 rounded-md px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-aps-blue" />
+                <button type="button" id="aps-login-pw-eye"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 p-1"
+                  aria-label="Show password" title="Show / hide password">
+                  <i class="fas fa-eye"></i>
+                </button>
+              </div>
             </label>
             <button class="w-full bg-aps-navy text-white rounded-md py-2 font-medium hover:bg-aps-blue">Sign in</button>
           </form>
           <p class="text-xs text-slate-500 mt-4 text-center">
             Need access? Contact your district administrator.
           </p>
+          {/* Eye toggle for the login password field. */}
+          <script dangerouslySetInnerHTML={{ __html: `
+            (function(){
+              var pw = document.getElementById('aps-login-pw');
+              var btn = document.getElementById('aps-login-pw-eye');
+              if (!pw || !btn) return;
+              btn.addEventListener('click', function(){
+                if (pw.type === 'password') { pw.type = 'text';  btn.innerHTML = '<i class="fas fa-eye-slash"></i>'; btn.setAttribute('aria-label','Hide password'); }
+                else                        { pw.type = 'password'; btn.innerHTML = '<i class="fas fa-eye"></i>';       btn.setAttribute('aria-label','Show password'); }
+              });
+            })();
+          `}} />
         </div>
       </div>
     </Layout>

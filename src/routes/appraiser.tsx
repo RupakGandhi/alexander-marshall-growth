@@ -914,6 +914,17 @@ function ObservationEditor({ user, o, domains, msg }: any) {
             <button class="bg-aps-gold text-aps-navy font-medium px-4 py-2 rounded hover:bg-yellow-400 text-sm" disabled={!editable}><i class="fas fa-wand-magic-sparkles mr-1"></i>Generate / refresh feedback</button>
           </form>
         </div>
+        {/* Animated progress indicator — hidden by default, shown while feedback is being organized. */}
+        <div id="aps-feedback-progress" class="mt-3 hidden" aria-hidden="true">
+          <div class="flex items-center gap-2 text-sm text-aps-navy mb-2">
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>
+            <span id="aps-feedback-progress-label">Reading your scored indicators…</span>
+          </div>
+          <div class="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+            <div id="aps-feedback-progress-bar" class="h-full bg-aps-gold transition-all duration-500" style="width: 10%"></div>
+          </div>
+          <div class="text-[11px] text-slate-500 mt-1">Based on your scores, here's what we found — strengths to celebrate, growth areas, focus areas, and evidence-based next steps.</div>
+        </div>
       </div>
 
       {/* Feedback chunks editor */}
@@ -1000,6 +1011,41 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           // ---- Async feedback generation ------------------------------------
           var genForm = document.getElementById('aps-generate-feedback-form');
           var status = document.getElementById('aps-generate-feedback-status');
+          var progress = document.getElementById('aps-feedback-progress');
+          var progressBar = document.getElementById('aps-feedback-progress-bar');
+          var progressLabel = document.getElementById('aps-feedback-progress-label');
+          // Friendly step phrases that animate while the request is in flight.
+          var phases = [
+            { pct: 20,  label: 'Reading your scored indicators…' },
+            { pct: 45,  label: 'Cross-referencing the Pedagogy Library…' },
+            { pct: 70,  label: 'Organizing glows, grows, focus areas, and next steps…' },
+            { pct: 90,  label: 'Based on your scores — almost ready…' }
+          ];
+          var phaseTimer = null;
+          function startProgress(){
+            if (!progress) return;
+            progress.classList.remove('hidden');
+            progress.setAttribute('aria-hidden', 'false');
+            if (progressBar) progressBar.style.width = '10%';
+            var i = 0;
+            function step(){
+              if (i >= phases.length) return;
+              if (progressBar) progressBar.style.width = phases[i].pct + '%';
+              if (progressLabel) progressLabel.textContent = phases[i].label;
+              i++;
+              phaseTimer = setTimeout(step, 600);
+            }
+            step();
+          }
+          function finishProgress(){
+            if (phaseTimer) { clearTimeout(phaseTimer); phaseTimer = null; }
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressLabel) progressLabel.textContent = '✓ Feedback organized.';
+          }
+          function hideProgress(){
+            if (phaseTimer) { clearTimeout(phaseTimer); phaseTimer = null; }
+            if (progress) { progress.classList.add('hidden'); progress.setAttribute('aria-hidden', 'true'); }
+          }
           if (genForm && status) {
             genForm.addEventListener('submit', function(ev){
               ev.preventDefault();
@@ -1007,6 +1053,7 @@ function ObservationEditor({ user, o, domains, msg }: any) {
               if (btn) btn.disabled = true;
               status.style.color = '#0369a1';
               status.textContent = 'Organizing feedback…';
+              startProgress();
               // Preserve scroll position precisely.
               var y = window.scrollY;
               fetch(genForm.action, {
@@ -1016,19 +1063,23 @@ function ObservationEditor({ user, o, domains, msg }: any) {
               }).then(function(r){ return r.json().catch(function(){ return {}; }); })
                 .then(function(j){
                   if (j && j.ok) {
+                    finishProgress();
                     status.style.color = '#065f46';
-                    status.textContent = '✓ Feedback refreshed (' + (j.items ? j.items.length : 0) + ' items)';
+                    var n = (j.items ? j.items.length : 0);
+                    status.textContent = '✓ Based on your scores, we organized ' + n + ' feedback item' + (n === 1 ? '' : 's') + '.';
                     // One-time full reload to rebuild the edit forms with real DB ids,
                     // then scroll back to where the appraiser was.
                     sessionStorage.setItem('aps-feedback-y', String(y));
-                    setTimeout(function(){ location.reload(); }, 700);
+                    setTimeout(function(){ location.reload(); }, 900);
                   } else {
+                    hideProgress();
                     status.style.color = '#991b1b';
                     status.textContent = '⚠ Could not refresh — try the button again.';
                     if (btn) btn.disabled = false;
                   }
                 })
                 .catch(function(){
+                  hideProgress();
                   status.style.color = '#991b1b';
                   status.textContent = '⚠ Network error — you can still try the button again.';
                   if (btn) btn.disabled = false;
@@ -1115,9 +1166,23 @@ function IndicatorRow({ o, d, i, score, editable }: any) {
 }
 
 function FeedbackColumn({ o, items, cat, label, icon, editable }: any) {
+  // Human-readable prompt for each category so an empty column guides the
+  // appraiser instead of just saying "No items yet".
+  const examples: Record<string, string> = {
+    glow: 'e.g., "Clear learning target posted and referred to three times during the lesson."',
+    grow: 'e.g., "Roughly 40% of students were disengaged during the 10-minute mini-lecture."',
+    focus_area: 'e.g., "Use higher-order questioning to push thinking beyond recall."',
+    next_step: 'e.g., "Enroll in PD module B.d Level 2 → 3 and rebuild tomorrow\'s lesson."',
+  };
   return (
     <Card title={label} icon={icon}>
-      {items.length === 0 && <p class="text-xs text-slate-500 mb-3">No items yet. Add one below or generate from scoring.</p>}
+      {items.length === 0 && (
+        <div class="text-xs text-slate-600 mb-3 p-3 bg-slate-50 border border-dashed border-slate-200 rounded">
+          <div class="font-medium text-slate-700 mb-1"><i class="fas fa-lightbulb mr-1 text-aps-gold"></i>Nothing here yet.</div>
+          <div>Click <strong>Generate / refresh feedback</strong> above to draft this column from your scores and scripted notes, or add one manually below.</div>
+          <div class="mt-2 text-[11px] text-slate-500">{examples[cat] || ''}</div>
+        </div>
+      )}
       <ul class="space-y-3">
         {items.map((f: any) => (
           <li class="border border-slate-200 rounded-md p-3">
