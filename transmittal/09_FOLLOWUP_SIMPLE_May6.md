@@ -9,7 +9,7 @@
 
 Hi Leslie, Aaron, and Shannon,
 
-Thank you for the time yesterday. Below is **everything in one place** — a short overview video, your personal logins, two sample accounts so you can experience the teacher and coach views too, and pricing. No phases, no waiting. Plan on about 25 minutes whenever it's convenient.
+Thank you for the time yesterday. Below is **everything in one place** — a short overview video, your personal logins, sample teacher/coach accounts so you can experience those views too, a shared super-admin login so you can see what the district controls, and pricing. No phases, no waiting. Plan on about 30 minutes whenever it's convenient.
 
 ---
 
@@ -33,6 +33,7 @@ It shows the full loop in five minutes: observation → automated grows/glows �
 | **Yourself** (Shannon) | `shannon.faller@k12.nd.us` | Principal view — your teachers, observations, feedback |
 | **A teacher** (sample) | `pamela.albright@k12.nd.us` | What a teacher sees — feedback received and PD assigned |
 | **A coach** (sample) | `jacki.hansel@k12.nd.us` | Coach view — PD review queue and rubric scoring |
+| **Super admin** (shared) | `admin@alexanderschoolnd.us` | District control panel — manage users, rubric, and PD library |
 
 > Sign out and back in to switch roles — same password every time. First login lands on your role's home page with a friendly reminder that you can change the password later from Profile (you don't have to).
 
@@ -66,6 +67,16 @@ We recommend trying them in this order — it follows one teacher (Pamela) all t
 2. Land on the **Superintendent Dashboard**.
 3. Open **Reports** → drill from district → building → teacher → indicator.
 4. Click **Export PDF** or **Export CSV** on any report.
+
+### 5 · As Super Admin (shared account · ~3 min)
+
+This is the "control panel" you'd own as a district. Take a quick tour so you know what's adjustable in-house vs. what we'd handle.
+
+1. Sign out, sign in as `admin@alexanderschoolnd.us`.
+2. Visit `/admin/users` — add, deactivate, or reset passwords for staff.
+3. Visit `/admin/pedagogy` — edit the Pedagogy Library (teacher next moves, coaching considerations, resources) per indicator.
+4. Visit `/admin/pd` — browse all 120 PD modules; edit content, modeling examples, family-engagement notes, or upload changes via CSV.
+5. Visit `/admin/pd-rubric` — edit the four PD deliverable rubric criteria coaches use.
 
 Everything autosaves. Nothing you do affects real staff data — this is your sandbox, and we can reset it in 30 seconds.
 
