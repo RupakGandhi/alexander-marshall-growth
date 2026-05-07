@@ -9,7 +9,7 @@
 
 Hi Leslie, Aaron, and Shannon,
 
-Thank you for the time yesterday. Below is **everything in one place** — a short overview video, your personal logins to play around, and pricing. No phases, no waiting. Take 20 minutes whenever it's convenient.
+Thank you for the time yesterday. Below is **everything in one place** — a short overview video, your personal logins, two sample accounts so you can experience the teacher and coach views too, and pricing. No phases, no waiting. Plan on about 25 minutes whenever it's convenient.
 
 ---
 
@@ -26,29 +26,48 @@ It shows the full loop in five minutes: observation → automated grows/glows �
 **Site:** https://alexander-marshall-growth.pages.dev
 **Password (everyone):** `Alexander2026!`
 
-| You | Email to use | What you'll see |
+| Sign in as… | Email | What you'll see |
 |---|---|---|
-| Leslie | `leslie.bieber@k12.nd.us` | Superintendent dashboard — district-wide trends and reports |
-| Aaron | `aaron.allard@k12.nd.us` | Principal view — your teachers, observations, and feedback |
-| Shannon | `shannon.faller@k12.nd.us` | Principal view — your teachers, observations, and feedback |
+| **Yourself** (Leslie) | `leslie.bieber@k12.nd.us` | Superintendent dashboard — district trends and reports |
+| **Yourself** (Aaron) | `aaron.allard@k12.nd.us` | Principal view — your teachers, observations, feedback |
+| **Yourself** (Shannon) | `shannon.faller@k12.nd.us` | Principal view — your teachers, observations, feedback |
+| **A teacher** (sample) | `pamela.albright@k12.nd.us` | What a teacher sees — feedback received and PD assigned |
+| **A coach** (sample) | `jacki.hansel@k12.nd.us` | Coach view — PD review queue and rubric scoring |
 
-> First login lands on your role's home page with a friendly reminder that you can change the password later from Profile (you don't have to).
+> Sign out and back in to switch roles — same password every time. First login lands on your role's home page with a friendly reminder that you can change the password later from Profile (you don't have to).
 
-### Try this 10-minute walk-through (Aaron & Shannon)
+We recommend trying them in this order — it follows one teacher (Pamela) all the way through the loop, so you'll see how the four pieces connect.
+
+### 1 · As a Principal (Aaron or Shannon · ~10 min)
 
 1. Sign in → click **Observations** → open the published one for **Pamela Albright**.
-2. Scroll the rubric. Notice scores are already entered (B.d=2, B.e=3, E.c=1).
+2. Scroll the rubric — scores are already entered (B.d=2, B.e=3, E.c=1).
 3. Click **Generate / refresh feedback** — watch the four-phase progress bar produce structured glows, grows, focus areas, and next steps.
-4. Click into one of Pamela's auto-enrolled PD modules to see the **Learn → Practice → Apply** flow with modeling examples and family-engagement notes.
-5. Want to try a real one? Click **+ New Observation**, pick any teacher, score a few indicators, save, then generate feedback again.
+4. Click into one of Pamela's auto-enrolled PD modules to see the **Learn → Practice → Apply** flow.
+5. Bonus: click **+ New Observation**, pick any teacher, score a few indicators, save, then generate feedback again.
 
-### Try this 5-minute walk-through (Leslie)
+### 2 · As a Teacher (Pamela · ~5 min)
 
-1. Sign in → you land on the **Superintendent Dashboard**.
-2. Open **Reports** → drill from district → building → teacher → indicator.
-3. Click **Export PDF** or **Export CSV** on any report.
+1. Sign out, sign in as `pamela.albright@k12.nd.us`.
+2. Land on the **Teacher Dashboard** — see the published observation Aaron just sent.
+3. Open it → read the auto-generated glows/grows → click **Acknowledge**.
+4. Click **My PD** → open one of the three modules auto-assigned from the scores → walk the **Learn → Practice → Apply** tabs and submit the deliverable.
 
-Everything autosaves. Nothing you do affects real staff data — this is your sandbox.
+### 3 · As a Coach (Jacki · ~3 min)
+
+1. Sign out, sign in as `jacki.hansel@k12.nd.us`.
+2. Land on the **Coach Dashboard** → open the **PD Review Queue**.
+3. Open Pamela's deliverable → score it against the four rubric criteria (Alignment, Completeness, Student Impact, Reflection) → leave a short note → publish.
+4. Notice the score now flows back to Pamela's profile and Aaron's reports.
+
+### 4 · As Superintendent (Leslie · ~5 min)
+
+1. Sign out, sign in as `leslie.bieber@k12.nd.us`.
+2. Land on the **Superintendent Dashboard**.
+3. Open **Reports** → drill from district → building → teacher → indicator.
+4. Click **Export PDF** or **Export CSV** on any report.
+
+Everything autosaves. Nothing you do affects real staff data — this is your sandbox, and we can reset it in 30 seconds.
 
 ---
 
