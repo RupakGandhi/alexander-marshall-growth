@@ -31,9 +31,12 @@ It shows the full loop in five minutes: observation → automated grows/glows �
 | **Yourself** (Leslie) | `leslie.bieber@k12.nd.us` | Superintendent dashboard — district trends and reports |
 | **Yourself** (Aaron) | `aaron.allard@k12.nd.us` | Principal view — your teachers, observations, feedback |
 | **Yourself** (Shannon) | `shannon.faller@k12.nd.us` | Principal view — your teachers, observations, feedback |
-| **A teacher** (sample) | `pamela.albright@k12.nd.us` | What a teacher sees — feedback received and PD assigned |
+| **A teacher** — Aaron's roster | `pamela.albright@k12.nd.us` | What one of Aaron's teachers sees — feedback received and PD assigned |
+| **A teacher** — Shannon's roster | `nettie.denowh@k12.nd.us` | What one of Shannon's teachers sees — feedback received and PD assigned |
 | **A coach** (sample) | `jacki.hansel@k12.nd.us` | Coach view — PD review queue and rubric scoring |
 | **Super admin** (shared) | `admin@alexanderschoolnd.us` | District control panel — manage users, rubric, and PD library |
+
+> 💡 **Important — teachers are linked to a specific appraiser.** Aaron only sees the teachers assigned to him; Shannon only sees hers. So if Shannon does a practice observation in her own account and then wants to see it from the teacher's side, she must sign in as **one of *her* teachers** (e.g., `nettie.denowh@k12.nd.us`), not Pamela. Same idea for Aaron — Pamela is on his roster, so the loop works end-to-end with her. This mirrors how it'll behave in production once you go live.
 
 > Sign out and back in to switch roles — same password every time. First login lands on your role's home page with a friendly reminder that you can change the password later from Profile (you don't have to).
 
@@ -47,12 +50,14 @@ We recommend trying them in this order — it follows one teacher (Pamela) all t
 4. Click into one of Pamela's auto-enrolled PD modules to see the **Learn → Practice → Apply** flow.
 5. Bonus: click **+ New Observation**, pick any teacher, score a few indicators, save, then generate feedback again.
 
-### 2 · As a Teacher (Pamela · ~5 min)
+### 2 · As a Teacher (~5 min)
 
-1. Sign out, sign in as `pamela.albright@k12.nd.us`.
-2. Land on the **Teacher Dashboard** — see the published observation Aaron just sent.
-3. Open it → read the auto-generated glows/grows → click **Acknowledge**.
-4. Click **My PD** → open one of the three modules auto-assigned from the scores → walk the **Learn → Practice → Apply** tabs and submit the deliverable.
+> Aaron — sign in as `pamela.albright@k12.nd.us` (she's on your roster).
+> Shannon — sign in as `nettie.denowh@k12.nd.us` (she's on yours).
+
+1. Land on the **Teacher Dashboard** — see the published observation your principal just sent.
+2. Open it → read the auto-generated glows/grows → click **Acknowledge**.
+3. Click **My PD** → open one of the modules auto-assigned from the scores → walk the **Learn → Practice → Apply** tabs and submit the deliverable.
 
 ### 3 · As a Coach (Jacki · ~3 min)
 
@@ -82,16 +87,21 @@ Everything autosaves. Nothing you do affects real staff data — this is your sa
 
 ---
 
-## 3 · Pricing (annual, all-inclusive)
+## 3 · Pricing — pick the tier that fits
 
-| Option | Price | What's included |
+All tiers are **annual subscriptions** that cover **all 33 staff** with no per-seat fees. Choose the level of capability you want; you can always upgrade mid-year and we'll prorate.
+
+| Tier | Price / year | What's included |
 |---|---|---|
-| **A · Subscription (recommended)** | **$10,000 / year** | Hosting, all updates, unlimited users, email support, two virtual trainings, annual rubric refresh |
-| **B · Product license** | **$12,000 first year**, then $3,000/yr maintenance | Same features as A, but Alexander owns a perpetual license; lower long-term cost if you stay 4+ years |
+| **Essentials** | **$10,000** | Digitized Marshall rubric · real-time observations on any device · automated glows / grows / focus areas / next-step feedback · district drill-down reporting · CSV / PDF exports · email support · one virtual training |
+| **Growth** ⭐ *recommended* | **$15,000** | Everything in Essentials, **plus** the full PD LMS — 120 personalized PD modules with **Learn → Practice → Apply** flow · automatic PD enrollment from observation scores · coach review queue with deliverable rubric · two virtual trainings · annual rubric & content refresh |
+| **Partner** | **$20,000** | Everything in Growth, **plus** custom PD authoring (we build modules with you for your district priorities) · quarterly strategy sessions with Dr. Britney Gandhi · priority support (24-hr SLA) · on-site launch day · annual leadership retreat workshop |
 
-Both options cover **all 33 staff** with no per-seat fees. Pilot terms (50% refund if you cancel before October 1) are available for either option.
+**Pilot terms available on any tier:** 50% refund if you cancel before October 1, 2026.
 
-**No hidden costs:** runs on Cloudflare's free tier, no servers to buy, no integrations required. We can sign a BAA / data-sharing agreement that mirrors the district's existing policy.
+**No hidden costs:** runs on Cloudflare's free tier — no servers to buy, no integrations required. We can sign a BAA / data-sharing agreement that mirrors Alexander's existing policy.
+
+> Most districts your size land on **Growth** — it's where the "observation → automatic PD → coach review" loop you saw in the demo actually runs end-to-end. Essentials is a fit if you'd rather keep PD on your current platform for year 1 and add the LMS later.
 
 ---
 
@@ -99,7 +109,7 @@ Both options cover **all 33 staff** with no per-seat fees. Pilot terms (50% refu
 
 1. **This week:** Watch the 5-min video, then spend 10–20 minutes in the platform (links above).
 2. **Week of May 18:** Email or text us any questions, bugs, or "I wish it did X" notes — we'll fix small things on the spot.
-3. **Tuesday, May 26 · 3:00 pm CT:** 30-minute follow-up on Google Meet to answer questions and discuss option A vs. B.
+3. **Tuesday, May 26 · 3:00 pm CT:** 30-minute follow-up on Google Meet to answer questions and decide which tier (Essentials / Growth / Partner) fits.
 4. **Early June:** Sign agreement; live for the 2026–27 school year.
 
 If May 26 doesn't work, just reply with two windows that do.
