@@ -484,3 +484,93 @@
     return out;
   }
 })();
+
+// ============================================================================
+// DomainTabs — Fix 1 (June 2, 2026 brief)
+// ============================================================================
+// Progressive enhancement for the <nav.aps-domain-tabs> rendered by
+// layout.tsx's DomainTabs component. With JS disabled the anchor links still
+// jump to the right section; with JS on we also:
+//   • update the "active" pill as the user scrolls (IntersectionObserver)
+//   • update the URL hash without scrolling the page when a tab is clicked
+//   • horizontal-scroll the active tab into view on small screens
+// Safe to load on pages that don't render the tabs — it no-ops gracefully.
+(function(){
+  'use strict';
+  function init() {
+    var bars = document.querySelectorAll('nav.aps-domain-tabs[data-domain-tabs="1"]');
+    if (!bars.length) return;
+    bars.forEach(function(bar){
+      var prefix = bar.getAttribute('data-domain-prefix') || 'domain';
+      var tabs   = Array.prototype.slice.call(bar.querySelectorAll('[data-domain-tab]'));
+      if (!tabs.length) return;
+      var codes  = tabs.map(function(a){ return a.getAttribute('data-domain-tab'); });
+      function activate(code, opts){
+        tabs.forEach(function(t){
+          var on = t.getAttribute('data-domain-tab') === code;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          if (on) {
+            t.classList.add('bg-aps-navy','text-white','border-aps-navy');
+            t.classList.remove('bg-white','text-aps-navy','border-slate-300');
+            // Scroll the pill into view inside the mobile horizontal scroller
+            try { t.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); } catch(_) {}
+          } else {
+            t.classList.remove('bg-aps-navy','text-white','border-aps-navy');
+            t.classList.add('bg-white','text-aps-navy','border-slate-300');
+          }
+        });
+        if (opts && opts.updateHash) {
+          try { history.replaceState(null, '', '#' + prefix + '-' + code); } catch(_) {}
+        }
+      }
+      // Click handler — intercept anchor jumps so we get smooth scroll
+      tabs.forEach(function(a){
+        a.addEventListener('click', function(ev){
+          var code = a.getAttribute('data-domain-tab');
+          var target = document.getElementById(prefix + '-' + code);
+          if (target) {
+            ev.preventDefault();
+            var top = target.getBoundingClientRect().top + window.scrollY - 110;
+            window.scrollTo({ top: top, behavior: 'smooth' });
+            activate(code, { updateHash: true });
+          }
+        });
+      });
+      // Observer — keep the right pill highlighted as the user scrolls
+      var sections = codes.map(function(c){ return document.getElementById(prefix + '-' + c); }).filter(Boolean);
+      if (sections.length && 'IntersectionObserver' in window) {
+        var io = new IntersectionObserver(function(entries){
+          // Pick the entry closest to the top that is intersecting
+          var visible = entries.filter(function(e){ return e.isIntersecting; });
+          if (!visible.length) return;
+          visible.sort(function(a,b){ return a.boundingClientRect.top - b.boundingClientRect.top; });
+          var topEntry = visible[0];
+          var id = topEntry.target.id || '';
+          var code = id.replace(prefix + '-', '');
+          if (code) activate(code, { updateHash: false });
+        }, { rootMargin: '-120px 0px -55% 0px', threshold: [0, 0.25, 0.5] });
+        sections.forEach(function(s){ io.observe(s); });
+      }
+      // Honor the initial URL hash on first paint
+      var initialHash = (location.hash || '').replace('#','');
+      if (initialHash && initialHash.indexOf(prefix + '-') === 0) {
+        var code = initialHash.replace(prefix + '-', '');
+        if (codes.indexOf(code) >= 0) {
+          activate(code, { updateHash: false });
+          setTimeout(function(){
+            var target = document.getElementById(initialHash);
+            if (target) {
+              var top = target.getBoundingClientRect().top + window.scrollY - 110;
+              window.scrollTo({ top: top, behavior: 'auto' });
+            }
+          }, 50);
+        }
+      }
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

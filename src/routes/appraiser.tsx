@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
-import { Layout, Card, Button } from '../lib/layout';
+import { Layout, Card, Button, DomainTabs } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import {
   getAssignedTeachers, getTeacherSummary, getObservation,
@@ -876,13 +876,19 @@ function ObservationEditor({ user, o, domains, msg }: any) {
       {/* Scoring grid */}
       <h2 class="font-display text-xl text-aps-navy mt-8 mb-3">Marshall Rubric Scoring</h2>
       <p class="text-sm text-slate-600 mb-3">Click any cell to assign a rating for that indicator. You can leave indicators unscored for mini-observations and only score the ones you had evidence for.</p>
-      <div class="space-y-3">
+
+      {/* Fix 1 (June 2, 2026 brief) — sticky tabbed domain navigation that
+          lets appraisers jump between Domains A-F without losing scroll
+          position. With JS disabled it falls back to anchor links. */}
+      <DomainTabs domains={domains.map((d: any) => ({ id: d.id, code: d.code, name: d.name }))} idPrefix="obs-domain" />
+
+      <div class="space-y-3 mt-3">
         {domains.map((d: any) => (
           // April 2026 UI polish: open ALL domains by default so Domain E (the
           // "Professional Responsibilities" domain that used to stay collapsed)
           // is visible without an extra click.  Appraisers can still collapse
           // any domain by clicking its header.
-          <details class="bg-white rounded-lg border border-slate-200" open>
+          <details id={`obs-domain-${d.code}`} data-domain-section={d.code} class="bg-white rounded-lg border border-slate-200 scroll-mt-32" open>
             <summary class="px-4 py-3 cursor-pointer flex items-center gap-2">
               <span class="w-8 h-8 rounded-full bg-aps-navy text-white font-display flex items-center justify-center text-sm">{d.code}</span>
               <span class="font-display text-aps-navy">{d.name}</span>

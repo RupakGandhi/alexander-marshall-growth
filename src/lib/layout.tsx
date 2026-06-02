@@ -340,6 +340,75 @@ export function Card(props: { id?: string; title?: string; icon?: string; childr
   );
 }
 
+// ---------------------------------------------------------------------------
+// DomainTabs — Fix 1 (June 2, 2026 brief)
+//
+// Sticky tab bar that pivots between the 6 Marshall domains (A–F). Used in
+// three places per the brief:
+//   • Observation editor (appraiser.tsx)
+//   • /admin/pedagogy
+//   • /admin/pd  (and /admin/pd/coverage)
+//
+// Behavior:
+//   • Tabs are anchor links (#domain-A, #domain-B ...) so the page is
+//     fully usable with JS disabled — clicking a tab scrolls to that domain.
+//   • When JS is on (default), tabs.js intercepts clicks, switches "active",
+//     and scrolls the section into view smoothly. URL hash stays in sync so
+//     a deep-link like /appraiser/observations/42#domain-C works.
+//   • Mobile: tabs are horizontally swipeable (overflow-x-auto with
+//     snap-x snap-mandatory).
+//   • Sticky: stays under the global header while scrolling.
+//   • The component renders only the *header* — callers are responsible for
+//     rendering one <section id="domain-X" data-domain-section="X"> per
+//     domain in document order. tabs.js auto-derives "active" from scroll.
+// ---------------------------------------------------------------------------
+export function DomainTabs(props: {
+  domains: Array<{ id: number; code: string; name: string }>;
+  /** Optional id-prefix in case multiple instances co-exist on one page. */
+  idPrefix?: string;
+  /** Optional className override for the outer wrapper (e.g. for sticky offset tuning). */
+  class?: string;
+}) {
+  const { domains } = props;
+  const prefix = props.idPrefix || 'domain';
+  return (
+    <nav
+      class={`aps-domain-tabs sticky top-[56px] sm:top-[64px] z-30 bg-aps-wheat/95 backdrop-blur border-b border-slate-200 -mx-3 sm:-mx-4 px-3 sm:px-4 ${props.class || ''}`}
+      role="tablist"
+      aria-label="Marshall rubric domains"
+      data-domain-tabs="1"
+      data-domain-prefix={prefix}
+    >
+      <div class="overflow-x-auto snap-x snap-mandatory">
+        <ul class="flex gap-1 py-2 min-w-max">
+          {domains.map((d, idx) => (
+            <li class="snap-start">
+              <a
+                href={`#${prefix}-${d.code}`}
+                role="tab"
+                data-domain-tab={d.code}
+                aria-controls={`${prefix}-${d.code}`}
+                aria-selected={idx === 0 ? 'true' : 'false'}
+                class={
+                  'inline-flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-md text-sm font-medium border ' +
+                  'transition-colors hover:bg-aps-navy hover:text-white ' +
+                  (idx === 0
+                    ? 'bg-aps-navy text-white border-aps-navy'
+                    : 'bg-white text-aps-navy border-slate-300')
+                }
+              >
+                <span class="font-display text-xs px-1.5 py-0.5 rounded bg-aps-gold/20 text-aps-navy">{d.code}</span>
+                <span class="hidden sm:inline">{d.name}</span>
+                <span class="sm:hidden">Domain {d.code}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </nav>
+  );
+}
+
 export function Button(props: { href?: string; onClick?: string; variant?: 'primary'|'secondary'|'danger'|'ghost'; children: any; type?: string; class?: string; name?: string; value?: string; formaction?: string }) {
   const variantClass = {
     primary:  'bg-aps-navy text-white hover:bg-aps-blue',

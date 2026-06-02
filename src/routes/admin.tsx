@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables, UserRole } from '../lib/types';
-import { Layout, Card, Button } from '../lib/layout';
+import { Layout, Card, Button, DomainTabs } from '../lib/layout';
 import { requireRole, hashPassword } from '../lib/auth';
 import { getDomainsWithIndicators, getActiveFramework, logActivity, setUserSchools, getUserSchoolIds } from '../lib/db';
 import { formatDate, formatDateTime, levelLabels, levelColor } from '../lib/ui';
@@ -1428,9 +1428,13 @@ function PedagogyPage({ user, domains, map }: any) {
     <Layout title="Pedagogy Library" user={user} activeNav="admin-pedagogy">
       <h1 class="font-display text-2xl text-aps-navy mb-1">Pedagogy Library</h1>
       <p class="text-slate-600 text-sm mb-4">Each indicator has four rating levels. Click any cell to edit the interpretation, evidence signals, concrete next-steps, coaching considerations, PD resources, and the feedback-starter sentence used when auto-generating feedback.</p>
-      <div class="space-y-3">
+
+      {/* Fix 1 (June 2, 2026 brief) — sticky tabbed domain navigation. */}
+      <DomainTabs domains={domains.map((d: any) => ({ id: d.id, code: d.code, name: d.name }))} idPrefix="ped-domain" />
+
+      <div class="space-y-3 mt-3">
         {domains.map((d: any) => (
-          <details open={d.code === 'A'} class="bg-white rounded-lg border border-slate-200">
+          <details id={`ped-domain-${d.code}`} data-domain-section={d.code} open class="bg-white rounded-lg border border-slate-200 scroll-mt-32">
             <summary class="px-4 py-3 cursor-pointer">
               <span class="inline-block w-7 h-7 rounded-full bg-aps-navy text-white font-display text-sm mr-2 text-center leading-7">{d.code}</span>
               <span class="font-display text-aps-navy">{d.name}</span>

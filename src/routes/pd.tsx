@@ -13,7 +13,8 @@
 
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
-import { Layout, Card, Button } from '../lib/layout';
+import { Layout, Card, Button, DomainTabs } from '../lib/layout';
+import { softenTitleForTeacher, softenSourceForTeacher } from '../lib/teacher_labels';
 import { requireRole } from '../lib/auth';
 import { logActivity } from '../lib/db';
 import { formatDate, formatDateTime, escapeHtml } from '../lib/ui';
@@ -663,7 +664,7 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
               {active.map((e: any) => (
                 <label class="flex items-start gap-2 p-2 border border-slate-200 rounded hover:bg-slate-50">
                   <input type="checkbox" name="enrollment_ids" value={e.id} class="mt-1" />
-                  <span><strong>{e.module_title}</strong> <span class="text-xs text-slate-500">· {e.domain_code} · {e.indicator_code} · {e.est_minutes}m</span></span>
+                  <span><strong>{softenTitleForTeacher(e.module_title)}</strong> <span class="text-xs text-slate-500">· {e.domain_code} · {e.indicator_code} · {e.est_minutes}m</span></span>
                 </label>
               ))}
             </div>
@@ -690,8 +691,9 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
           <div class="grid md:grid-cols-2 gap-3">
             {suggested.map((m: any) => (
               <div class="border border-slate-200 rounded-md p-3 bg-white">
-                <div class="text-xs text-slate-500">{m.dcode} · {m.icode} · target &ge; {m.target_level}</div>
-                <div class="font-medium text-aps-navy">{m.title}</div>
+                {/* Fix 2: hide raw target_level from teachers; show only domain/indicator */}
+                <div class="text-xs text-slate-500">{m.dcode} · {m.icode}</div>
+                <div class="font-medium text-aps-navy">{softenTitleForTeacher(m.title)}</div>
                 {m.subtitle && <div class="text-xs text-slate-600 mt-0.5">{m.subtitle}</div>}
                 <div class="mt-2 flex items-center justify-between">
                   <span class="text-xs text-slate-500"><i class="far fa-clock mr-1"></i>{m.est_minutes}m</span>
@@ -711,12 +713,19 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
 
 function EnrollmentRow({ e }: any) {
   const pill = statusPill(e.status);
+  // Fix 2 (June 2, 2026 brief): teacher-facing surface — strip "Level X → Y:"
+  // prefix from module titles and never show the raw target_level pill. The
+  // indicator name still appears so the teacher can connect the module to the
+  // rubric — that's growth-oriented, not a score callout.
+  const friendlyTitle = softenTitleForTeacher(e.module_title);
+  const sourceCaption = softenSourceForTeacher(e);
   return (
     <div class="flex items-center justify-between gap-3 border border-slate-200 rounded p-3 hover:bg-slate-50">
       <div class="flex-1 min-w-0">
-        <div class="text-xs text-slate-500">{e.domain_code} · {e.indicator_code} · {e.indicator_name} · target &ge; {e.target_level}</div>
-        <div class="font-medium text-aps-navy">{e.module_title}</div>
+        <div class="text-xs text-slate-500">{e.domain_code} · {e.indicator_code} · {e.indicator_name}</div>
+        <div class="font-medium text-aps-navy">{friendlyTitle}</div>
         {e.module_subtitle && <div class="text-xs text-slate-600">{e.module_subtitle}</div>}
+        {sourceCaption && <div class="text-xs text-amber-700 mt-1"><i class="fas fa-lightbulb mr-1"></i>{sourceCaption}</div>}
       </div>
       <span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color} whitespace-nowrap`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span>
       <a href={`/teacher/pd/${e.id}`} class="text-xs text-aps-blue hover:underline whitespace-nowrap">Open <i class="fas fa-chevron-right"></i></a>
@@ -827,17 +836,17 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
   const practiceState = parseReflectionState(reflections.practice);
   const applyState    = parseReflectionState(reflections.apply);
 
+  const softTitle = softenTitleForTeacher(e.title);
   return (
-    <Layout title={e.title} user={user} activeNav="t-pd">
+    <Layout title={softTitle} user={user} activeNav="t-pd">
       <div class="mb-2"><a href="/teacher/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>My PD LMS</a></div>
-      <h1 class="font-display text-2xl text-aps-navy">{e.title}</h1>
-      <p class="text-slate-600 text-sm mt-1">{e.domain_code} · {e.indicator_code} · {e.indicator_name} · target level &ge; {e.target_level}</p>
+      <h1 class="font-display text-2xl text-aps-navy">{softTitle}</h1>
+      <p class="text-slate-600 text-sm mt-1">{e.domain_code} · {e.indicator_code} · {e.indicator_name}</p>
       {e.subtitle && <p class="mt-1 text-slate-700">{e.subtitle}</p>}
       <div class="mt-2 flex items-center gap-3 flex-wrap">
         <span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span>
         <span class="text-xs text-slate-500"><i class="far fa-clock mr-1"></i>Estimated {e.est_minutes} minutes</span>
-        {e.source === 'auto' && <span class="text-xs text-amber-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Auto-recommended from your observation</span>}
-        {e.source === 'assigned' && <span class="text-xs text-sky-700"><i class="fas fa-user-tie mr-1"></i>Assigned by a supervisor</span>}
+        {(() => { const cap = softenSourceForTeacher(e); return cap ? <span class="text-xs text-sky-700"><i class="fas fa-user-tie mr-1"></i>{cap}</span> : null; })()}
         <span id="aps-pd-autosave-status" class="text-xs px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-slate-500 ml-auto whitespace-nowrap" aria-live="polite">{(reflections.learn || reflections.practice || reflections.apply) ? '✓ Your answers are saved' : 'Your answers will save automatically'}</span>
       </div>
       {msg && <div class="mt-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
@@ -1327,7 +1336,7 @@ function TeacherPdPlan({ user, plan, items }: any) {
                 <li class="flex items-center justify-between border border-slate-200 rounded p-3">
                   <div>
                     <div class="text-xs text-slate-500">{i + 1}. {it.dcode} · {it.icode} · {it.est_minutes}m</div>
-                    <div class="font-medium text-aps-navy">{it.module_title}</div>
+                    <div class="font-medium text-aps-navy">{softenTitleForTeacher(it.module_title)}</div>
                   </div>
                   <div class="flex items-center gap-2">
                     <span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span>
@@ -1545,52 +1554,81 @@ function AdminPdList({ user, rows, indicators, msg }: any) {
         </form>
       </Card>
 
-      <Card title={`Modules (${rows.length})`} icon="fas fa-list">
-        {rows.length === 0 ? (
-          <div class="text-center py-10 px-4 border-2 border-dashed border-slate-200 rounded-lg">
-            <i class="fas fa-graduation-cap text-4xl text-slate-300 mb-3"></i>
-            <h3 class="font-display text-lg text-aps-navy mb-1">No PD modules yet</h3>
-            <p class="text-sm text-slate-600 max-w-md mx-auto mb-4">
-              PD modules are the three-phase (Learn → Practice → Apply) lessons
-              teachers see when an appraiser scores them at Level 1 or 2 on an
-              indicator. You can add them one at a time, or import a CSV.
-            </p>
-            <div class="flex flex-wrap items-center justify-center gap-2 text-sm">
-              <a href="/admin/pd/new" class="bg-aps-navy text-white px-3 py-1.5 rounded hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>Create your first module</a>
-              <a href="/admin/pd/export-csv" class="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded hover:bg-slate-50"><i class="fas fa-file-csv mr-1"></i>Download CSV template</a>
+      {/* Fix 9 (June 2, 2026 brief) — coverage gap report link */}
+      <div class="mb-3">
+        <a href="/admin/pd/coverage" class="inline-flex items-center gap-2 text-sm text-aps-navy hover:underline">
+          <i class="fas fa-list-check"></i>View PD Module Coverage Report (Fix 9 gap analysis)
+        </a>
+      </div>
+
+      {/* Fix 1 (June 2, 2026 brief) — group modules by domain + sticky tabs */}
+      {(() => {
+        // Group existing flat rows by their domain code so the DomainTabs nav
+        // can scroll between groups. Domains are derived from the row data so
+        // we don't need an extra DB call.
+        const byDomain = new Map<string, { code: string; name: string; rows: any[] }>();
+        for (const r of rows) {
+          const code = String(r.dcode || 'Z');
+          if (!byDomain.has(code)) byDomain.set(code, { code, name: `Domain ${code}`, rows: [] });
+          byDomain.get(code)!.rows.push(r);
+        }
+        const groups = Array.from(byDomain.values()).sort((a, b) => a.code.localeCompare(b.code));
+        if (rows.length === 0) {
+          return (
+            <Card title={`Modules (${rows.length})`} icon="fas fa-list">
+              <div class="text-center py-10 px-4 border-2 border-dashed border-slate-200 rounded-lg">
+                <i class="fas fa-graduation-cap text-4xl text-slate-300 mb-3"></i>
+                <h3 class="font-display text-lg text-aps-navy mb-1">No PD modules yet</h3>
+                <p class="text-sm text-slate-600 max-w-md mx-auto mb-4">
+                  PD modules are the three-phase (Learn → Practice → Apply) lessons
+                  teachers see when an appraiser scores them at Level 1 or 2 on an
+                  indicator. You can add them one at a time, or import a CSV.
+                </p>
+                <div class="flex flex-wrap items-center justify-center gap-2 text-sm">
+                  <a href="/admin/pd/new" class="bg-aps-navy text-white px-3 py-1.5 rounded hover:bg-aps-blue"><i class="fas fa-plus mr-1"></i>Create your first module</a>
+                  <a href="/admin/pd/export-csv" class="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded hover:bg-slate-50"><i class="fas fa-file-csv mr-1"></i>Download CSV template</a>
+                </div>
+              </div>
+            </Card>
+          );
+        }
+        return (
+          <div>
+            <DomainTabs domains={groups.map((g, idx) => ({ id: idx, code: g.code, name: g.name }))} idPrefix="pd-domain" />
+            <div class="space-y-3 mt-3">
+              {groups.map((g) => (
+                <Card id={`pd-domain-${g.code}`} title={`Domain ${g.code} · ${g.rows.length} modules`} icon="fas fa-folder-open" class="scroll-mt-32">
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                      <thead class="text-xs text-slate-500 text-left border-b">
+                        <tr><th class="py-2">Indicator</th><th>Target &ge;</th><th>Title</th><th>Minutes</th><th>Active</th><th>Enrollments</th><th></th></tr>
+                      </thead>
+                      <tbody>
+                        {g.rows.map((r: any) => (
+                          <tr class="border-b border-slate-100">
+                            <td class="py-2 text-xs text-slate-600">{r.dcode} · {r.icode}<br /><span class="text-slate-500">{r.iname}</span></td>
+                            <td>{r.target_level}</td>
+                            <td class="font-medium text-aps-navy">{r.title}{r.subtitle ? <div class="text-xs text-slate-500">{r.subtitle}</div> : null}</td>
+                            <td>{r.est_minutes}m</td>
+                            <td>{r.is_active ? <span class="text-emerald-700"><i class="fas fa-check-circle"></i></span> : <span class="text-slate-400"><i class="fas fa-circle-minus"></i></span>}</td>
+                            <td>{r.enrollments}</td>
+                            <td class="text-right">
+                              <a href={`/admin/pd/${r.id}`} class="text-xs text-aps-blue hover:underline mr-3"><i class="fas fa-pen mr-1"></i>Edit</a>
+                              <form method="post" action={`/admin/pd/${r.id}/delete`} class="inline" onsubmit="return confirm('Delete this module? Teacher enrollments for it will be broken.')">
+                                <button class="text-xs text-red-700 hover:underline"><i class="fas fa-trash mr-1"></i>Delete</button>
+                              </form>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              ))}
             </div>
-            <p class="text-[11px] text-slate-400 mt-3">
-              Tip: a good first module targets a Level 1 or 2 score on a common indicator (e.g., <em>A.a Knowledge</em> or <em>B.a Expectations</em>).
-            </p>
           </div>
-        ) : (
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead class="text-xs text-slate-500 text-left border-b">
-                <tr><th class="py-2">Indicator</th><th>Target &ge;</th><th>Title</th><th>Minutes</th><th>Active</th><th>Enrollments</th><th></th></tr>
-              </thead>
-              <tbody>
-                {rows.map((r: any) => (
-                  <tr class="border-b border-slate-100">
-                    <td class="py-2 text-xs text-slate-600">{r.dcode} · {r.icode}<br /><span class="text-slate-500">{r.iname}</span></td>
-                    <td>{r.target_level}</td>
-                    <td class="font-medium text-aps-navy">{r.title}{r.subtitle ? <div class="text-xs text-slate-500">{r.subtitle}</div> : null}</td>
-                    <td>{r.est_minutes}m</td>
-                    <td>{r.is_active ? <span class="text-emerald-700"><i class="fas fa-check-circle"></i></span> : <span class="text-slate-400"><i class="fas fa-circle-minus"></i></span>}</td>
-                    <td>{r.enrollments}</td>
-                    <td class="text-right">
-                      <a href={`/admin/pd/${r.id}`} class="text-xs text-aps-blue hover:underline mr-3"><i class="fas fa-pen mr-1"></i>Edit</a>
-                      <form method="post" action={`/admin/pd/${r.id}/delete`} class="inline" onsubmit="return confirm('Delete this module? Teacher enrollments for it will be broken.')">
-                        <button class="text-xs text-red-700 hover:underline"><i class="fas fa-trash mr-1"></i>Delete</button>
-                      </form>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+        );
+      })()}
     </Layout>
   );
 }

@@ -288,3 +288,244 @@ export async function logActivity(db: D1Database, userId: number | null, entity:
     ).bind(userId, entity, entityId, action, detail ? JSON.stringify(detail) : null).run();
   } catch (e) { console.warn('activity_log failed', e); }
 }
+
+// ===========================================================================
+// June 2, 2026 — leadership upgrade helpers (Fixes 4, 5, 6, 7, 8, 10, 11)
+// ===========================================================================
+
+// ---- Fix 8: admin_audit_log ----------------------------------------------
+// Separate from activity_log because this is the "high-trust mutation" trail
+// (mass deletes, practice-data resets) that needs row counts + filter dumps
+// for compliance reviews.
+export async function logAdminAudit(
+  db: D1Database,
+  actorUserId: number,
+  action: string,
+  opts?: { entityType?: string; entityIds?: number[]; rowCount?: number; filters?: any; detail?: string; ip?: string | null; userAgent?: string | null }
+) {
+  try {
+    await db.prepare(
+      `INSERT INTO admin_audit_log
+         (actor_user_id, action, entity_type, entity_ids, row_count, filters, detail, ip, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      actorUserId,
+      action,
+      opts?.entityType || null,
+      opts?.entityIds && opts.entityIds.length ? JSON.stringify(opts.entityIds) : null,
+      Number(opts?.rowCount || 0),
+      opts?.filters ? JSON.stringify(opts.filters) : null,
+      opts?.detail || null,
+      opts?.ip || null,
+      opts?.userAgent || null,
+    ).run();
+  } catch (e) {
+    console.warn('admin_audit_log failed', e);
+  }
+}
+
+export async function recentAdminAudit(db: D1Database, limit = 100) {
+  const r = await db.prepare(
+    `SELECT al.*, u.first_name, u.last_name, u.role
+       FROM admin_audit_log al
+       LEFT JOIN users u ON u.id = al.actor_user_id
+       ORDER BY al.created_at DESC LIMIT ?`
+  ).bind(limit).all();
+  return (r.results as any[]) || [];
+}
+
+// ---- Fix 6: system_settings (admin-editable knobs) -----------------------
+export async function getSetting(db: D1Database, key: string): Promise<string | null> {
+  const r = await db.prepare(`SELECT value FROM system_settings WHERE key = ?`).bind(key).first<any>();
+  return r ? String(r.value) : null;
+}
+
+export async function getNumericSetting(db: D1Database, key: string, fallback: number): Promise<number> {
+  const v = await getSetting(db, key);
+  if (v == null) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function setSetting(db: D1Database, key: string, value: string | number, updatedBy: number | null, valueType: 'string' | 'number' | 'json' | 'boolean' = 'string') {
+  await db.prepare(
+    `INSERT INTO system_settings (key, value, value_type, updated_by, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value, value_type = excluded.value_type,
+       updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
+  ).bind(key, String(value), valueType, updatedBy).run();
+}
+
+// ---- Fix 6 + Fix 7: unified PD hours aggregation --------------------------
+// Returns one record per teacher with internal (verified+credited) + external
+// (approved) hours plus a heat-map color class. Honors soft-delete: only
+// non-deleted pd_enrollments and external_pd_submissions count.
+export async function getTeacherPDHoursSummary(
+  db: D1Database,
+  opts?: { schoolIds?: number[]; teacherId?: number; sinceDate?: string | null }
+) {
+  const target = await getNumericSetting(db, 'pd_hours_target_annual', 22.5);
+  const since = opts?.sinceDate || null; // YYYY-MM-DD
+
+  const where: string[] = [`u.role = 'teacher'`, `u.active = 1`];
+  const binds: any[] = [];
+  if (opts?.schoolIds && opts.schoolIds.length) {
+    where.push(`u.school_id IN (${opts.schoolIds.map(() => '?').join(',')})`);
+    binds.push(...opts.schoolIds);
+  }
+  if (opts?.teacherId) {
+    where.push(`u.id = ?`);
+    binds.push(opts.teacherId);
+  }
+
+  // Internal hours: sum of pd_enrollments.hours_credited where credited and not deleted.
+  // External hours: sum of external_pd_submissions.approved_hours where status='approved'
+  // (fall back to .hours when approved_hours is NULL).
+  const internalDateFilter = since ? `AND e.credited_at IS NOT NULL AND date(e.credited_at) >= date(?)` : '';
+  const externalDateFilter = since ? `AND date(x.reviewed_at) >= date(?)` : '';
+  const extraBindsInternal = since ? [since] : [];
+  const extraBindsExternal = since ? [since] : [];
+
+  const sql = `
+    SELECT
+      u.id AS teacher_id,
+      u.first_name, u.last_name, u.email, u.school_id, u.subject_area, u.grade_band,
+      s.name AS school_name,
+      COALESCE(internal.hrs, 0) AS internal_hours,
+      COALESCE(internal.cnt, 0) AS internal_count,
+      COALESCE(external_.hrs, 0) AS external_hours,
+      COALESCE(external_.cnt, 0) AS external_count
+    FROM users u
+    LEFT JOIN schools s ON s.id = u.school_id
+    LEFT JOIN (
+      SELECT e.teacher_id,
+             SUM(COALESCE(e.hours_credited, 0)) AS hrs,
+             SUM(CASE WHEN e.hours_credited > 0 THEN 1 ELSE 0 END) AS cnt
+        FROM pd_enrollments e
+        WHERE e.deleted_at IS NULL AND e.status = 'verified'
+              ${internalDateFilter}
+        GROUP BY e.teacher_id
+    ) internal ON internal.teacher_id = u.id
+    LEFT JOIN (
+      SELECT x.teacher_id,
+             SUM(COALESCE(x.approved_hours, x.hours, 0)) AS hrs,
+             COUNT(*) AS cnt
+        FROM external_pd_submissions x
+        WHERE x.status = 'approved' AND x.deleted_at IS NULL
+              ${externalDateFilter}
+        GROUP BY x.teacher_id
+    ) external_ ON external_.teacher_id = u.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY u.last_name, u.first_name
+  `;
+
+  // Bind order: internal CTE filter, external CTE filter, then outer where binds.
+  const allBinds = [...extraBindsInternal, ...extraBindsExternal, ...binds];
+  const r = await db.prepare(sql).bind(...allBinds).all();
+  const rows = ((r.results as any[]) || []).map((row) => {
+    const total = Number(row.internal_hours || 0) + Number(row.external_hours || 0);
+    const pct = target > 0 ? total / target : 0;
+    let heat: 'low' | 'mid' | 'near' | 'met' = 'low';
+    if (pct >= 1.0) heat = 'met';
+    else if (pct >= 0.66) heat = 'near';
+    else if (pct >= 0.33) heat = 'mid';
+    return { ...row, total_hours: total, pct_of_target: pct, heat, target };
+  });
+  return { target, rows };
+}
+
+// ---- Fix 5: External PD submissions ---------------------------------------
+export async function listExternalPdForTeacher(db: D1Database, teacherId: number) {
+  const r = await db.prepare(
+    `SELECT x.*, r.first_name AS reviewer_first, r.last_name AS reviewer_last
+       FROM external_pd_submissions x
+       LEFT JOIN users r ON r.id = x.reviewed_by
+       WHERE x.teacher_id = ? AND x.deleted_at IS NULL
+       ORDER BY x.submitted_at DESC`
+  ).bind(teacherId).all();
+  return (r.results as any[]) || [];
+}
+
+export async function listExternalPdQueue(db: D1Database, opts?: { status?: string; appraiserId?: number; schoolIds?: number[] }) {
+  const where: string[] = [`x.deleted_at IS NULL`];
+  const binds: any[] = [];
+  if (opts?.status) { where.push(`x.status = ?`); binds.push(opts.status); }
+  if (opts?.appraiserId) {
+    where.push(`x.teacher_id IN (
+      SELECT teacher_id FROM assignments WHERE staff_id = ? AND relationship = 'appraiser' AND active = 1
+    )`);
+    binds.push(opts.appraiserId);
+  }
+  if (opts?.schoolIds && opts.schoolIds.length) {
+    where.push(`t.school_id IN (${opts.schoolIds.map(() => '?').join(',')})`);
+    binds.push(...opts.schoolIds);
+  }
+  const r = await db.prepare(
+    `SELECT x.*,
+            t.first_name AS teacher_first, t.last_name AS teacher_last, t.email AS teacher_email,
+            t.school_id, s.name AS school_name,
+            r.first_name AS reviewer_first, r.last_name AS reviewer_last
+       FROM external_pd_submissions x
+       JOIN users t ON t.id = x.teacher_id
+       LEFT JOIN schools s ON s.id = t.school_id
+       LEFT JOIN users r ON r.id = x.reviewed_by
+       WHERE ${where.join(' AND ')}
+       ORDER BY
+         CASE x.status
+           WHEN 'submitted' THEN 0
+           WHEN 'needs_revision' THEN 1
+           WHEN 'approved' THEN 2
+           WHEN 'declined' THEN 3
+         END,
+         x.submitted_at DESC`
+  ).bind(...binds).all();
+  return (r.results as any[]) || [];
+}
+
+export async function getExternalPd(db: D1Database, id: number) {
+  return db.prepare(
+    `SELECT x.*, t.first_name AS teacher_first, t.last_name AS teacher_last, t.email AS teacher_email, t.school_id,
+            s.name AS school_name,
+            r.first_name AS reviewer_first, r.last_name AS reviewer_last
+       FROM external_pd_submissions x
+       JOIN users t ON t.id = x.teacher_id
+       LEFT JOIN schools s ON s.id = t.school_id
+       LEFT JOIN users r ON r.id = x.reviewed_by
+       WHERE x.id = ? AND x.deleted_at IS NULL`
+  ).bind(id).first<any>();
+}
+
+// ---- Fix 10: Teacher Goals -----------------------------------------------
+export async function listTeacherGoals(db: D1Database, teacherId: number, includeArchived = false) {
+  const filter = includeArchived ? '' : `AND status NOT IN ('archived')`;
+  const r = await db.prepare(
+    `SELECT g.*, i.code AS indicator_code, i.name AS indicator_name
+       FROM teacher_goals g
+       LEFT JOIN framework_indicators i ON i.id = g.indicator_id
+       WHERE g.teacher_id = ? AND g.deleted_at IS NULL ${filter}
+       ORDER BY
+         CASE g.status WHEN 'active' THEN 0 WHEN 'on_hold' THEN 1 WHEN 'complete' THEN 2 ELSE 3 END,
+         COALESCE(g.target_date, '9999-12-31'),
+         g.created_at DESC`
+  ).bind(teacherId).all();
+  return (r.results as any[]) || [];
+}
+
+export async function getTeacherGoal(db: D1Database, id: number) {
+  return db.prepare(`SELECT * FROM teacher_goals WHERE id = ? AND deleted_at IS NULL`).bind(id).first<any>();
+}
+
+// ---- Fix 11: Build context note for the feedback generator ---------------
+// Returns a short string the feedback generator can prepend to its template
+// so the surfaced "next moves" reflect the teacher's classroom reality.
+// Backward compatible: if all three context fields are empty, returns ''.
+export function teacherContextNote(u: { subject_area?: string | null; classroom_type?: string | null; grade_band?: string | null } | null | undefined): string {
+  if (!u) return '';
+  const parts: string[] = [];
+  if (u.grade_band)     parts.push(`grade band ${u.grade_band}`);
+  if (u.subject_area)   parts.push(`teaches ${u.subject_area}`);
+  if (u.classroom_type) parts.push(`${u.classroom_type.replace(/_/g, ' ')} setting`);
+  if (!parts.length) return '';
+  return `Context: ${parts.join(', ')}.`;
+}

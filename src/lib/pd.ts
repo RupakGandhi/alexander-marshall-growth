@@ -221,6 +221,13 @@ export async function submitDeliverable(
 
 // --------------------------------------------------------------------------
 // Supervisor verification — marks the enrollment done or sends it back.
+//
+// June 2, 2026 — Fix 7 (Artifact Approval Gates PD Credit):
+//   When ok === true, the verifier may simultaneously credit PD hours. The
+//   credited hour value defaults to the module's est_minutes / 60 (rounded
+//   to 0.25h) but can be overridden by the verifier (e.g. they only want to
+//   credit half a session). If creditHours is undefined the legacy "no
+//   credit" path runs — backward-compatible with old call sites.
 // --------------------------------------------------------------------------
 export async function verifyDeliverable(
   db: D1Database,
@@ -228,21 +235,44 @@ export async function verifyDeliverable(
   verifierId: number,
   ok: boolean,
   note?: string | null,
-  env?: Bindings
+  env?: Bindings,
+  creditHours?: number | null,
 ) {
   const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ?`).bind(enrollmentId).first<any>();
   if (!e) throw new Error('not found');
   if (e.status !== 'submitted' && e.status !== 'needs_revision') throw new Error('not submitted');
 
   if (ok) {
-    await db.prepare(
-      `UPDATE pd_enrollments SET status = 'verified', verified_at = CURRENT_TIMESTAMP, verified_by = ?, verification_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).bind(verifierId, note || null, enrollmentId).run();
+    // Fix 7: credit PD hours at the moment of verification when caller
+    // supplies a positive hours value. Stored on the enrollment row itself
+    // so the heat-map (Fix 6) can aggregate it without joining the module
+    // table.
+    if (typeof creditHours === 'number' && creditHours > 0) {
+      await db.prepare(
+        `UPDATE pd_enrollments
+            SET status              = 'verified',
+                verified_at         = CURRENT_TIMESTAMP,
+                verified_by         = ?,
+                verification_note   = ?,
+                hours_credited      = ?,
+                credited_at         = CURRENT_TIMESTAMP,
+                credited_by_user_id = ?,
+                updated_at          = CURRENT_TIMESTAMP
+          WHERE id = ?`
+      ).bind(verifierId, note || null, creditHours, verifierId, enrollmentId).run();
+    } else {
+      await db.prepare(
+        `UPDATE pd_enrollments SET status = 'verified', verified_at = CURRENT_TIMESTAMP, verified_by = ?, verification_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).bind(verifierId, note || null, enrollmentId).run();
+    }
     if (env) {
+      const hoursTxt = (typeof creditHours === 'number' && creditHours > 0)
+        ? ` (${creditHours.toFixed(2)}h credited toward your PD total)`
+        : '';
       await notify(db, {
         user_id: e.teacher_id, kind: 'pd_deliverable_verified',
         title: 'PD deliverable verified',
-        body: note ? `Nice work — your supervisor noted: "${note}"` : 'Your supervisor marked your deliverable complete.',
+        body: (note ? `Nice work — your supervisor noted: "${note}"` : 'Your supervisor marked your deliverable complete.') + hoursTxt,
         url: `/teacher/pd/${enrollmentId}`,
         entity_type: 'pd_enrollment', entity_id: enrollmentId, actor_user_id: verifierId,
       }, env);
@@ -264,6 +294,66 @@ export async function verifyDeliverable(
 }
 
 // --------------------------------------------------------------------------
+// Fix 4 (June 2, 2026) — manual module recommendation by admin or coach.
+// Behaves like enrollTeacher('assigned') but ALSO records who recommended
+// the module (recommended_by_user_id) and an optional note (recommender_note)
+// so the teacher's "Recommended for You" card can show the recommender's
+// name and reason. The coach permission boundary is preserved: this helper
+// never reads or returns scores — it only writes to pd_enrollments.
+// --------------------------------------------------------------------------
+export async function recommendModule(
+  db: D1Database,
+  teacherId: number,
+  moduleId: number,
+  recommenderId: number,
+  note?: string | null,
+  env?: Bindings,
+) {
+  const exists = await db.prepare(
+    `SELECT id, status FROM pd_enrollments
+       WHERE teacher_id = ? AND module_id = ?
+         AND source_observation_id IS NULL AND status NOT IN ('declined')
+         AND (deleted_at IS NULL)`
+  ).bind(teacherId, moduleId).first<any>();
+  if (exists) {
+    // Already on their plate — just stamp the recommender info.
+    await db.prepare(
+      `UPDATE pd_enrollments
+          SET recommended_by_user_id = ?,
+              recommender_note       = ?,
+              assigned_by            = COALESCE(assigned_by, ?),
+              updated_at             = CURRENT_TIMESTAMP
+        WHERE id = ?`
+    ).bind(recommenderId, note || null, recommenderId, exists.id).run();
+    return { enrollment_id: exists.id, created: false };
+  }
+  const res = await db.prepare(
+    `INSERT INTO pd_enrollments
+       (teacher_id, module_id, source, assigned_by, status,
+        recommended_by_user_id, recommender_note)
+     VALUES (?, ?, 'assigned', ?, 'recommended', ?, ?)`
+  ).bind(teacherId, moduleId, recommenderId, recommenderId, note || null).run();
+  const id = Number((res.meta as any)?.last_row_id || 0);
+  if (env) {
+    const mod = await db.prepare(`SELECT title FROM pd_modules WHERE id = ?`).bind(moduleId).first<any>();
+    const who = await db.prepare(`SELECT first_name, last_name, role FROM users WHERE id = ?`).bind(recommenderId).first<any>();
+    const whoLabel = who ? `${who.first_name} ${who.last_name} (${who.role === 'coach' ? 'coach' : 'admin'})` : 'a supervisor';
+    await notify(db, {
+      user_id: teacherId,
+      kind: 'pd_module_assigned',
+      title: `${whoLabel} recommended a PD module`,
+      body: note
+        ? `"${mod?.title || 'New module'}" — note: ${note}`
+        : `${mod?.title || 'New module'} was added to your PD plan.`,
+      url: `/teacher/pd/${id}`,
+      entity_type: 'pd_enrollment', entity_id: id,
+      actor_user_id: recommenderId,
+    }, env);
+  }
+  return { enrollment_id: id, created: true };
+}
+
+// --------------------------------------------------------------------------
 // Helpers for the teacher dashboard
 // --------------------------------------------------------------------------
 
@@ -273,13 +363,15 @@ export async function teacherEnrollments(db: D1Database, teacherId: number) {
             m.est_minutes, m.target_level, m.indicator_id,
             i.code AS indicator_code, i.name AS indicator_name,
             d.code AS domain_code, d.name AS domain_name,
-            de.title AS deliverable_title
+            de.title AS deliverable_title,
+            ru.first_name AS recommender_first, ru.last_name AS recommender_last, ru.role AS recommender_role
        FROM pd_enrollments e
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id
        LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
-       WHERE e.teacher_id = ?
+       LEFT JOIN users ru ON ru.id = e.recommended_by_user_id
+       WHERE e.teacher_id = ? AND (e.deleted_at IS NULL)
        ORDER BY
          CASE e.status
            WHEN 'needs_revision' THEN 0
@@ -319,6 +411,12 @@ export async function getEnrollment(db: D1Database, id: number) {
         e.verified_by                AS verified_by,
         e.verification_note          AS verification_note,
         e.decline_reason             AS decline_reason,
+        -- June 2026: manual recommendation + credited hours (Fixes 4 + 7)
+        e.recommended_by_user_id     AS recommended_by_user_id,
+        e.recommender_note           AS recommender_note,
+        e.hours_credited             AS hours_credited,
+        e.credited_at                AS credited_at,
+        e.credited_by_user_id        AS credited_by_user_id,
         e.created_at                 AS created_at,
         e.updated_at                 AS updated_at,
         m.id                         AS module_ref_id,
