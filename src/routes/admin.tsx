@@ -2001,7 +2001,7 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
       <p class="text-slate-600 text-sm mb-4">Edit or delete observations, mass-delete by filter, reset practice / demo data, and toggle soft-delete. Users, schools, rubric, and pedagogy library are <strong>never</strong> touched by the actions below.</p>
       {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
 
-      <div class="grid md:grid-cols-6 gap-3 mb-6">
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Observations</div><div class="text-2xl font-display text-aps-navy">{counts.observations || 0}</div>{counts.observations_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.observations_soft_deleted} soft-deleted</div> : null}</div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Scores</div><div class="text-2xl font-display text-aps-navy">{counts.scores || 0}</div></div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">PD Enrollments</div><div class="text-2xl font-display text-aps-navy">{counts.pd_enrollments || 0}</div>{counts.pd_enrollments_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.pd_enrollments_soft_deleted} soft-deleted</div> : null}</div>

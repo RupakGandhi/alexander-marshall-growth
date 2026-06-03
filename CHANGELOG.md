@@ -7,6 +7,62 @@ permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 2, 2026 — evening] — Post-launch polish (PD title rewrite + mobile)
+
+Same-day follow-up after Dr. Gandhi reviewed the PD module library and flagged:
+
+1. **All 120 PD modules carried a generic auto-generated title** —
+   `"Level X → Y: redesign your next {Indicator} lesson"` — with lowercase
+   `redesign` and the word "lesson" appended to indicators that aren't
+   lesson-based (Attendance, Professionalism, Outreach, Reporting,
+   Leadership, Collaboration, Growth, etc.).
+2. **Data Management 6-tile stats grid** collapsed to a single column on
+   mobile because it was hard-coded to `md:grid-cols-6`.
+
+### Migration `0009_pd_module_professional_titles.sql`
+Rewrites the title of every active PD module (120 rows) with:
+- **Sentence-case verbs** ("Designing...", "Building...", "Strengthening...",
+  "Co-constructing...") instead of lowercase `redesign`.
+- **Indicator-aware phrasing** aligned to Kim Marshall's *Teacher Evaluation
+  Rubric* — lesson-design language for Domain A (Planning), classroom-routine
+  language for Domain B (Management), in-lesson moves for Domain C (Delivery),
+  formative-assessment language for Domain D (Monitoring), family-communication
+  language for Domain E (Outreach), and career-growth language for Domain F
+  (Professional Responsibilities).
+- **Level transitions preserved** as a leading clause: `"Level 1 → 2: …"` /
+  `"Level 2 → 3: …"` — these match what teachers see when an observation
+  scores them at *Does Not Meet* or *Improvement Necessary*.
+- **No more "Attendance lesson", "Professionalism lesson"** etc. —
+  non-lesson indicators get role- and behavior-appropriate verbs.
+- 120 idempotent `UPDATE` statements, scoped on
+  `indicator_id × target_level`. Safe to re-run.
+
+### Mobile responsiveness fix
+`DataManagementPage` stats grid changed from `grid md:grid-cols-6`
+→ `grid-cols-2 md:grid-cols-3 lg:grid-cols-6` so the page reads cleanly on
+phone, tablet, and desktop.
+
+### PWA verified end-to-end
+- `manifest.json` returns 200 with full `name`, `short_name`, `start_url`,
+  `scope`, `display: standalone`, `theme_color`, all three icon sizes
+  (192/512/180), and three app shortcuts (Dashboard, Reports, Tour).
+- `<link rel="manifest">` injected on every page via `<Layout>`.
+- Service Worker `/static/sw.js` returns 200 with `Content-Type:
+  application/javascript`, registered from `public/static/app.js` on first
+  page load. Strategies: Cache First (static), Network First with
+  `/offline.html` fallback (HTML), Stale-While-Revalidate (CDN), Network only
+  (API / form POSTs).
+- All icons, apple-touch-icon, and offline page reachable.
+- "Install app" badge that appears in Chrome / Edge is the browser's native
+  PWA install prompt — fires automatically once manifest validates. No code
+  change needed; works on Windows, macOS, Android, iOS (Add to Home Screen).
+
+### Production status
+Re-deployed `90e1ffb3` at <https://alexander-marshall-growth.pages.dev> with
+migration 0009 applied to remote D1 (121 commands). 572.08 kB worker bundle.
+
+---
+
 ## [June 2, 2026] — Leadership-Meeting Upgrade (11 fixes for Aug 16 launch)
 
 Live at <https://alexander-marshall-growth.pages.dev>. Migration `0008_june_2026_upgrade.sql`
