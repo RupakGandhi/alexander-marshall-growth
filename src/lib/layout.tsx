@@ -447,6 +447,10 @@ export function PDHoursHeatMap(props: {
   linkPrefix?: string;
   /** Hide the legend (used when embedded in a card that already explains the colors). */
   hideLegend?: boolean;
+  /** Export route prefix (e.g. '/superintendent/pd-hours' or '/appraiser/pd-hours').
+   *  When provided, renders Download CSV + Print/PDF buttons in the widget header.
+   *  Each prefix must expose `/csv` and `/print` GET endpoints. */
+  exportPrefix?: string;
 }) {
   const target = Number(props.target || 0);
   const rows = props.rows || [];
@@ -466,6 +470,26 @@ export function PDHoursHeatMap(props: {
 
   return (
     <div>
+      {!props.selfView && props.exportPrefix && (
+        <div class="flex flex-wrap justify-end gap-2 mb-2">
+          <a
+            href={`${props.exportPrefix}/csv`}
+            class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+            title="Download the heat-map data as a CSV file"
+          >
+            <i class="fas fa-file-csv"></i> Download CSV
+          </a>
+          <a
+            href={`${props.exportPrefix}/print`}
+            target="_blank"
+            rel="noopener"
+            class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+            title="Open a printable version (use your browser's Print → Save as PDF)"
+          >
+            <i class="fas fa-print"></i> Print / Save as PDF
+          </a>
+        </div>
+      )}
       {!props.selfView && (
         <div class="grid sm:grid-cols-4 gap-2 mb-3 text-center text-xs">
           {(['met','near','mid','low'] as const).map((k) => (

@@ -4,6 +4,7 @@ import { Layout, Card, PDHoursHeatMap } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import { getObservation, getTeacherPDHoursSummary } from '../lib/db';
 import { formatDate, levelColor, levelLabels, statusBadge, statusLabel } from '../lib/ui';
+import { buildPdHoursCsv, renderPdHoursPrint } from '../lib/pd_hours_export';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['superintendent', 'super_admin']));
@@ -37,6 +38,34 @@ app.get('/', async (c) => {
   // level (district overview), so every active teacher is included.
   const pdHours = await getTeacherPDHoursSummary(c.env.DB);
   return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} welcome={welcome} pdHours={pdHours} />);
+});
+
+// ----------------------------------------------------------------------------
+// PD-hours Heat-Map exports — district-wide scope (no school filter).
+// Both endpoints reuse getTeacherPDHoursSummary() so the same heat-tier and
+// per-teacher numbers shown on screen are what ship in the export.
+// ----------------------------------------------------------------------------
+
+app.get('/pd-hours/csv', async (c) => {
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  const csv = buildPdHoursCsv(pdHours);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="pd-hours-district-${stamp}.csv"`,
+    },
+  });
+});
+
+app.get('/pd-hours/print', async (c) => {
+  const user = c.get('user')!;
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  return c.html(renderPdHoursPrint({
+    scopeLabel: 'District-wide',
+    user,
+    pdHours,
+  }));
 });
 
 // By school drill-down
@@ -391,7 +420,7 @@ function SuperintendentHome({ user, kpis, schools, welcome, pdHours }: any) {
           modules (Fix 7 credited hours) and approved external PD (Fix 5) into
           one per-teacher progress visual. */}
       <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mt-4">
-        <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/superintendent/teachers" />
+        <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/superintendent/teachers" exportPrefix="/superintendent/pd-hours" />
       </Card>
 
       <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">

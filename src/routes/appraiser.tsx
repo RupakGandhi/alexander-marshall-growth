@@ -15,9 +15,28 @@ import {
 } from '../lib/ui';
 import { notify } from '../lib/notifications';
 import { autoEnrollForObservation } from '../lib/pd';
+import { buildPdHoursCsv, renderPdHoursPrint } from '../lib/pd_hours_export';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['appraiser', 'super_admin']));
+
+// Helper: build the PD-hours heat-map payload for THIS appraiser's caseload.
+// Extracted so both the home dashboard and the /pd-hours/* export endpoints
+// produce identical numbers.
+async function buildAppraiserPdHours(db: D1Database, appraiserId: number) {
+  const teachers = await getAssignedTeachers(db, appraiserId, 'appraiser');
+  const ids = (teachers as any[]).map((t: any) => t.id);
+  const heatRowsAll: any[] = [];
+  let heatTarget = 22.5;
+  for (const t of ids) {
+    const r = await getTeacherPDHoursSummary(db, { teacherId: t });
+    if (r.rows.length) heatRowsAll.push(r.rows[0]);
+    heatTarget = r.target;
+  }
+  const heatOrder = { low: 0, mid: 1, near: 2, met: 3 } as const;
+  heatRowsAll.sort((a, b) => heatOrder[a.heat as keyof typeof heatOrder] - heatOrder[b.heat as keyof typeof heatOrder]);
+  return { target: heatTarget, rows: heatRowsAll };
+}
 
 // ---- Appraiser home: list assigned teachers
 app.get('/', async (c) => {
@@ -37,22 +56,38 @@ app.get('/', async (c) => {
     for (const r of (rows.results as any[])) latest[r.teacher_id] = r;
   }
   // Fix 6 — PD-hours heat-map scoped to this appraiser's assigned teachers.
-  // We pull per-teacher rows by passing the teacher-id list one at a time
-  // (getTeacherPDHoursSummary supports schoolIds + teacherId but not a
-  // teacher-list at once). For typical assignments (≤30 teachers) this is
-  // a tight loop, and each call is a single fast aggregation query.
-  const heatRowsAll: any[] = [];
-  let heatTarget = 22.5;
-  for (const t of ids) {
-    const r = await getTeacherPDHoursSummary(c.env.DB, { teacherId: t });
-    if (r.rows.length) heatRowsAll.push(r.rows[0]);
-    heatTarget = r.target;
-  }
-  // Sort low → met so behind-target teachers float to the top.
-  const heatOrder = { low: 0, mid: 1, near: 2, met: 3 } as const;
-  heatRowsAll.sort((a, b) => heatOrder[a.heat as keyof typeof heatOrder] - heatOrder[b.heat as keyof typeof heatOrder]);
-  const pdHours = { target: heatTarget, rows: heatRowsAll };
+  const pdHours = await buildAppraiserPdHours(c.env.DB, user.id);
   return c.html(<AppraiserHome user={user} teachers={teachers} latest={latest} welcome={welcome} pdHours={pdHours} />);
+});
+
+// ----------------------------------------------------------------------------
+// PD-hours Heat-Map exports — scoped to THIS appraiser's caseload only.
+// Each appraiser sees only their assigned teachers in both views, so the
+// CSV/print exports honor the same scope to prevent accidental data leaks.
+// ----------------------------------------------------------------------------
+
+app.get('/pd-hours/csv', async (c) => {
+  const user = c.get('user')!;
+  const pdHours = await buildAppraiserPdHours(c.env.DB, user.id);
+  const csv = buildPdHoursCsv(pdHours);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="pd-hours-caseload-${stamp}.csv"`,
+    },
+  });
+});
+
+app.get('/pd-hours/print', async (c) => {
+  const user = c.get('user')!;
+  const pdHours = await buildAppraiserPdHours(c.env.DB, user.id);
+  const scopeLabel = `${user.first_name || ''} ${user.last_name || ''}'s caseload`.trim();
+  return c.html(renderPdHoursPrint({
+    scopeLabel,
+    user,
+    pdHours,
+  }));
 });
 
 // ---- Single teacher detail
@@ -647,7 +682,7 @@ function AppraiserHome({ user, teachers, latest, welcome, pdHours }: any) {
       {/* Fix 6 — PD-hours heat-map scoped to this appraiser's caseload. */}
       {pdHours.rows.length > 0 && (
         <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mb-6">
-          <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/appraiser/teachers" />
+          <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/appraiser/teachers" exportPrefix="/appraiser/pd-hours" />
         </Card>
       )}
 

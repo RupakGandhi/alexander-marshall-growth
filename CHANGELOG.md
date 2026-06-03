@@ -8,6 +8,82 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 3, 2026 — afternoon] — Pre-launch verification fixes
+
+Round of fixes triggered by a comprehensive pre-launch verification report
+(ChatGPT agent walk-through as Dr. Rupak Gandhi). The report confirmed most
+fixes from prior rounds but flagged three real gaps and clarified one
+permission boundary.
+
+### Findings actioned
+
+| # | Finding | Status | Action |
+| --- | --- | --- | --- |
+| 1A | PD Hours Heat-Map widget had no PDF/CSV export buttons | Real gap | **Fixed** |
+| 1B | Admin-editable PD hours target setting "could not be located" | Discoverability gap | **Fixed** (route already existed) |
+| 3C | Teacher "Recommended for You" card "not visible" | Tester misread | Confirmed correct — tester looked at `/teacher/pd` (LMS list) instead of `/teacher` (home). The new June 2 night entry already split the dashboard into "Recommended for You" + "Optional Stretch Growth" cards. |
+| 4D | Coach external PD approval queue missing | Confirmed policy | Confirmed — external PD approval is **principal-only** by design. No coach external-PD code paths exist. |
+
+### Findings 5A–5E, 6A, 6B, 6C — untested due to session limits
+
+These were "Missing/Untested" in the report because the tester could not log
+in as super_admin. The features themselves were verified to exist in code
+during this round:
+- `/admin/data` (Fix 8 Data Management + Reset Practice Data) — exists
+- `/admin/pd/coverage` (Fix 9 PD Module Coverage) — exists
+- `/admin/external-pd` (Fix 5 External PD Audit) — exists
+- User profile subject fields (Fix 11) — exist
+- PWA `manifest.json`, `sw.js`, icons, offline page — return 200
+- CSV import/export round-trip — endpoints in place at `/admin/import/users` and `/admin/import/rubric`
+- 33 logins — schema unchanged; existing forced-first-login flow still applies
+
+### Files touched (text/UI/route work — no migration)
+
+- `src/lib/pd_hours_export.tsx` (new) — Shared `buildPdHoursCsv()` +
+  `renderPdHoursPrint()` helpers. Both reuse the heat-map summary so on-screen
+  numbers and exported numbers come from the same render path.
+- `src/lib/layout.tsx` — `PDHoursHeatMap` accepts a new `exportPrefix?: string`
+  prop. When provided, the widget renders two header buttons:
+  *Download CSV* (link to `{prefix}/csv`, `Content-Disposition: attachment`)
+  and *Print / Save as PDF* (opens `{prefix}/print` in a new tab; the
+  print view auto-shows a "Print / Save as PDF" button that uses the
+  browser's native PDF engine).
+- `src/routes/superintendent.tsx` — added `GET /superintendent/pd-hours/csv`
+  and `GET /superintendent/pd-hours/print` (district-wide scope). Heat-map
+  call site now passes `exportPrefix="/superintendent/pd-hours"`.
+- `src/routes/appraiser.tsx` — extracted `buildAppraiserPdHours(db, userId)`
+  helper so the home view and the export endpoints share one code path.
+  Added `GET /appraiser/pd-hours/csv` + `GET /appraiser/pd-hours/print`
+  (caseload-scoped — each appraiser sees only their assigned teachers).
+  Heat-map call site now passes `exportPrefix="/appraiser/pd-hours"`.
+- `src/routes/admin.tsx` — `AdminHome` quick links now expose four new
+  buttons that the tester could not locate: **PD-hours target**, **PD
+  Modules**, **PD Coverage**, **External PD Audit**.
+
+### Confirmed coach policy (no code change)
+
+Per Dr. Gandhi's instruction, **coach has no external-PD approval queue.**
+External PD review remains a principal/appraiser responsibility. Confirmed by
+code audit: zero `external-pd` routes exist on `src/routes/coach.tsx`, and
+`src/lib/layout.tsx` exposes the External PD nav entry to `super_admin`
+(`admin-ext-pd`) and `appraiser` (`ap-ext-pd`) only — never to `coach`.
+
+### Production status
+
+Build: **583.39 kB** worker bundle (one new lib file added), zero TypeScript
+errors. End-to-end smoke tests verified locally before deploy:
+- `GET /superintendent/pd-hours/csv` → 200, valid RFC-4180 CSV with 7 teacher
+  rows and 1 header row.
+- `GET /superintendent/pd-hours/print` → 200, full printable HTML page with
+  embedded Print button, summary tiles, and per-teacher table.
+- `GET /admin` → 200, all 4 new quick-link buttons present.
+- `GET /admin/settings/pd-hours` → 200, target editor renders.
+
+No D1 migration required (route/UI work only). Deployed to
+<https://alexander-marshall-growth.pages.dev>.
+
+---
+
 ## [June 3, 2026] — PD module est_minutes recalibration
 
 Follow-up to Dr. Gandhi's audit of PD module timings. Previous values were

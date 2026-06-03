@@ -1288,6 +1288,10 @@ function AdminHome({ user, byRole, byStatus, recent, welcome }: any) {
           <Button href="/reports" variant="secondary"><i class="fas fa-file-export"></i>Reports</Button>
           <Button href="/admin/district" variant="secondary"><i class="fas fa-building-columns"></i>District Info</Button>
           <Button href="/admin/data" variant="secondary"><i class="fas fa-database"></i>Data Management</Button>
+          <Button href="/admin/settings/pd-hours" variant="secondary"><i class="fas fa-stopwatch"></i>PD-hours target</Button>
+          <Button href="/admin/pd" variant="secondary"><i class="fas fa-graduation-cap"></i>PD Modules</Button>
+          <Button href="/admin/pd/coverage" variant="secondary"><i class="fas fa-chart-area"></i>PD Coverage</Button>
+          <Button href="/admin/external-pd" variant="secondary"><i class="fas fa-clipboard-list"></i>External PD Audit</Button>
         </div>
       </Card>
     </Layout>
