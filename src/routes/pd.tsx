@@ -2005,13 +2005,26 @@ function PdCoverageReport({ user, rows }: any) {
         );
       })}
 
-      <p class="text-[11px] text-slate-500 mt-4">
-        <i class="fas fa-circle-info mr-1"></i>
-        Coverage report counts only modules where <code>is_active = 1</code>. Modules can be toggled active/inactive on the
-        <a href="/admin/pd" class="text-aps-blue hover:underline"> PD Modules list</a>. Level 1 → 2 and Level 2 → 3 modules are
-        auto-recommended when a teacher scores at Level 1 or 2 on an observation. Level 3 → 4 modules are manual-only —
-        teachers self-select them when pushing toward <em>Highly Effective</em>, or a coach/appraiser recommends them.
-      </p>
+      <div class="mt-4 space-y-2 text-[11px] text-slate-600 leading-relaxed">
+        <p>
+          <i class="fas fa-circle-info mr-1 text-slate-400"></i>
+          Coverage report counts only modules where <code>is_active = 1</code>. Modules can be toggled active/inactive on the
+          <a href="/admin/pd" class="text-aps-blue hover:underline">PD Modules list</a>.
+        </p>
+        <p>
+          <span class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5 mr-1">Support PD</span>
+          <strong>Level 1 → 2</strong> modules are auto-recommended when a teacher scores <strong>exactly 1</strong> on that indicator
+          (Does Not Meet — priority support). <strong>Level 2 → 3</strong> modules are auto-recommended when a teacher scores
+          <strong>exactly 2</strong> (Improvement Necessary — growth toward Effective practice).
+        </p>
+        <p>
+          <span class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-800 bg-indigo-100 border border-indigo-200 rounded px-1.5 py-0.5 mr-1">Stretch PD</span>
+          <strong>Level 3 → 4</strong> modules are <strong>never auto-recommended</strong>. Effective is the Marshall standard, and an
+          automatic recommendation at that level would unintentionally signal that Effective is a deficiency. Stretch modules
+          are visible and searchable in the library, self-selectable by the teacher, and recommendable by a coach or appraiser
+          as an optional leadership pathway toward <em>Highly Effective</em> practice.
+        </p>
+      </div>
     </Layout>
   );
 }

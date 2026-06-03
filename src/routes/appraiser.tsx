@@ -875,11 +875,17 @@ function AppraiserTeacherDetail({ user, summary, performance, modules, msg }: an
                   <span class="block mb-1 font-medium">Module</span>
                   <select name="module_id" required class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
                     <option value="">— Select a module —</option>
-                    {modules.map((m: any) => (
-                      <option value={m.id}>
-                        {m.domain_code}.{(m.indicator_code || '').toUpperCase()} · {m.title} ({m.est_minutes}m)
-                      </option>
-                    ))}
+                    {modules.map((m: any) => {
+                      const tag = m.target_level === 3 ? '[Stretch 3→4]'
+                                : m.target_level === 2 ? '[Support 2→3]'
+                                : m.target_level === 1 ? '[Support 1→2]'
+                                : '';
+                      return (
+                        <option value={m.id}>
+                          {tag} {m.domain_code}.{(m.indicator_code || '').toUpperCase()} · {m.title} ({m.est_minutes}m)
+                        </option>
+                      );
+                    })}
                   </select>
                 </label>
                 <label class="block text-xs text-slate-600">
@@ -891,8 +897,18 @@ function AppraiserTeacherDetail({ user, summary, performance, modules, msg }: an
                 <button class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm w-full">
                   <i class="fas fa-paper-plane mr-1"></i>Recommend module
                 </button>
-                <p class="text-[11px] text-slate-500 mt-1">
+                <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
                   The teacher will see this on their "Recommended for You" card and receive a notification.
+                  <br/>
+                  <span class="inline-block mt-1">
+                    <span class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5">Support</span>
+                    <span class="text-slate-500"> 1→2 / 2→3 — for indicators where the teacher is below Effective.</span>
+                  </span>
+                  <br/>
+                  <span class="inline-block">
+                    <span class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-800 bg-indigo-100 border border-indigo-200 rounded px-1.5 py-0.5">Stretch</span>
+                    <span class="text-slate-500"> 3→4 — optional leadership pathway. The teacher is already meeting the Marshall standard.</span>
+                  </span>
                 </p>
               </form>
             )}

@@ -412,35 +412,64 @@ function TeacherHome({ user, summary, enrollments, goals, externalPd, hours, hou
         </Card>
       </div>
 
-      {/* Fix 4 — Recommended for You */}
-      <Card id="recommended-for-you" title="Recommended for You" icon="fas fa-wand-magic-sparkles" class="mb-6">
-        {recommended.length === 0 ? (
-          <p class="text-slate-500 text-sm">Nothing recommended right now. Your coach or principal can recommend modules here, and your own observations may surface new ones too.</p>
-        ) : (
-          <ul class="space-y-2">
-            {recommended.map((e: any) => {
-              const friendlyTitle = softenTitleForTeacher(e.module_title);
-              const sourceCaption = softenSourceForTeacher(e);
-              return (
-                <li class="border border-slate-200 rounded-md p-3 flex flex-wrap items-start gap-3">
-                  <div class="flex-1 min-w-[200px]">
-                    <div class="text-xs text-slate-500">{e.domain_code}.{(e.indicator_code || '').toUpperCase()} · {e.indicator_name}</div>
-                    <div class="font-medium text-aps-navy">{friendlyTitle}</div>
-                    {e.module_subtitle && <div class="text-sm text-slate-600">{e.module_subtitle}</div>}
-                    {sourceCaption && (
-                      <div class="text-xs text-amber-700 mt-1"><i class="fas fa-lightbulb mr-1"></i>{sourceCaption}</div>
-                    )}
-                    {e.recommender_note && (
-                      <div class="text-xs text-slate-600 mt-1 italic">"{e.recommender_note}"</div>
-                    )}
-                  </div>
-                  <a href={`/teacher/pd/${e.id}`} class="px-3 py-1.5 rounded-md bg-aps-navy text-white text-sm hover:bg-aps-blue whitespace-nowrap">Open module</a>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Card>
+      {/* Fix 4 — Recommended for You.
+          Split into Support PD (target_level 1 or 2 — auto/assigned from a
+          below-Effective score) and Stretch PD (target_level 3 — optional
+          leadership pathway toward Highly Effective). Marshall's standard is
+          Effective; Stretch PD is opt-in, not remediation. */}
+      {(() => {
+        const support = recommended.filter((e: any) => Number(e.target_level) !== 3);
+        const stretch = recommended.filter((e: any) => Number(e.target_level) === 3);
+        const renderItem = (e: any, tone: 'support' | 'stretch') => {
+          const friendlyTitle = softenTitleForTeacher(e.module_title);
+          const sourceCaption = softenSourceForTeacher(e);
+          const captionClass = tone === 'stretch' ? 'text-indigo-700' : 'text-amber-700';
+          const captionIcon = tone === 'stretch' ? 'fas fa-arrow-up-right-dots' : 'fas fa-lightbulb';
+          return (
+            <li class="border border-slate-200 rounded-md p-3 flex flex-wrap items-start gap-3">
+              <div class="flex-1 min-w-[200px]">
+                <div class="text-xs text-slate-500">{e.domain_code}.{(e.indicator_code || '').toUpperCase()} · {e.indicator_name}</div>
+                <div class="font-medium text-aps-navy">{friendlyTitle}</div>
+                {e.module_subtitle && <div class="text-sm text-slate-600">{e.module_subtitle}</div>}
+                {sourceCaption && (
+                  <div class={`text-xs ${captionClass} mt-1`}><i class={`${captionIcon} mr-1`}></i>{sourceCaption}</div>
+                )}
+                {e.recommender_note && (
+                  <div class="text-xs text-slate-600 mt-1 italic">"{e.recommender_note}"</div>
+                )}
+              </div>
+              <a href={`/teacher/pd/${e.id}`} class="px-3 py-1.5 rounded-md bg-aps-navy text-white text-sm hover:bg-aps-blue whitespace-nowrap">Open module</a>
+            </li>
+          );
+        };
+        return (
+          <>
+            <Card id="recommended-for-you" title="Recommended for You" icon="fas fa-wand-magic-sparkles" class="mb-6">
+              {support.length === 0 ? (
+                <p class="text-slate-500 text-sm">Nothing recommended right now. Your coach or principal can recommend modules here, and your own observations may surface new ones too.</p>
+              ) : (
+                <ul class="space-y-2">
+                  {support.map((e: any) => renderItem(e, 'support'))}
+                </ul>
+              )}
+            </Card>
+
+            {stretch.length > 0 && (
+              <Card id="stretch-growth" title="Optional Stretch Growth" icon="fas fa-arrow-up-right-dots" class="mb-6">
+                <p class="text-xs text-slate-600 mb-3 leading-relaxed">
+                  <span class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-800 bg-indigo-100 border border-indigo-200 rounded px-1.5 py-0.5 mr-1">Stretch PD</span>
+                  You are meeting the Marshall standard on these indicators. These optional modules surface what
+                  <em> Highly Effective </em> practice looks like — feel free to explore them when you are ready to
+                  model, coach, or lead beyond the rubric.
+                </p>
+                <ul class="space-y-2">
+                  {stretch.map((e: any) => renderItem(e, 'stretch'))}
+                </ul>
+              </Card>
+            )}
+          </>
+        );
+      })()}
 
       <div class="grid md:grid-cols-2 gap-6">
         <Card title="Active Focus Areas" icon="fas fa-bullseye">

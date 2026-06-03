@@ -2,8 +2,61 @@
 
 All notable changes to this project are documented here. The platform follows an
 additive upgrade model: each round preserves every prior workflow (auto-save,
-Learn → Practice → Apply gating, auto-enrollment at score ≤ 2, dashboards, role
-permissions, forced-first-login password flow) byte-for-byte.
+Learn → Practice → Apply gating, score-routed auto-enrollment (Support PD for
+scores of 1 or 2; Stretch PD manual-only for Effective practice), dashboards,
+role permissions, forced-first-login password flow) byte-for-byte.
+
+---
+
+## [June 2, 2026 — night] — Support PD vs. Stretch PD language refinement
+
+Follow-up to the Level 3 → 4 release after Dr. Gandhi and ChatGPT analysis
+flagged that the platform's surfacing language did not honor Marshall's
+explicit position that **Effective is the standard**, not a deficiency.
+
+The auto-enrollment **mechanism** was already correct — `autoEnrollForObservation`
+binds the teacher's actual score level as `target_level` so a score of 1 routes
+to the 1 → 2 module and a score of 2 routes to the 2 → 3 module. What changed
+this round was the **language** everywhere a recommendation surfaces.
+
+### New vocabulary
+
+| Term | Trigger | Tone | Surfaces |
+| --- | --- | --- | --- |
+| **Support PD** | Auto-recommended when a teacher scores **exactly 1** (Level 1 → 2) or **exactly 2** (Level 2 → 3) on an indicator | Priority support / growth toward Effective practice | "Recommended for You" card, observation-publish notification |
+| **Stretch PD** | Manual-only — self-selected, coach/appraiser recommended, or surfaced through the library | Optional leadership pathway toward *Highly Effective*; never assigned by the system | "Optional Stretch Growth" card (new), library browse, coach/appraiser dropdown with `[Stretch]` tag |
+
+### Files touched (text-only edits — no migration)
+
+- `src/lib/teacher_labels.ts` — `softenSourceForTeacher` now branches on
+  `source_score_level`: 1 → *"Priority support recommended after a recent
+  observation"*, 2 → *"Growth module recommended to reach Effective practice"*,
+  3 → *"Optional stretch — you are meeting the Marshall standard"*.
+- `src/lib/pd.ts` — `AUTO_ENROLL_THRESHOLD = 2` doc-comment rewritten to clarify
+  that Level 3 NEVER auto-recommends. Notification body in
+  `autoEnrollForObservation` is now score-specific: score-1 teachers see
+  *"Priority support recommended for this element"*; score-2 teachers see
+  *"Growth module recommended to reach Effective practice"*.
+- `src/routes/pd.tsx` — coverage-report footer rewritten with two badges
+  (**Support PD** / **Stretch PD**) and explicit "scored exactly 1 / exactly 2"
+  language. The footer now states that an automatic recommendation at Level 3
+  would unintentionally signal Effective is a deficiency.
+- `src/routes/teacher.tsx` — teacher home splits the "Recommended for You" card
+  into two cards. **Support PD** items (target_level 1 or 2) appear in the
+  primary card with the amber lightbulb caption. **Stretch PD** items
+  (target_level 3) move to a separate "Optional Stretch Growth" card with an
+  indigo `arrow-up-right-dots` icon and an opt-in framing paragraph.
+- `src/routes/appraiser.tsx` — the Recommend Module sidebar now prefixes each
+  dropdown option with `[Support 1→2]`, `[Support 2→3]`, or `[Stretch 3→4]`,
+  and the helper text below the button explains the difference between Support
+  and Stretch recommendations.
+
+### Production status
+
+No new D1 migration required — this round is text/UI only. Build verified at
+**572 kB worker bundle**, zero TypeScript errors. Deployed to
+<https://alexander-marshall-growth.pages.dev>. All 180 active modules
+unaffected; only their *surfacing language* changed.
 
 ---
 
@@ -28,8 +81,10 @@ Bringing total active modules from 120 → **180** (60 × 3 transitions).
   beyond the rubric). The deliverable requires BOTH student-impact evidence
   AND colleague-impact evidence so verification is plural ("students learn,
   colleagues grow, the school is better because you are on the staff").
-- **Manual-only by design**: the auto-enrollment threshold is score ≤ 2, so
-  Level 3 → 4 modules surface through (a) teacher self-selection,
+- **Manual-only by design** ("Stretch PD"): Level 3 → 4 modules are NEVER
+  auto-recommended. Effective is the Marshall standard, so an automatic
+  recommendation at Level 3 would unintentionally signal Effective is a
+  deficiency. Stretch PD surfaces through (a) teacher self-selection,
   (b) coach/appraiser recommendation via Fix 4, or (c) the Fix 9 coverage
   report. This matches the Marshall philosophy that growth past Effective
   is voluntary professional leadership work.
@@ -46,9 +101,10 @@ Bringing total active modules from 120 → **180** (60 × 3 transitions).
 `/admin/pd/coverage` now checks all three transitions:
 - `CROSS JOIN (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3)` instead of just `(1, 2)`
 - Table grows from 2 → 3 status columns
-- Header copy + footnote rewritten to explain that 1 → 2 and 2 → 3 power the
-  auto-recommend engine while 3 → 4 is manual-only for teachers pushing
-  toward Highly Effective
+- Header copy + footnote rewritten to explain that 1 → 2 modules auto-recommend
+  when a teacher scores **exactly 1**, 2 → 3 modules auto-recommend when a
+  teacher scores **exactly 2**, and 3 → 4 modules are manual-only ("Stretch
+  PD") for teachers pushing toward Highly Effective
 - Total cells: indicators × 3 levels (180 total)
 
 ### Production status
@@ -222,9 +278,10 @@ to both the scripted-notes summary and every Next-Step body. Helper
 ### Ground rules honored
 - ✅ Coach permissions unchanged (no scores anywhere in coach views)
 - ✅ Every change additive or in-place; zero prior workflows altered
-- ✅ Auto-enrollment at score ≤ 2, Learn → Practice → Apply gating, scripted-notes
-  autosave, sign-and-acknowledge, forced-first-login password flow — all
-  preserved byte-for-byte
+- ✅ Score-routed auto-enrollment (Support PD for scores of 1 or 2; Stretch PD
+  manual-only), Learn → Practice → Apply gating, scripted-notes autosave,
+  sign-and-acknowledge, forced-first-login password flow — all preserved
+  byte-for-byte
 
 ### Production status
 Live at <https://alexander-marshall-growth.pages.dev> as of June 2, 2026 ·
@@ -297,7 +354,8 @@ applied (31 statements).
 
 ### Preserved (byte-for-byte unchanged)
 - Login, role routing, Marshall rubric structure (60 indicators × 4 levels),
-  auto-enrollment at score ≤ 2 (up to 3 modules per indicator), state-machine
+  score-routed auto-enrollment (Support PD for scores of 1 or 2; up to 3
+  modules per indicator), state-machine
   bridges (`recommended → learn_done`, etc.), scripted-notes autosave,
   sign-and-acknowledge flow, Floating PD Day LMS, reports, notifications,
   tour scripts.

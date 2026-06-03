@@ -24,10 +24,18 @@ export type PDStatus =
   | 'recommended' | 'started' | 'learn_done' | 'practice_done'
   | 'submitted' | 'verified' | 'needs_revision' | 'declined';
 
-// Rule: any observation score at level <= 2 (Improvement Necessary or Does
-// Not Meet) generates a module recommendation. Level 3 & 4 do not, because
-// the teacher is already meeting or exceeding expectations — the library is
-// for growth, not busywork.
+// Rule (Marshall-aligned): only scores of exactly 1 (Does Not Meet) or 2
+// (Improvement Necessary) auto-recommend a module. A score of 1 routes to the
+// Level 1 → 2 module for that indicator; a score of 2 routes to the
+// Level 2 → 3 module — the binding below uses `r.level` directly as
+// target_level so each score lands in its own scaffold.
+//
+// Level 3 (Effective) NEVER auto-recommends. Effective is the Marshall
+// standard, so an auto-recommendation at Level 3 would unintentionally
+// signal that Effective is a deficiency. Level 3 → 4 ("Stretch PD") modules
+// are intentionally manual-only — visible and searchable in the library,
+// self-selectable by the teacher, and recommendable by a coach/appraiser,
+// but never assigned by the system.
 export const AUTO_ENROLL_THRESHOLD = 2;
 
 // --------------------------------------------------------------------------
@@ -61,11 +69,21 @@ export async function autoEnrollForObservation(db: D1Database, observationId: nu
       if ((ins.meta as any)?.changes) {
         created += 1;
         if (env) {
+          // Score-specific tone (Marshall-aligned):
+          //   1 → priority support (below acceptable performance)
+          //   2 → growth toward Effective (the standard)
+          // (Score 3 never reaches this path — AUTO_ENROLL_THRESHOLD = 2.)
+          const body =
+            r.level === 1
+              ? 'Priority support recommended for this element. This research-based module was added to your PD LMS to help you move toward Effective practice.'
+              : r.level === 2
+                ? 'Growth module recommended to reach Effective practice. This research-based module was added to your PD LMS.'
+                : 'A research-based module was added to your PD LMS based on your recent observation.';
           await notify(db, {
             user_id: r.teacher_id,
             kind: 'pd_module_recommended',
             title: `New PD module: ${m.title}`,
-            body: 'Based on your observation scores, this research-based module was added to your PD LMS.',
+            body,
             url: `/teacher/pd`,
             entity_type: 'pd_enrollment', entity_id: m.id,
             actor_user_id: r.appraiser_id,

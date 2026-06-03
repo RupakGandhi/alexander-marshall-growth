@@ -46,17 +46,35 @@ export function softenTitleForTeacher(title?: string | null): string {
  * raw "source level 1" hint with growth-oriented language. Returns null when
  * there is nothing to say (e.g. self-enrolled module) so callers can hide
  * the line entirely instead of rendering an empty pill.
+ *
+ * Marshall-aligned tone (updated June 2026 per Dr. Gandhi / ChatGPT analysis):
+ *   - Score 1  → Priority *support* recommended (corrective, below standard).
+ *   - Score 2  → Growth module recommended to reach *Effective* practice.
+ *   - Score 3  → "Optional stretch" — never auto-assigned. The teacher is
+ *               meeting the Marshall standard; Highly Effective is aspirational,
+ *               not a deficiency. (If a Level 3 → 4 module is ever surfaced as
+ *               auto-source we still soften it as optional/leadership-oriented.)
+ *   - No level → fall back to generic "after a recent observation" wording.
  */
 export function softenSourceForTeacher(
   enrollment: { source?: string | null; source_score_level?: number | null; recommender_first?: string | null; recommender_last?: string | null }
 ): string | null {
   const source = enrollment.source || '';
+  const lvl = typeof enrollment.source_score_level === 'number' ? enrollment.source_score_level : null;
   if (source === 'auto') {
-    // Don't disclose the raw level number — frame it as growth.
+    // Don't disclose the raw level number — frame it as growth, but route the
+    // tone (support vs. stretch) by the score so teachers feel the right signal.
+    if (lvl === 1) return 'Priority support recommended after a recent observation';
+    if (lvl === 2) return 'Growth module recommended to reach Effective practice';
+    if (lvl === 3) return 'Optional stretch — you are meeting the Marshall standard';
     return 'Recommended after a recent observation';
   }
   if (source === 'assigned') {
     const who = [enrollment.recommender_first, enrollment.recommender_last].filter(Boolean).join(' ');
+    // If a coach/appraiser hand-picked a stretch module, honor the leadership framing.
+    if (lvl === 3) {
+      return who ? `Optional stretch — recommended by ${who}` : 'Optional stretch — recommended for you';
+    }
     return who ? `Recommended by ${who}` : 'Recommended for you';
   }
   if (source === 'self') return null; // they picked it themselves — no caption needed
