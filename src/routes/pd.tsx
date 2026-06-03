@@ -489,7 +489,9 @@ adminPd.post('/save', async (c) => {
   const target_level = Number(body.target_level);
   const title = String(body.title || '').trim();
   const subtitle = String(body.subtitle || '').trim() || null;
-  const est = Number(body.est_minutes || 45);
+  // Editor default tracks the Level 2 → 3 tier baseline (the most common
+  // tier). Per the June 2026 recalibration, tier baselines are 45 / 60 / 90.
+  const est = Number(body.est_minutes || 60);
   const research = String(body.research_basis || '').trim() || null;
   const learn = String(body.learn_content || '').trim();
   const practice = String(body.practice_content || '').trim();
@@ -578,7 +580,7 @@ adminPd.post('/import-csv', async (c) => {
       target_level: targetLevel,
       title,
       subtitle: row.subtitle || null,
-      est_minutes: Number(row.est_minutes || 45),
+      est_minutes: Number(row.est_minutes || 60),
       research_basis: row.research_basis || null,
       learn_content: row.learn_content || '',
       practice_content: row.practice_content || '',
@@ -1818,7 +1820,7 @@ function AdminPdEditor({ user, indicators, m }: any) {
         <Card title="Module details" icon="fas fa-heading">
           <div class="grid md:grid-cols-3 gap-3 text-sm">
             <label class="md:col-span-2">Title<input name="title" value={m.title || ''} required class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
-            <label>Estimated minutes<input type="number" name="est_minutes" value={m.est_minutes || 45} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
+            <label>Estimated minutes<input type="number" name="est_minutes" value={m.est_minutes || (Number(m.target_level) === 3 ? 90 : Number(m.target_level) === 1 ? 45 : 60)} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" /></label>
           </div>
           <label class="block mt-3 text-sm">Subtitle<input name="subtitle" value={m.subtitle || ''} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="One-line framing (optional)" /></label>
           <label class="block mt-3 text-sm">Research basis<textarea name="research_basis" rows={3} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" placeholder="Citations / research summary (shown to teacher at top of module).">{m.research_basis || ''}</textarea></label>

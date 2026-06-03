@@ -8,6 +8,55 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 3, 2026] — PD module est_minutes recalibration
+
+Follow-up to Dr. Gandhi's audit of PD module timings. Previous values were
+arbitrary baselines from prior migrations + generator defaults (every module
+within a tier carried the identical estimate, but the per-tier numbers
+themselves — 30 / 45 / 60 — had no learning-design study behind them).
+
+### Migration `0011_pd_est_minutes_recalibration.sql`
+
+Recalibrates all 180 active modules to tier-based estimates that reflect the
+actual 8-step Learn → Practice → Apply scaffold plus deliverable workload:
+
+| Tier | Previous | New | Rationale |
+| --- | --- | --- | --- |
+| Level 1 → 2 (Support, foundational) | 30 min | **45 min** | Learn 10 + Practice scaffolds 15 + classroom Apply + deliverable 20 |
+| Level 2 → 3 (Support, refinement) | 45 min | **60 min** | Same scaffold but expects evidence collection |
+| Level 3 → 4 (Stretch, leadership) | 60 min | **90 min** | Plural deliverable (student-impact + colleague-impact evidence) — closer to 2 hours when honest, 90 is a fair median |
+
+### Decisions captured (per Dr. Gandhi, June 3, 2026)
+
+- **Not tied to ND state PD-hour reporting.** These minutes are a planning
+  aid for the teacher and a default pre-fill for the verifier.
+- **Credit is tied to the deliverable.** Behavior unchanged — `verifyDeliverable`
+  in `src/lib/pd.ts` still gates `hours_credited` at verification time. The
+  verifier can accept the default (est_minutes / 60 rounded to 0.25h),
+  override it, or set 0 to verify without credit.
+- **No phase-minutes column.** The scaffold is constant across modules; adding
+  Learn-min / Practice-min / Apply-min would not earn its complexity.
+
+### Files touched
+
+- `migrations/0011_pd_est_minutes_recalibration.sql` — 3 UPDATE statements
+  (idempotent, scoped to `is_active = 1`).
+- `src/routes/pd.tsx` — editor default for new modules raised from `45` → `60`
+  (the most common tier baseline). The visible "Estimated minutes" field in
+  the module editor now picks the tier-correct default based on `target_level`
+  (45 / 60 / 90) when a value is missing.
+- `scripts/gen_level3_modules.cjs` — generator default for Level 3 → 4
+  modules updated `60` → `90` so re-running the generator stays in sync with
+  the migration.
+
+### Production status
+
+Migration applied to local + remote D1 (`alexander-marshall-growth-production`,
+7ad58a8f-621b-41e8-aa9a-dc27069eb039). All 180 active modules now report new
+tier baselines. Deployed to <https://alexander-marshall-growth.pages.dev>.
+
+---
+
 ## [June 2, 2026 — night] — Support PD vs. Stretch PD language refinement
 
 Follow-up to the Level 3 → 4 release after Dr. Gandhi and ChatGPT analysis

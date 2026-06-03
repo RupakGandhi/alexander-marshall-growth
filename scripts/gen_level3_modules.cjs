@@ -283,7 +283,7 @@ SELECT
   ${id}, 3,
   '${q(title)}',
   '${q(subtitle)}',
-  60,
+  90,  -- Stretch PD tier baseline (Level 3 → 4) per migration 0011 recalibration
   '${q('Saphier — The Skillful Teacher; Marshall Teacher Evaluation Rubric (Highly Effective level); City, Elmore, Fiarman & Teitel — Instructional Rounds.')}',
   '${q(learn)}',
   '${q(practice)}',
