@@ -429,13 +429,13 @@ adminPd.get('/export-csv', async (c) => {
 
 // ----------------------------------------------------------------------------
 // Fix 9 — PD Module Coverage gap report.
-// For every active framework indicator × {target_level 1, target_level 2}
-// (i.e. modules that help 1→2 and 2→3 growth), check whether at least one
-// active pd_module exists. Anything missing is a curriculum gap.
-// We use target_level 1 and 2 because pd_modules.target_level stores the
-// teacher's CURRENT level — a module with target_level=1 helps them grow
-// 1→2; target_level=2 grows 2→3. Level-3 teachers don't need PD modules
-// (they're already proficient), so we don't report 3→4 gaps.
+// For every active framework indicator × {target_level 1, 2, 3} check whether
+// at least one active pd_module exists. Anything missing is a curriculum gap.
+// pd_modules.target_level stores the teacher's CURRENT level — target_level=1
+// helps them grow 1→2 (Does Not Meet → Improvement Necessary), target_level=2
+// grows 2→3 (Improvement Necessary → Effective), target_level=3 grows 3→4
+// (Effective → Highly Effective). Level 3→4 modules are manual-only
+// (auto-enrollment threshold is score ≤ 2) but are essential to the framework.
 // MUST be registered before `/:id` so the literal path wins over the param.
 // ----------------------------------------------------------------------------
 adminPd.get('/coverage', async (c) => {
@@ -453,7 +453,7 @@ adminPd.get('/coverage', async (c) => {
        FROM framework_indicators i
        JOIN framework_domains d ON d.id = i.domain_id
        JOIN frameworks f ON f.id = d.framework_id
-       CROSS JOIN (SELECT 1 AS target_level UNION ALL SELECT 2) tl
+       CROSS JOIN (SELECT 1 AS target_level UNION ALL SELECT 2 UNION ALL SELECT 3) tl
        LEFT JOIN (
          SELECT indicator_id, target_level,
                 COUNT(*) AS module_count,
@@ -1919,16 +1919,17 @@ function PdCoverageReport({ user, rows }: any) {
       <div class="mb-3"><a href="/admin/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>PD Modules</a></div>
       <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-list-check mr-2"></i>PD Module Coverage Report</h1>
       <p class="text-slate-600 text-sm mb-4">
-        Every active indicator needs at least one PD module for each growth step (Level 1 → 2 and Level 2 → 3).
-        Red cells below show curriculum gaps that should be filled before launch so the auto-recommend engine
-        always has something to surface when a teacher scores at Level 1 or 2.
+        Every active indicator needs at least one PD module for each of the three growth steps in the Marshall rubric
+        (Level 1 → 2, Level 2 → 3, Level 3 → 4). Red cells below show curriculum gaps. Levels 1 → 2 and 2 → 3 power the
+        auto-recommend engine when a teacher scores at Level 1 or 2; Level 3 → 4 is manual-only and supports teachers
+        pushing toward <em>Highly Effective</em> through self-selection or coach/appraiser recommendation.
       </p>
 
       <div class="grid sm:grid-cols-4 gap-3 mb-4">
         <div class="rounded-md border border-slate-200 bg-white p-3">
           <div class="text-xs text-slate-500">Total growth-step combinations</div>
           <div class="text-2xl font-bold text-aps-navy">{totalCells}</div>
-          <div class="text-xs text-slate-500">indicators × 2 levels</div>
+          <div class="text-xs text-slate-500">indicators × 3 levels</div>
         </div>
         <div class="rounded-md border border-emerald-200 bg-emerald-50 p-3">
           <div class="text-xs text-emerald-700">Covered</div>
@@ -1951,7 +1952,7 @@ function PdCoverageReport({ user, rows }: any) {
       {Array.from(byDomain.values()).map((dom) => {
         const indicators = Array.from(dom.indicators.values());
         const domGaps = indicators.reduce((s: number, ind: any) =>
-          s + ([1, 2].filter((l) => !ind.levels[l] || ind.levels[l].count === 0).length), 0);
+          s + ([1, 2, 3].filter((l) => !ind.levels[l] || ind.levels[l].count === 0).length), 0);
         return (
           <details id={`cov-domain-${dom.code}`} data-domain-section={dom.code} open class="scroll-mt-32 mt-3 bg-white rounded-lg border border-slate-200">
             <summary class="cursor-pointer px-4 py-3 font-display text-aps-navy flex items-center justify-between gap-2">
@@ -1962,13 +1963,14 @@ function PdCoverageReport({ user, rows }: any) {
             </summary>
             <div class="px-4 pb-4">
               <div class="overflow-x-auto">
-                <table class="w-full text-sm">
+                <table class="w-full text-sm min-w-[640px]">
                   <thead>
                     <tr class="text-left border-b border-slate-200 text-slate-600">
                       <th class="py-2 w-10"></th>
                       <th>Indicator</th>
-                      <th class="text-center w-44">Level 1 → 2</th>
-                      <th class="text-center w-44">Level 2 → 3</th>
+                      <th class="text-center w-40">Level 1 → 2</th>
+                      <th class="text-center w-40">Level 2 → 3</th>
+                      <th class="text-center w-40">Level 3 → 4</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1976,7 +1978,7 @@ function PdCoverageReport({ user, rows }: any) {
                       <tr class="border-b border-slate-100 align-top">
                         <td class="py-2 font-medium text-aps-navy">{(ind.code || '').toUpperCase()}</td>
                         <td class="py-2">{ind.name}</td>
-                        {[1, 2].map((lvl) => {
+                        {[1, 2, 3].map((lvl) => {
                           const cell = ind.levels[lvl];
                           const count = cell ? cell.count : 0;
                           return (
@@ -2006,8 +2008,9 @@ function PdCoverageReport({ user, rows }: any) {
       <p class="text-[11px] text-slate-500 mt-4">
         <i class="fas fa-circle-info mr-1"></i>
         Coverage report counts only modules where <code>is_active = 1</code>. Modules can be toggled active/inactive on the
-        <a href="/admin/pd" class="text-aps-blue hover:underline"> PD Modules list</a>. Level 3 → 4 growth is intentionally excluded —
-        Level-3 teachers are at the "Effective" rubric tier and don't trigger auto-recommendations.
+        <a href="/admin/pd" class="text-aps-blue hover:underline"> PD Modules list</a>. Level 1 → 2 and Level 2 → 3 modules are
+        auto-recommended when a teacher scores at Level 1 or 2 on an observation. Level 3 → 4 modules are manual-only —
+        teachers self-select them when pushing toward <em>Highly Effective</em>, or a coach/appraiser recommends them.
       </p>
     </Layout>
   );

@@ -7,6 +7,58 @@ permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 2, 2026 — late evening] — Level 3 → 4 PD modules (full Marshall coverage)
+
+Same-day follow-up after Dr. Gandhi flagged that the Marshall framework has
+**three** growth transitions per indicator (1 → 2, 2 → 3, 3 → 4), but the
+platform only carried modules for the first two. The Level 3 → 4 (Effective →
+Highly Effective) tier was missing.
+
+### Migration `0010_level3_pd_modules.sql`
+Adds 60 new PD modules — one per Marshall indicator — at `target_level = 3`.
+Bringing total active modules from 120 → **180** (60 × 3 transitions).
+
+- **Same content scaffold** as the existing 120 modules: 8-step Learn →
+  Practice → Apply, scripted-moments section, deliverable prompt, supervisor
+  rubric, three curated research resources (Saphier, Marshall, City/Elmore).
+- **Reframed for Highly Effective**: Level 3 → 4 modules are not "do more of
+  the same." They prompt teachers through four leadership pathways —
+  **Model** (invite a colleague to observe), **Coach** (run a coaching cycle),
+  **Publish** (build a shareable artifact), or **Innovate** (try a move
+  beyond the rubric). The deliverable requires BOTH student-impact evidence
+  AND colleague-impact evidence so verification is plural ("students learn,
+  colleagues grow, the school is better because you are on the staff").
+- **Manual-only by design**: the auto-enrollment threshold is score ≤ 2, so
+  Level 3 → 4 modules surface through (a) teacher self-selection,
+  (b) coach/appraiser recommendation via Fix 4, or (c) the Fix 9 coverage
+  report. This matches the Marshall philosophy that growth past Effective
+  is voluntary professional leadership work.
+- **Idempotent**: each INSERT is guarded by
+  `NOT EXISTS WHERE indicator_id = ? AND target_level = 3 AND title LIKE 'Level 3 → 4:%'`.
+- Titles use the same sentence-case Marshall-aligned pattern as migration
+  0009 — verbs match what Highly Effective looks like for THAT indicator
+  (Modeling, Coaching, Publishing, Leading, Mentoring, Becoming the colleague
+  leadership counts on, etc.).
+- Module generation script committed at `scripts/gen_level3_modules.cjs` so
+  the 60 modules can be re-derived or extended.
+
+### Fix 9 coverage report extended to Level 3 → 4
+`/admin/pd/coverage` now checks all three transitions:
+- `CROSS JOIN (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3)` instead of just `(1, 2)`
+- Table grows from 2 → 3 status columns
+- Header copy + footnote rewritten to explain that 1 → 2 and 2 → 3 power the
+  auto-recommend engine while 3 → 4 is manual-only for teachers pushing
+  toward Highly Effective
+- Total cells: indicators × 3 levels (180 total)
+
+### Production status
+Re-deployed `dd546599` at <https://alexander-marshall-growth.pages.dev> with
+migration 0010 applied to remote D1 (61 commands). 572.50 kB worker bundle.
+Total active PD modules: **180** (60 × 3 transitions). Zero coverage gaps
+across all three growth steps.
+
+---
+
 ## [June 2, 2026 — evening] — Post-launch polish (PD title rewrite + mobile)
 
 Same-day follow-up after Dr. Gandhi reviewed the PD module library and flagged:
