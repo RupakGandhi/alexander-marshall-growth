@@ -7,6 +7,124 @@ permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 2, 2026] — Leadership-Meeting Upgrade (11 fixes for Aug 16 launch)
+
+Live at <https://alexander-marshall-growth.pages.dev>. Migration `0008_june_2026_upgrade.sql`
+applied to remote D1 (31 statements: new tables `external_pd_submissions`,
+`teacher_goals`, `admin_audit_log`, `system_settings`; new columns `deleted_at` on
+`observations`, `pd_enrollments`, `pd_deliverables`, `external_pd_submissions`,
+`teacher_goals`; seeded `pd_hours_target_annual = 22.5`).
+
+### Fix 1 — Tabbed Domain Navigation
+Sticky pill-bar tab navigation by framework domain on every long indicator-list
+page (observation editor, pedagogy library, PD coverage). Pure HTML + tiny
+IntersectionObserver script so it degrades gracefully when JS is off. Shared
+`<DomainTabs>` component in `src/lib/layout.tsx`.
+
+### Fix 2 — Softer Growth-Oriented Language for Teachers
+New `src/lib/teacher_labels.ts` exports `softenTitleForTeacher`,
+`softenSourceForTeacher`, `hideGrowthSignalsForTeacher`. Teachers no longer see
+the words "Growth Plan", "Growth Signal", or "Auto-enrolled" — those become
+"Recommended for You", "Suggested for You", and "Suggested by your evaluation".
+Coach + appraiser + admin views are unchanged.
+
+### Fix 3 — Teacher PDF Export of PD Plan
+`/teacher/pd/print` renders an A4-friendly print view that uses the browser's
+own Print → Save-as-PDF (no wkhtmltopdf — Workers can't run binaries). One-click
+button on `/teacher/pd`.
+
+### Fix 4 — Manual Recommendation System
+Coaches and principals can now explicitly recommend a PD module to a teacher,
+bypassing the auto-enrollment-at-score-≤-2 path. New `recommendModule()` in
+`src/lib/pd.ts`; sidebar form on `/appraiser/teachers/:id` and
+`/coach/teachers/:id`. Coach permission boundary preserved: coach sees no scores.
+Teacher receives a notification + a "Recommended for You" card on /teacher.
+
+### Fix 5 — External PD Submission + Approval Workflow
+New `external_pd_submissions` table. Teachers submit external PD (conferences,
+workshops, certifications) at `/teacher/pd/external` with title, provider,
+hours, evidence URL, and reflection. Appraisers review at
+`/appraiser/external-pd` and `/appraiser/external-pd/:id` with three actions:
+**Approve & credit hours** (sets `approved_hours`), **Ask for revision**, or
+**Decline**. Admin audit view at `/admin/external-pd` (read-only, district-wide).
+
+### Fix 6 — Unified PD Hours Tracking Heat-Map
+Shared `<PDHoursHeatMap>` widget in `src/lib/layout.tsx` renders one card per
+teacher with a progress bar split into internal (verified PD) + external
+(approved PD) hours and a color-class tier (`met` ≥ 100% green, `near` ≥ 66%
+amber, `mid` ≥ 33% sky, `low` < 33% red). Visible on:
+- Superintendent home (`/superintendent`)
+- Appraiser home (`/appraiser`) for assigned teachers only
+- Teacher home (`/teacher`, self-view, hides peer rankings)
+
+Annual target stored in `system_settings` (`pd_hours_target_annual`), editable
+by super-admins at `/admin/settings/pd-hours`.
+
+### Fix 7 — Approve & Credit Hours Gate
+`verifyDeliverable()` now takes an optional `creditHours` argument (0.25-hour
+rounding, 0-100 range cap). On `/pd/review/:id`, verifying a deliverable now
+shows an **"Approve & credit hours"** green button alongside the amber **"Ask
+for revision"** button — the credited hours flow directly into the Fix 6 heat-map
+and the teacher's notification.
+
+### Fix 8 — Mass Delete + Practice Reset Tooling
+`/admin/data` (also reachable at `/admin/data-management`) expanded with:
+- **Soft-delete toggle** (default ON) — writes `deleted_at = CURRENT_TIMESTAMP`
+  instead of hard DELETE on every action below. Toggleable per-district.
+- **Filtered delete** — school × date range × observer role filters, with a
+  preview-then-delete flow and `DELETE FILTERED` phrase guard. Chunks IN-lists
+  by 100 ids for D1 safety.
+- **Restore** — any soft-deleted observation can be restored from the table.
+- **Reset practice data** — wipes `pd_enrollments`, `pd_deliverables`,
+  `external_pd_submissions`, and `teacher_goals` without touching observations;
+  `RESET PRACTICE DATA` phrase guard.
+- **Existing clear-observations + clear-all-demo** kept exactly as before; the
+  first now honors the soft-delete toggle, the second always hard-wipes (it is
+  the pre-handover button by design).
+- **Admin audit log** — every destructive action is recorded in
+  `admin_audit_log` with `actor_user_id`, `action`, `entity_type`, `entity_ids`
+  (JSON, first 100 for bulk), `row_count`, `filters` (JSON), `detail`, `ip`,
+  `user_agent`. Last-25 preview on `/admin/data`, full 200-row viewer at
+  `/admin/data/audit-log`.
+
+### Fix 9 — PD Module Coverage Gap Report
+New super-admin route `/admin/pd/coverage` (registered **before** `/:id` per
+Hono route precedence). `CROSS JOIN framework_indicators × {1,2} target_level`
+surfaces every indicator-level pair that has zero published modules. Sticky
+`<DomainTabs>` nav + per-domain `<details>` cards with red/green pills for
+Level 1→2 and Level 2→3 coverage.
+
+### Fix 10 — Teacher Personal Goal Tracking
+New `teacher_goals` table. Teachers create up to 5 self-directed goals at
+`/teacher/goals` (title, description, target date, indicator link, status:
+`active | met | paused`). Appraisers see read-only goals on
+`/appraiser/teachers/:id`. Notifications fire when a goal is marked **Met**.
+
+### Fix 11 — Context-Aware Auto-Feedback
+`POST /appraiser/observations/:id/generate-feedback` now reads the teacher's
+`subject_area`, `classroom_type`, `grade_band` from the `users` table and
+prepends a one-line context note ("Grade-band: 9-12, Self-contained ELA")
+to both the scripted-notes summary and every Next-Step body. Helper
+`teacherContextNote()` in `src/lib/db.ts`.
+
+### Bug fixes
+- `appraiser.tsx` + `coach.tsx`: `WHERE m.active = 1` → `WHERE m.is_active = 1`
+  (matches `pd_modules` schema from migration `0003_notifications_and_pd.sql`).
+
+### Ground rules honored
+- ✅ Coach permissions unchanged (no scores anywhere in coach views)
+- ✅ Every change additive or in-place; zero prior workflows altered
+- ✅ Auto-enrollment at score ≤ 2, Learn → Practice → Apply gating, scripted-notes
+  autosave, sign-and-acknowledge, forced-first-login password flow — all
+  preserved byte-for-byte
+
+### Production status
+Live at <https://alexander-marshall-growth.pages.dev> as of June 2, 2026 ·
+deployment `3f3674ea` · 19 assets · 572.05 kB worker bundle · D1 migration 0008
+applied (31 statements).
+
+---
+
 ## [April 23, 2026] — Evidence-based PD Enrichment
 
 ### Added

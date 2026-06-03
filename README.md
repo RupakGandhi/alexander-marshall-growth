@@ -1,5 +1,40 @@
 # Alexander Public Schools — Marshall Growth Platform
 
+> **Production**: <https://alexander-marshall-growth.pages.dev> · **Launch target**: August 16, 2026 (FIRM)
+> **Last deploy**: June 2, 2026 — 11 leadership-meeting fixes shipped (see CHANGELOG.md)
+
+## ⭐ What's New (June 2 2026 upgrade — 11 leadership-meeting fixes for Aug 16 launch)
+
+This round implements the 11 fixes identified in the June 2, 2026 leadership
+meeting with Alexander Public Schools. All prior workflows (auto-save,
+Learn → Practice → Apply gating, auto-enrollment at score ≤ 2, dashboards, role
+permissions, forced-first-login password flow, sign-and-acknowledge, Floating
+PD Day LMS, observation editor, PD review queue, Pedagogy Library refresh, PD
+module enrichment, evidence-based deliverable rubric — see prior sections
+below) are preserved byte-for-byte. **Coach permissions unchanged: coaches
+never see scores.**
+
+### The 11 fixes (full detail in CHANGELOG.md)
+1. **Tabbed Domain Navigation** — sticky pill-bar nav by framework domain
+2. **Softer Growth-Oriented Language for Teachers** — "Recommended for You" not "Growth Plan"
+3. **Teacher PDF Export of PD Plan** — browser print-to-PDF at `/teacher/pd/print`
+4. **Manual Recommendation System** — coaches + principals can recommend a PD module directly
+5. **External PD Submission + Approval Workflow** — teachers submit external PD; appraisers approve & credit hours
+6. **Unified PD Hours Tracking Heat-Map** — internal + external hours per teacher with color tiers
+7. **Approve & Credit Hours Gate** — verifying a deliverable now credits PD hours to the heat-map
+8. **Mass Delete + Practice Reset Tooling** — `/admin/data` with soft-delete toggle, filtered delete, reset practice data, audit log
+9. **PD Module Coverage Gap Report** — `/admin/pd/coverage` indicator × target-level gap analysis
+10. **Teacher Personal Goal Tracking** — `/teacher/goals` with up to 5 self-directed goals
+11. **Context-Aware Auto-Feedback** — feedback generator prepends teacher subject/grade/classroom context
+
+### Schema changes (migration `0008_june_2026_upgrade.sql`, applied to remote D1)
+- **New tables**: `external_pd_submissions`, `teacher_goals`, `admin_audit_log`, `system_settings`
+- **New columns**: `deleted_at TEXT` on `observations`, `pd_enrollments`, `pd_deliverables`, `external_pd_submissions`, `teacher_goals`
+- **Seeded settings**: `pd_hours_target_annual = 22.5` (admin-editable at `/admin/settings/pd-hours`)
+- **Indexes**: 6 new indexes for the soft-delete + audit-log + external-PD queries
+
+---
+
 ## ⭐ What's New (April 23 2026 upgrade — evidence-based PD enrichment)
 
 This round implements the specification in `Teacher Evaluation System.pdf` (see `seed/rubric_improvement_suggestions.csv` for the anchor data). **All existing workflows — auto-save, Learn → Practice → Apply phase gating, auto-enrollment at score ≤ 2, dashboards, role permissions, and the forced-first-login password flow — are preserved exactly as they were.** What changed:
