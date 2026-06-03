@@ -8,6 +8,43 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 3, 2026 — evening] — Second verification pass: two blockers cleared
+
+Triggered by a second pre-launch verification report (ChatGPT retest as Dr. Rupak Gandhi).
+The afternoon fix shipped exports + discoverability quick links; this evening pass
+closes the remaining two blockers the retest surfaced.
+
+### Findings actioned
+
+| # | Finding | Status | Action |
+| --- | --- | --- | --- |
+| B1 | `/admin/data` returns Internal Server Error (`D1_ERROR: no such column: o.school_id`) | 🔴 Real blocker | **Fixed** — query rewritten to join through `users t` and read `t.school_id` (the `observations` table never had a `school_id` column — affiliation flows via the teacher) |
+| B2 | Admin user edit form missing Fix 11 fields (subject area / classroom type / grade band) | 🔴 Real blocker | **Fixed** — create + edit forms now expose all three; POST handlers persist them; existing `teacherContextNote()` consumer in `db.ts` immediately picks them up |
+| HM | Heat-map CSV/Print export buttons "missing" | ❓ False alarm | Verified buttons render in production header for both appraiser and superintendent views; tester missed them visually |
+
+### Files touched (no schema change — fields already exist from migration 0008)
+
+- `src/routes/admin.tsx`
+  - `recentObs` query (BLOCKER 1) — replaced `o.school_id` with `t.school_id` and re-routed `LEFT JOIN schools` through the teacher
+  - filtered-delete WHERE/SELECT (BLOCKER 1) — added `JOIN users t ON t.id = o.teacher_id`; school filter now uses `t.school_id = ?`
+  - `POST /users/create` (BLOCKER 2) — accepts `subject_area`, `classroom_type`, `grade_band`; INSERT extended to persist them
+  - `POST /users/:id/update` (BLOCKER 2) — accepts the same three fields; UPDATE extended; activity log records them
+  - "Create user" card (BLOCKER 2) — new `<input>` (with `<datalist>` of common subjects) + two `<select>` dropdowns
+  - Inline edit form per user row (BLOCKER 2) — same three fields, pre-populated from `u.subject_area / u.classroom_type / u.grade_band`
+
+### Verified end-to-end (local D1)
+
+```text
+GET  /admin/data                  → HTTP 200 (was 500)
+GET  /admin/data?school_id=1      → HTTP 200 (filter path also fixed)
+GET  /admin/users                 → renders 13 sets of (subject_area, classroom_type, grade_band) form controls — 1 create form + 12 user rows
+POST /admin/users/10/update       → fields persisted: NULL,NULL,NULL → Mathematics,departmentalized,6-8
+```
+
+No migration; no behavior change for any teacher / appraiser / coach / superintendent surface. Build: 587.29 kB worker bundle, 0 TypeScript errors.
+
+---
+
 ## [June 3, 2026 — afternoon] — Pre-launch verification fixes
 
 Round of fixes triggered by a comprehensive pre-launch verification report

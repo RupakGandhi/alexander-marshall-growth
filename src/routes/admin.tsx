@@ -75,13 +75,19 @@ app.post('/users/create', async (c) => {
   const phone = String(body.phone || '').trim() || null;
   const schoolIds = parseMultiIds(body.school_ids);
   const pw = String(body.password || 'Alexander2026!');
+  // June 3, 2026 — Fix 11 (completion): admin can now set classroom context
+  // (subject_area / classroom_type / grade_band) directly when creating users.
+  // These feed the context-aware auto-feedback generator (db.ts:teacherContextNote).
+  const subjectArea    = String(body.subject_area || '').trim() || null;
+  const classroomType  = String(body.classroom_type || '').trim() || null;
+  const gradeBand      = String(body.grade_band || '').trim() || null;
   if (!email || !first || !last || !role) return c.redirect('/admin/users?msg=Missing+fields');
   const hash = await hashPassword(pw);
   try {
     const res = await c.env.DB.prepare(
-      `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`
-    ).bind(schoolIds[0] || null, email, hash, first, last, role, title, phone).run();
+      `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password, subject_area, classroom_type, grade_band)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`
+    ).bind(schoolIds[0] || null, email, hash, first, last, role, title, phone, subjectArea, classroomType, gradeBand).run();
     const newId = Number((res.meta as any)?.last_row_id);
     if (schoolIds.length) await setUserSchools(c.env.DB, newId, schoolIds);
     await logActivity(c.env.DB, user.id, 'user', newId, 'create_user', { email, role, schoolIds });
@@ -112,11 +118,17 @@ app.post('/users/:id/update', async (c) => {
   const phone = String(body.phone || '').trim() || null;
   const schoolIds = parseMultiIds(body.school_ids);
   const active = body.active ? 1 : 0;
+  // June 3, 2026 — Fix 11 (completion): persist classroom-context fields.
+  // Pre-launch verification report flagged these as missing from the edit form.
+  // Empty string → NULL so admins can clear the value if a teacher changes assignment.
+  const subjectArea    = String(body.subject_area || '').trim() || null;
+  const classroomType  = String(body.classroom_type || '').trim() || null;
+  const gradeBand      = String(body.grade_band || '').trim() || null;
   await c.env.DB.prepare(
-    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(first, last, email, role, title, phone, active, id).run();
+    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, active=?, subject_area=?, classroom_type=?, grade_band=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(first, last, email, role, title, phone, active, subjectArea, classroomType, gradeBand, id).run();
   await setUserSchools(c.env.DB, id, schoolIds);
-  await logActivity(c.env.DB, user.id, 'user', id, 'update_user', { schoolIds });
+  await logActivity(c.env.DB, user.id, 'user', id, 'update_user', { schoolIds, subjectArea, classroomType, gradeBand });
   return c.redirect('/admin/users?msg=Updated');
 });
 
@@ -981,15 +993,21 @@ app.get('/data', async (c) => {
   ).first<any>();
 
   // Recent observations table — show both live + soft-deleted so admin can restore visibility.
+  // NOTE: `observations` has NO school_id column. School affiliation comes from the
+  // teacher's primary school (users.school_id). Previously this query joined on
+  // `o.school_id` which crashed the entire page with D1_ERROR: no such column.
+  // Reported by the June 3, 2026 pre-launch verification report. Fix: join through
+  // the teacher (users t) to schools.
   const recentObs = await c.env.DB.prepare(
-    `SELECT o.id, o.observation_type, o.observed_at, o.status, o.deleted_at, o.school_id,
+    `SELECT o.id, o.observation_type, o.observed_at, o.status, o.deleted_at,
+            t.school_id AS school_id,
             t.first_name AS t_first, t.last_name AS t_last,
             a.first_name AS a_first, a.last_name AS a_last, a.role AS a_role,
             s.name AS school_name
      FROM observations o
      JOIN users t ON t.id = o.teacher_id
      JOIN users a ON a.id = o.appraiser_id
-     LEFT JOIN schools s ON s.id = o.school_id
+     LEFT JOIN schools s ON s.id = t.school_id
      ORDER BY o.observed_at DESC
      LIMIT 200`
   ).all();
@@ -1095,9 +1113,12 @@ app.post('/data/filtered-delete', async (c) => {
   }
 
   // Build WHERE clause.
+  // School filter: observations have no school_id column — affiliation comes
+  // from the teacher's users.school_id. We always JOIN users t so the same
+  // alias is available whether or not the school filter is in play.
   const conds: string[] = ['o.deleted_at IS NULL'];
   const binds: any[] = [];
-  if (schoolId) { conds.push('o.school_id = ?'); binds.push(schoolId); }
+  if (schoolId) { conds.push('t.school_id = ?'); binds.push(schoolId); }
   if (dateFrom) { conds.push('date(o.observed_at) >= date(?)'); binds.push(dateFrom); }
   if (dateTo)   { conds.push('date(o.observed_at) <= date(?)'); binds.push(dateTo); }
   if (obsRole && (obsRole === 'appraiser' || obsRole === 'coach' || obsRole === 'superintendent')) {
@@ -1107,7 +1128,11 @@ app.post('/data/filtered-delete', async (c) => {
 
   // Preview matching ids first (for audit trail + row count cap).
   const matchedRes = await c.env.DB.prepare(
-    `SELECT o.id FROM observations o JOIN users a ON a.id = o.appraiser_id WHERE ${whereSql} LIMIT 5000`
+    `SELECT o.id
+       FROM observations o
+       JOIN users a ON a.id = o.appraiser_id
+       JOIN users t ON t.id = o.teacher_id
+      WHERE ${whereSql} LIMIT 5000`
   ).bind(...binds).all();
   const matched = ((matchedRes.results as any[]) || []).map(r => Number(r.id));
   if (matched.length === 0) {
@@ -1457,6 +1482,44 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
               {schools.map((s: any) => <option value={s.id}>{s.name}</option>)}
             </select>
           </label>
+          {/* June 3, 2026 — Fix 11 completion: classroom context fields surfaced
+              on the admin user form so the auto-feedback generator can produce
+              context-aware language. All three are optional. */}
+          <label>Subject area <span class="text-xs text-slate-500">(teachers only)</span>
+            <input name="subject_area" list="subject-area-options" placeholder="e.g., Mathematics, ELA, Self-contained Elementary" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5" />
+          </label>
+          <label>Classroom type
+            <select name="classroom_type" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
+              <option value="">— Not specified —</option>
+              <option value="self_contained">Self-contained</option>
+              <option value="departmentalized">Departmentalized</option>
+              <option value="specials">Specials / Electives</option>
+              <option value="intervention">Intervention / Support</option>
+            </select>
+          </label>
+          <label>Grade band
+            <select name="grade_band" class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5">
+              <option value="">— Not specified —</option>
+              <option value="K-2">K–2</option>
+              <option value="3-5">3–5</option>
+              <option value="6-8">6–8</option>
+              <option value="9-12">9–12</option>
+            </select>
+          </label>
+          <datalist id="subject-area-options">
+            <option value="ELA" />
+            <option value="Mathematics" />
+            <option value="Science" />
+            <option value="Social Studies" />
+            <option value="Self-contained Elementary" />
+            <option value="Special Education" />
+            <option value="World Languages" />
+            <option value="Physical Education" />
+            <option value="Music" />
+            <option value="Art" />
+            <option value="CTE" />
+            <option value="Counseling" />
+          </datalist>
           <div class="md:col-span-4"><button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Create user</button></div>
         </form>
       </Card>
@@ -1501,6 +1564,44 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                       <label class="md:col-span-2">Schools <span class="text-[10px] text-slate-500">(hold Ctrl/⌘ for multi — first = primary)</span>
                         <select name="school_ids" multiple size={Math.min(5, Math.max(3, schools.length))} class="mt-1 w-full border rounded px-1 py-1">
                           {schools.map((s: any) => <option value={s.id} selected={(u.schools || []).some((x: any) => x.school_id === s.id)}>{s.name}</option>)}
+                        </select>
+                      </label>
+                      {/* June 3, 2026 — Fix 11 completion: classroom context on edit form.
+                          Pre-launch verification report flagged these as missing. They feed
+                          the context-aware auto-feedback generator (teacherContextNote). */}
+                      <label>Subject area
+                        <input name="subject_area" value={u.subject_area || ''} list={`subj-opts-${u.id}`} placeholder="e.g., Mathematics" class="mt-1 w-full border rounded px-1 py-1" />
+                        <datalist id={`subj-opts-${u.id}`}>
+                          <option value="ELA" />
+                          <option value="Mathematics" />
+                          <option value="Science" />
+                          <option value="Social Studies" />
+                          <option value="Self-contained Elementary" />
+                          <option value="Special Education" />
+                          <option value="World Languages" />
+                          <option value="Physical Education" />
+                          <option value="Music" />
+                          <option value="Art" />
+                          <option value="CTE" />
+                          <option value="Counseling" />
+                        </datalist>
+                      </label>
+                      <label>Classroom type
+                        <select name="classroom_type" class="mt-1 w-full border rounded px-1 py-1">
+                          <option value="" selected={!u.classroom_type}>— Not specified —</option>
+                          <option value="self_contained" selected={u.classroom_type==='self_contained'}>Self-contained</option>
+                          <option value="departmentalized" selected={u.classroom_type==='departmentalized'}>Departmentalized</option>
+                          <option value="specials" selected={u.classroom_type==='specials'}>Specials / Electives</option>
+                          <option value="intervention" selected={u.classroom_type==='intervention'}>Intervention / Support</option>
+                        </select>
+                      </label>
+                      <label>Grade band
+                        <select name="grade_band" class="mt-1 w-full border rounded px-1 py-1">
+                          <option value="" selected={!u.grade_band}>— Not specified —</option>
+                          <option value="K-2" selected={u.grade_band==='K-2'}>K–2</option>
+                          <option value="3-5" selected={u.grade_band==='3-5'}>3–5</option>
+                          <option value="6-8" selected={u.grade_band==='6-8'}>6–8</option>
+                          <option value="9-12" selected={u.grade_band==='9-12'}>9–12</option>
                         </select>
                       </label>
                       <label class="flex items-center gap-2 mt-5"><input type="checkbox" name="active" checked={!!u.active} /> Active</label>
