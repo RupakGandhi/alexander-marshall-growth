@@ -75,7 +75,7 @@ app.get('/teachers/:id', async (c) => {
        FROM pd_modules m
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains    d ON d.id = i.domain_id
-      WHERE m.active = 1
+      WHERE m.is_active = 1
       ORDER BY d.sort_order, i.sort_order, m.target_level, m.title`
   ).all();
   const msg = c.req.query('msg');

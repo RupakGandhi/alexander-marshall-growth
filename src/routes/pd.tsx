@@ -427,6 +427,47 @@ adminPd.get('/export-csv', async (c) => {
   });
 });
 
+// ----------------------------------------------------------------------------
+// Fix 9 — PD Module Coverage gap report.
+// For every active framework indicator × {target_level 1, target_level 2}
+// (i.e. modules that help 1→2 and 2→3 growth), check whether at least one
+// active pd_module exists. Anything missing is a curriculum gap.
+// We use target_level 1 and 2 because pd_modules.target_level stores the
+// teacher's CURRENT level — a module with target_level=1 helps them grow
+// 1→2; target_level=2 grows 2→3. Level-3 teachers don't need PD modules
+// (they're already proficient), so we don't report 3→4 gaps.
+// MUST be registered before `/:id` so the literal path wins over the param.
+// ----------------------------------------------------------------------------
+adminPd.get('/coverage', async (c) => {
+  const user = c.get('user')!;
+  // One row per (indicator, target_level) crossed with the existence of an
+  // active module at that combo. LEFT JOIN so missing combos appear with
+  // module_count=0.
+  const rows = await c.env.DB.prepare(
+    `SELECT d.code AS domain_code, d.name AS domain_name, d.sort_order AS d_sort,
+            i.id AS indicator_id, i.code AS indicator_code, i.name AS indicator_name,
+            i.sort_order AS i_sort,
+            tl.target_level,
+            COALESCE(mc.module_count, 0) AS module_count,
+            mc.titles
+       FROM framework_indicators i
+       JOIN framework_domains d ON d.id = i.domain_id
+       JOIN frameworks f ON f.id = d.framework_id
+       CROSS JOIN (SELECT 1 AS target_level UNION ALL SELECT 2) tl
+       LEFT JOIN (
+         SELECT indicator_id, target_level,
+                COUNT(*) AS module_count,
+                GROUP_CONCAT(title, ' | ') AS titles
+           FROM pd_modules
+           WHERE is_active = 1
+           GROUP BY indicator_id, target_level
+       ) mc ON mc.indicator_id = i.id AND mc.target_level = tl.target_level
+       WHERE f.is_active = 1
+       ORDER BY d.sort_order, i.sort_order, tl.target_level`
+  ).all();
+  return c.html(<PdCoverageReport user={user} rows={(rows.results as any[]) || []} />);
+});
+
 adminPd.get('/:id', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
@@ -1833,6 +1874,141 @@ function AdminPdEditor({ user, indicators, m }: any) {
           <a href="/admin/pd" class="text-sm text-slate-500 hover:underline">Cancel</a>
         </div>
       </form>
+    </Layout>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Fix 9 view — PD Module Coverage gap report.
+// Groups rows by domain (DomainTabs sticky nav so admins can jump). Each
+// indicator shows two pills (1→2 and 2→3); missing pills are red, present
+// pills are green with a sample title. Bottom strip lists raw gap count.
+// ----------------------------------------------------------------------------
+
+function PdCoverageReport({ user, rows }: any) {
+  // Group rows by domain code for the sticky-tab layout.
+  const byDomain = new Map<string, { code: string; name: string; indicators: Map<number, any> }>();
+  for (const r of rows) {
+    if (!byDomain.has(r.domain_code)) {
+      byDomain.set(r.domain_code, { code: r.domain_code, name: r.domain_name, indicators: new Map() });
+    }
+    const dom = byDomain.get(r.domain_code)!;
+    if (!dom.indicators.has(r.indicator_id)) {
+      dom.indicators.set(r.indicator_id, {
+        id: r.indicator_id,
+        code: r.indicator_code,
+        name: r.indicator_name,
+        levels: {} as Record<number, { count: number; titles: string | null }>,
+      });
+    }
+    dom.indicators.get(r.indicator_id)!.levels[r.target_level] = {
+      count: Number(r.module_count || 0),
+      titles: r.titles || null,
+    };
+  }
+  const domains = Array.from(byDomain.values()).map(d => ({ id: d.code, code: d.code, name: `${d.code}. ${d.name}` }));
+
+  // Totals for the header summary.
+  const totalCells = rows.length;
+  const missingCells = rows.filter((r: any) => Number(r.module_count || 0) === 0).length;
+  const coveredCells = totalCells - missingCells;
+  const coveragePct = totalCells > 0 ? Math.round((coveredCells / totalCells) * 100) : 0;
+
+  return (
+    <Layout title="PD Module Coverage" user={user} activeNav="admin-pd">
+      <div class="mb-3"><a href="/admin/pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>PD Modules</a></div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-list-check mr-2"></i>PD Module Coverage Report</h1>
+      <p class="text-slate-600 text-sm mb-4">
+        Every active indicator needs at least one PD module for each growth step (Level 1 → 2 and Level 2 → 3).
+        Red cells below show curriculum gaps that should be filled before launch so the auto-recommend engine
+        always has something to surface when a teacher scores at Level 1 or 2.
+      </p>
+
+      <div class="grid sm:grid-cols-4 gap-3 mb-4">
+        <div class="rounded-md border border-slate-200 bg-white p-3">
+          <div class="text-xs text-slate-500">Total growth-step combinations</div>
+          <div class="text-2xl font-bold text-aps-navy">{totalCells}</div>
+          <div class="text-xs text-slate-500">indicators × 2 levels</div>
+        </div>
+        <div class="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+          <div class="text-xs text-emerald-700">Covered</div>
+          <div class="text-2xl font-bold text-emerald-800">{coveredCells}</div>
+          <div class="text-xs text-emerald-700">≥ 1 active module</div>
+        </div>
+        <div class="rounded-md border border-red-200 bg-red-50 p-3">
+          <div class="text-xs text-red-700">Gaps</div>
+          <div class="text-2xl font-bold text-red-800">{missingCells}</div>
+          <div class="text-xs text-red-700">no module exists</div>
+        </div>
+        <div class={`rounded-md border p-3 ${coveragePct >= 100 ? 'border-emerald-200 bg-emerald-50' : coveragePct >= 80 ? 'border-sky-200 bg-sky-50' : 'border-amber-200 bg-amber-50'}`}>
+          <div class="text-xs text-slate-700">Coverage rate</div>
+          <div class={`text-2xl font-bold ${coveragePct >= 100 ? 'text-emerald-800' : coveragePct >= 80 ? 'text-sky-800' : 'text-amber-800'}`}>{coveragePct}%</div>
+        </div>
+      </div>
+
+      <DomainTabs domains={domains} idPrefix="cov-domain" />
+
+      {Array.from(byDomain.values()).map((dom) => {
+        const indicators = Array.from(dom.indicators.values());
+        const domGaps = indicators.reduce((s: number, ind: any) =>
+          s + ([1, 2].filter((l) => !ind.levels[l] || ind.levels[l].count === 0).length), 0);
+        return (
+          <details id={`cov-domain-${dom.code}`} data-domain-section={dom.code} open class="scroll-mt-32 mt-3 bg-white rounded-lg border border-slate-200">
+            <summary class="cursor-pointer px-4 py-3 font-display text-aps-navy flex items-center justify-between gap-2">
+              <span><i class="fas fa-folder-open mr-2 text-aps-blue"></i>{dom.code}. {dom.name}</span>
+              {domGaps > 0
+                ? <span class="text-xs px-2 py-0.5 rounded-full border bg-red-50 text-red-800 border-red-200">{domGaps} gap{domGaps === 1 ? '' : 's'}</span>
+                : <span class="text-xs px-2 py-0.5 rounded-full border bg-emerald-50 text-emerald-800 border-emerald-200">Fully covered</span>}
+            </summary>
+            <div class="px-4 pb-4">
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left border-b border-slate-200 text-slate-600">
+                      <th class="py-2 w-10"></th>
+                      <th>Indicator</th>
+                      <th class="text-center w-44">Level 1 → 2</th>
+                      <th class="text-center w-44">Level 2 → 3</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {indicators.map((ind: any) => (
+                      <tr class="border-b border-slate-100 align-top">
+                        <td class="py-2 font-medium text-aps-navy">{(ind.code || '').toUpperCase()}</td>
+                        <td class="py-2">{ind.name}</td>
+                        {[1, 2].map((lvl) => {
+                          const cell = ind.levels[lvl];
+                          const count = cell ? cell.count : 0;
+                          return (
+                            <td class="py-2 text-center">
+                              {count === 0 ? (
+                                <span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border bg-red-50 text-red-800 border-red-200">
+                                  <i class="fas fa-circle-xmark"></i> No module
+                                </span>
+                              ) : (
+                                <span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border bg-emerald-50 text-emerald-800 border-emerald-200" title={cell.titles || ''}>
+                                  <i class="fas fa-circle-check"></i> {count} module{count === 1 ? '' : 's'}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+        );
+      })}
+
+      <p class="text-[11px] text-slate-500 mt-4">
+        <i class="fas fa-circle-info mr-1"></i>
+        Coverage report counts only modules where <code>is_active = 1</code>. Modules can be toggled active/inactive on the
+        <a href="/admin/pd" class="text-aps-blue hover:underline"> PD Modules list</a>. Level 3 → 4 growth is intentionally excluded —
+        Level-3 teachers are at the "Effective" rubric tier and don't trigger auto-recommendations.
+      </p>
     </Layout>
   );
 }

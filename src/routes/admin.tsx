@@ -950,41 +950,199 @@ app.post('/settings/pd-hours', async (c) => {
 // requireRole('super_admin') middleware at the top of this file.
 // ============================================================================
 
+// Fix 8 — Honor the brief URL. The June 2 brief calls this surface
+// "/admin/data-management". Existing nav + bookmarks still point at /admin/data,
+// so we redirect new URL → existing route to avoid breaking links.
+app.get('/data-management', (c) => c.redirect('/admin/data'));
+
+// Helper — read soft-delete preference (defaults to ON: prefer soft-delete).
+async function readSoftDeletePref(db: D1Database): Promise<boolean> {
+  const v = await getNumericSetting(db, 'soft_delete_enabled', 1);
+  return v >= 1;
+}
+
 app.get('/data', async (c) => {
   const user = c.get('user')!;
   const msg = c.req.query('msg');
+  // Counts now include both active and soft-deleted rows so the admin can see what's hidden.
   const counts = await c.env.DB.prepare(
     `SELECT
-       (SELECT COUNT(*) FROM observations)        AS observations,
-       (SELECT COUNT(*) FROM observation_scores)  AS scores,
-       (SELECT COUNT(*) FROM feedback_items)      AS feedback_items,
-       (SELECT COUNT(*) FROM focus_areas)         AS focus_areas,
-       (SELECT COUNT(*) FROM activity_log)        AS activity_log`
+       (SELECT COUNT(*) FROM observations)                                AS observations,
+       (SELECT COUNT(*) FROM observations WHERE deleted_at IS NOT NULL)   AS observations_soft_deleted,
+       (SELECT COUNT(*) FROM observation_scores)                          AS scores,
+       (SELECT COUNT(*) FROM feedback_items)                              AS feedback_items,
+       (SELECT COUNT(*) FROM focus_areas)                                 AS focus_areas,
+       (SELECT COUNT(*) FROM activity_log)                                AS activity_log,
+       (SELECT COUNT(*) FROM pd_enrollments)                              AS pd_enrollments,
+       (SELECT COUNT(*) FROM pd_enrollments WHERE deleted_at IS NOT NULL) AS pd_enrollments_soft_deleted,
+       (SELECT COUNT(*) FROM external_pd_submissions)                     AS external_pd,
+       (SELECT COUNT(*) FROM external_pd_submissions WHERE deleted_at IS NOT NULL) AS external_pd_soft_deleted,
+       (SELECT COUNT(*) FROM admin_audit_log)                             AS admin_audit_log`
   ).first<any>();
+
+  // Recent observations table — show both live + soft-deleted so admin can restore visibility.
   const recentObs = await c.env.DB.prepare(
-    `SELECT o.id, o.observation_type, o.observed_at, o.status,
+    `SELECT o.id, o.observation_type, o.observed_at, o.status, o.deleted_at, o.school_id,
             t.first_name AS t_first, t.last_name AS t_last,
-            a.first_name AS a_first, a.last_name AS a_last
+            a.first_name AS a_first, a.last_name AS a_last, a.role AS a_role,
+            s.name AS school_name
      FROM observations o
      JOIN users t ON t.id = o.teacher_id
      JOIN users a ON a.id = o.appraiser_id
+     LEFT JOIN schools s ON s.id = o.school_id
      ORDER BY o.observed_at DESC
      LIMIT 200`
   ).all();
-  return c.html(<DataManagementPage user={user} counts={counts || {}} rows={(recentObs.results as any[]) || []} msg={msg} />);
+
+  // Schools for filtered-delete dropdown.
+  const schools = await c.env.DB.prepare(`SELECT id, name FROM schools WHERE district_id=1 ORDER BY name`).all();
+
+  // Most-recent 25 admin-audit rows on the main page (full viewer at /audit-log).
+  const audit = await recentAdminAudit(c.env.DB, 25);
+
+  // Current soft-delete pref.
+  const softDelete = await readSoftDeletePref(c.env.DB);
+
+  return c.html(
+    <DataManagementPage
+      user={user}
+      counts={counts || {}}
+      rows={(recentObs.results as any[]) || []}
+      schools={(schools.results as any[]) || []}
+      audit={audit}
+      softDelete={softDelete}
+      msg={msg}
+    />
+  );
+});
+
+// ----------------------------------------------------------------------------
+// Fix 8 — Toggle global soft-delete preference. When ON, single-observation
+// deletes write deleted_at instead of cascading DELETE; mass deletes do same.
+// ----------------------------------------------------------------------------
+app.post('/data/soft-delete-toggle', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const next = String(body.enabled || '').trim() === '1' ? 1 : 0;
+  await setSetting(c.env.DB, 'soft_delete_enabled', next, user.id, 'number');
+  await logAdminAudit(c.env.DB, user.id, 'toggle_soft_delete', {
+    entityType: 'system_settings',
+    detail: next === 1 ? 'Soft-delete ENABLED (writes deleted_at)' : 'Soft-delete DISABLED (hard DELETE)',
+    filters: { enabled: next },
+  });
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`Soft-delete is now ${next === 1 ? 'ENABLED' : 'DISABLED'}.`));
 });
 
 // Delete a single observation (any status) including scores & feedback & derived focus areas.
+// Honors the global soft-delete preference: when ON, writes deleted_at instead of removing rows.
 app.post('/data/observations/:id/delete', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
   if (!id) return c.redirect('/admin/data?msg=Invalid+id');
+  const soft = await readSoftDeletePref(c.env.DB);
+  if (soft) {
+    await c.env.DB.prepare(`UPDATE observations SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`).bind(id).run();
+    await logActivity(c.env.DB, user.id, 'observation', id, 'admin_soft_delete');
+    await logAdminAudit(c.env.DB, user.id, 'soft_delete_observation', {
+      entityType: 'observation', entityIds: [id], rowCount: 1,
+      detail: `Soft-deleted observation #${id}`,
+    });
+    return c.redirect('/admin/data?msg=' + encodeURIComponent(`Soft-deleted observation #${id} (visible only in this admin view).`));
+  }
   await c.env.DB.prepare(`DELETE FROM observation_scores WHERE observation_id = ?`).bind(id).run();
   await c.env.DB.prepare(`DELETE FROM feedback_items WHERE observation_id = ?`).bind(id).run();
   await c.env.DB.prepare(`UPDATE focus_areas SET opened_observation_id = NULL WHERE opened_observation_id = ?`).bind(id).run();
   await c.env.DB.prepare(`DELETE FROM observations WHERE id = ?`).bind(id).run();
   await logActivity(c.env.DB, user.id, 'observation', id, 'admin_delete');
+  await logAdminAudit(c.env.DB, user.id, 'hard_delete_observation', {
+    entityType: 'observation', entityIds: [id], rowCount: 1,
+    detail: `Hard-deleted observation #${id} (cascade: scores, feedback, focus_areas)`,
+  });
   return c.redirect('/admin/data?msg=' + encodeURIComponent(`Deleted observation #${id}`));
+});
+
+// Restore a soft-deleted observation.
+app.post('/data/observations/:id/restore', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  if (!id) return c.redirect('/admin/data?msg=Invalid+id');
+  await c.env.DB.prepare(`UPDATE observations SET deleted_at = NULL WHERE id = ?`).bind(id).run();
+  await logAdminAudit(c.env.DB, user.id, 'restore_observation', {
+    entityType: 'observation', entityIds: [id], rowCount: 1,
+    detail: `Restored soft-deleted observation #${id}`,
+  });
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`Restored observation #${id}.`));
+});
+
+// ----------------------------------------------------------------------------
+// Fix 8 — Filtered delete: school / date range / observer role. Always honors
+// the soft-delete preference and logs filters + row_count to admin_audit_log.
+// ----------------------------------------------------------------------------
+app.post('/data/filtered-delete', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  const schoolId = body.school_id ? Number(body.school_id) : null;
+  const dateFrom = String(body.date_from || '').trim();
+  const dateTo   = String(body.date_to   || '').trim();
+  const obsRole  = String(body.observer_role || '').trim();
+
+  if (confirm !== 'DELETE FILTERED') {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "DELETE FILTERED" exactly to confirm.'));
+  }
+  if (!schoolId && !dateFrom && !dateTo && !obsRole) {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('Specify at least one filter (school, date range, or observer role).'));
+  }
+
+  // Build WHERE clause.
+  const conds: string[] = ['o.deleted_at IS NULL'];
+  const binds: any[] = [];
+  if (schoolId) { conds.push('o.school_id = ?'); binds.push(schoolId); }
+  if (dateFrom) { conds.push('date(o.observed_at) >= date(?)'); binds.push(dateFrom); }
+  if (dateTo)   { conds.push('date(o.observed_at) <= date(?)'); binds.push(dateTo); }
+  if (obsRole && (obsRole === 'appraiser' || obsRole === 'coach' || obsRole === 'superintendent')) {
+    conds.push('a.role = ?'); binds.push(obsRole);
+  }
+  const whereSql = conds.join(' AND ');
+
+  // Preview matching ids first (for audit trail + row count cap).
+  const matchedRes = await c.env.DB.prepare(
+    `SELECT o.id FROM observations o JOIN users a ON a.id = o.appraiser_id WHERE ${whereSql} LIMIT 5000`
+  ).bind(...binds).all();
+  const matched = ((matchedRes.results as any[]) || []).map(r => Number(r.id));
+  if (matched.length === 0) {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('No observations matched those filters. Nothing to delete.'));
+  }
+
+  const soft = await readSoftDeletePref(c.env.DB);
+  const filters = { school_id: schoolId, date_from: dateFrom || null, date_to: dateTo || null, observer_role: obsRole || null };
+
+  // Chunk by 100 ids per UPDATE/DELETE (D1 SQLite IN-list limit safety).
+  let touched = 0;
+  for (let i = 0; i < matched.length; i += 100) {
+    const chunk = matched.slice(i, i + 100);
+    const placeholders = chunk.map(() => '?').join(',');
+    if (soft) {
+      const r = await c.env.DB.prepare(`UPDATE observations SET deleted_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`).bind(...chunk).run();
+      touched += (r.meta as any)?.changes || chunk.length;
+    } else {
+      await c.env.DB.prepare(`DELETE FROM observation_scores WHERE observation_id IN (${placeholders})`).bind(...chunk).run();
+      await c.env.DB.prepare(`DELETE FROM feedback_items     WHERE observation_id IN (${placeholders})`).bind(...chunk).run();
+      await c.env.DB.prepare(`UPDATE focus_areas SET opened_observation_id = NULL WHERE opened_observation_id IN (${placeholders})`).bind(...chunk).run();
+      const r = await c.env.DB.prepare(`DELETE FROM observations WHERE id IN (${placeholders})`).bind(...chunk).run();
+      touched += (r.meta as any)?.changes || chunk.length;
+    }
+  }
+
+  await logAdminAudit(c.env.DB, user.id, soft ? 'soft_delete_observations_bulk' : 'hard_delete_observations_bulk', {
+    entityType: 'observation',
+    entityIds: matched.slice(0, 100), // cap audit payload size; full count in row_count
+    rowCount: touched,
+    filters,
+    detail: `Filtered ${soft ? 'soft-delete' : 'hard-delete'} of ${touched} observation(s).`,
+  });
+
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`${soft ? 'Soft-deleted' : 'Deleted'} ${touched} observation(s) matching your filters.`));
 });
 
 // Clear ALL observations + scores + feedback + focus areas. Pedagogy library,
@@ -996,12 +1154,24 @@ app.post('/data/clear-observations', async (c) => {
   if (confirm !== 'CLEAR OBSERVATIONS') {
     return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "CLEAR OBSERVATIONS" exactly to confirm.'));
   }
-  await c.env.DB.prepare('DELETE FROM observation_scores').run();
-  await c.env.DB.prepare('DELETE FROM feedback_items').run();
-  await c.env.DB.prepare('DELETE FROM focus_areas').run();
-  await c.env.DB.prepare('DELETE FROM observations').run();
-  await logActivity(c.env.DB, user.id, 'system', 0, 'clear_observations');
-  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observations, scores, feedback and focus areas have been cleared.'));
+  const soft = await readSoftDeletePref(c.env.DB);
+  let rowCount = 0;
+  if (soft) {
+    const r = await c.env.DB.prepare(`UPDATE observations SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    rowCount = (r.meta as any)?.changes || 0;
+  } else {
+    await c.env.DB.prepare('DELETE FROM observation_scores').run();
+    await c.env.DB.prepare('DELETE FROM feedback_items').run();
+    await c.env.DB.prepare('DELETE FROM focus_areas').run();
+    const r = await c.env.DB.prepare('DELETE FROM observations').run();
+    rowCount = (r.meta as any)?.changes || 0;
+  }
+  await logActivity(c.env.DB, user.id, 'system', 0, soft ? 'soft_clear_observations' : 'clear_observations');
+  await logAdminAudit(c.env.DB, user.id, soft ? 'soft_clear_observations' : 'hard_clear_observations', {
+    entityType: 'bulk', rowCount,
+    detail: `${soft ? 'Soft-cleared' : 'Hard-cleared'} all observations.`,
+  });
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`${soft ? 'Soft-cleared' : 'Cleared'} all observations (${rowCount} row${rowCount === 1 ? '' : 's'}).`));
 });
 
 // Full demo reset: clear everything above PLUS deactivate non-real users (anything created after seed).
@@ -1014,13 +1184,63 @@ app.post('/data/clear-all-demo', async (c) => {
   if (confirm !== 'CLEAR ALL DEMO DATA') {
     return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "CLEAR ALL DEMO DATA" exactly to confirm.'));
   }
+  // Always hard-clear here — this is the "wipe everything before handover" button by design.
   await c.env.DB.prepare('DELETE FROM observation_scores').run();
   await c.env.DB.prepare('DELETE FROM feedback_items').run();
   await c.env.DB.prepare('DELETE FROM focus_areas').run();
-  await c.env.DB.prepare('DELETE FROM observations').run();
-  await c.env.DB.prepare('DELETE FROM activity_log').run();
+  const rObs = await c.env.DB.prepare('DELETE FROM observations').run();
+  const rAct = await c.env.DB.prepare('DELETE FROM activity_log').run();
+  const rowCount = ((rObs.meta as any)?.changes || 0) + ((rAct.meta as any)?.changes || 0);
   await logActivity(c.env.DB, user.id, 'system', 0, 'clear_all_demo');
+  await logAdminAudit(c.env.DB, user.id, 'clear_all_demo', {
+    entityType: 'bulk', rowCount,
+    detail: 'Wiped observations + activity_log (handover reset).',
+  });
   return c.redirect('/admin/data?msg=' + encodeURIComponent('All observation data and activity log cleared. Users, schools, rubric and pedagogy library preserved.'));
+});
+
+// ----------------------------------------------------------------------------
+// Fix 8 — Reset practice / demo PD data (without touching observations).
+// Targets: pd_enrollments + pd_deliverables + external_pd_submissions +
+// teacher_goals. Phrase guard: "RESET PRACTICE DATA".
+// ----------------------------------------------------------------------------
+app.post('/data/reset-practice-data', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  if (confirm !== 'RESET PRACTICE DATA') {
+    return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "RESET PRACTICE DATA" exactly to confirm.'));
+  }
+  const soft = await readSoftDeletePref(c.env.DB);
+  let rowCount = 0;
+  if (soft) {
+    const r1 = await c.env.DB.prepare(`UPDATE pd_enrollments         SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r2 = await c.env.DB.prepare(`UPDATE pd_deliverables        SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r3 = await c.env.DB.prepare(`UPDATE external_pd_submissions SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r4 = await c.env.DB.prepare(`UPDATE teacher_goals          SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    rowCount = ((r1.meta as any)?.changes || 0) + ((r2.meta as any)?.changes || 0) + ((r3.meta as any)?.changes || 0) + ((r4.meta as any)?.changes || 0);
+  } else {
+    const r1 = await c.env.DB.prepare(`DELETE FROM pd_deliverables`).run();
+    const r2 = await c.env.DB.prepare(`DELETE FROM pd_enrollments`).run();
+    const r3 = await c.env.DB.prepare(`DELETE FROM external_pd_submissions`).run();
+    const r4 = await c.env.DB.prepare(`DELETE FROM teacher_goals`).run();
+    rowCount = ((r1.meta as any)?.changes || 0) + ((r2.meta as any)?.changes || 0) + ((r3.meta as any)?.changes || 0) + ((r4.meta as any)?.changes || 0);
+  }
+  await logActivity(c.env.DB, user.id, 'system', 0, soft ? 'soft_reset_practice_data' : 'reset_practice_data');
+  await logAdminAudit(c.env.DB, user.id, soft ? 'soft_reset_practice_data' : 'reset_practice_data', {
+    entityType: 'bulk', rowCount,
+    detail: `${soft ? 'Soft-' : 'Hard-'}reset of pd_enrollments + pd_deliverables + external_pd_submissions + teacher_goals.`,
+  });
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(`${soft ? 'Soft-' : 'Hard-'}reset practice data: ${rowCount} row${rowCount === 1 ? '' : 's'} affected. Observations preserved.`));
+});
+
+// ----------------------------------------------------------------------------
+// Fix 8 — Full admin-audit-log viewer (200 most recent mutations).
+// ----------------------------------------------------------------------------
+app.get('/data/audit-log', async (c) => {
+  const user = c.get('user')!;
+  const rows = await recentAdminAudit(c.env.DB, 200);
+  return c.html(<AdminAuditLogPage user={user} rows={rows} />);
 });
 
 export default app;
@@ -1771,43 +1991,151 @@ function ImportRubricPage({ user, msg, result, framework }: any) {
 // ------------------------------------------------------------------
 // Data Management view — wipe demo data, delete single observations.
 // ------------------------------------------------------------------
-function DataManagementPage({ user, counts, rows, msg }: any) {
+function DataManagementPage({ user, counts, rows, schools, audit, softDelete, msg }: any) {
   return (
     <Layout title="Data Management" user={user} activeNav="data">
-      <h1 class="font-display text-2xl text-aps-navy mb-1">Data Management</h1>
-      <p class="text-slate-600 text-sm mb-4">Edit or delete any observation, or wipe all demo data before handing the platform to the client. Users, schools, rubric, and pedagogy library are <strong>never</strong> touched by the clear actions below.</p>
+      <div class="flex items-start justify-between mb-1">
+        <h1 class="font-display text-2xl text-aps-navy">Data Management</h1>
+        <a href="/admin/data/audit-log" class="text-sm text-aps-blue hover:underline mt-1"><i class="fas fa-list-check mr-1"></i>Full admin audit log</a>
+      </div>
+      <p class="text-slate-600 text-sm mb-4">Edit or delete observations, mass-delete by filter, reset practice / demo data, and toggle soft-delete. Users, schools, rubric, and pedagogy library are <strong>never</strong> touched by the actions below.</p>
       {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
 
-      <div class="grid md:grid-cols-5 gap-3 mb-6">
-        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Observations</div><div class="text-2xl font-display text-aps-navy">{counts.observations || 0}</div></div>
+      <div class="grid md:grid-cols-6 gap-3 mb-6">
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Observations</div><div class="text-2xl font-display text-aps-navy">{counts.observations || 0}</div>{counts.observations_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.observations_soft_deleted} soft-deleted</div> : null}</div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Scores</div><div class="text-2xl font-display text-aps-navy">{counts.scores || 0}</div></div>
-        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Feedback items</div><div class="text-2xl font-display text-aps-navy">{counts.feedback_items || 0}</div></div>
-        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Focus areas</div><div class="text-2xl font-display text-aps-navy">{counts.focus_areas || 0}</div></div>
-        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Activity log entries</div><div class="text-2xl font-display text-aps-navy">{counts.activity_log || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">PD Enrollments</div><div class="text-2xl font-display text-aps-navy">{counts.pd_enrollments || 0}</div>{counts.pd_enrollments_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.pd_enrollments_soft_deleted} soft-deleted</div> : null}</div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">External PD</div><div class="text-2xl font-display text-aps-navy">{counts.external_pd || 0}</div>{counts.external_pd_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.external_pd_soft_deleted} soft-deleted</div> : null}</div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Activity log</div><div class="text-2xl font-display text-aps-navy">{counts.activity_log || 0}</div></div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Admin audit</div><div class="text-2xl font-display text-aps-navy">{counts.admin_audit_log || 0}</div></div>
       </div>
 
-      <Card title="All observations (latest 200)" icon="fas fa-list">
+      {/* ===== Soft-delete toggle ===== */}
+      <Card title="Soft-delete mode" icon="fas fa-shield-halved">
+        <div class="md:flex md:items-center md:justify-between gap-4">
+          <div class="text-sm text-slate-700">
+            <p class="mb-1">When <strong>ON</strong>, every delete action below writes a <code class="bg-slate-100 px-1 rounded">deleted_at</code> timestamp instead of removing the row. Records stay queryable for forensics and can be restored from this page.</p>
+            <p class="text-xs text-slate-500">When <strong>OFF</strong>, deletes are permanent (existing behavior). The <em>Clear all demo data</em> button always performs a hard wipe regardless of this setting.</p>
+          </div>
+          <form method="post" action="/admin/data/soft-delete-toggle" class="mt-3 md:mt-0 shrink-0">
+            <input type="hidden" name="enabled" value={softDelete ? '0' : '1'} />
+            <span class={`inline-flex items-center text-xs px-2 py-0.5 rounded-full border mr-3 ${softDelete ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-slate-100 border-slate-300 text-slate-700'}`}>
+              <i class={`fas ${softDelete ? 'fa-circle-check' : 'fa-circle-xmark'} mr-1`}></i>
+              {softDelete ? 'Soft-delete ENABLED' : 'Soft-delete DISABLED'}
+            </span>
+            <button class={`${softDelete ? 'bg-slate-600 hover:bg-slate-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white px-3 py-1.5 rounded text-sm`}>
+              <i class={`fas ${softDelete ? 'fa-toggle-off' : 'fa-toggle-on'} mr-1`}></i>
+              Turn {softDelete ? 'OFF' : 'ON'}
+            </button>
+          </form>
+        </div>
+      </Card>
+
+      {/* ===== Filtered delete + Reset practice data ===== */}
+      <div class="grid md:grid-cols-2 gap-4 mt-6">
+        <Card title="Filtered delete" icon="fas fa-filter">
+          <p class="text-sm text-slate-600 mb-3">Delete observations matching one or more filters. Honors the soft-delete setting above. Every action is recorded in the admin audit log.</p>
+          <form method="post" action="/admin/data/filtered-delete" onsubmit="return confirm('Delete all observations matching these filters? This action is recorded in the admin audit log.')">
+            <label class="block text-xs text-slate-600 mb-1 mt-2">School</label>
+            <select name="school_id" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+              <option value="">(any school)</option>
+              {schools.map((s: any) => <option value={s.id}>{s.name}</option>)}
+            </select>
+            <div class="grid grid-cols-2 gap-2 mt-2">
+              <div>
+                <label class="block text-xs text-slate-600 mb-1">Observed from</label>
+                <input type="date" name="date_from" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs text-slate-600 mb-1">Observed to</label>
+                <input type="date" name="date_to" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm" />
+              </div>
+            </div>
+            <label class="block text-xs text-slate-600 mb-1 mt-2">Observer role</label>
+            <select name="observer_role" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+              <option value="">(any role)</option>
+              <option value="appraiser">Appraiser</option>
+              <option value="coach">Coach</option>
+              <option value="superintendent">Superintendent</option>
+            </select>
+            <label class="block text-xs text-slate-600 mb-1 mt-3">Type <code class="bg-slate-100 px-1">DELETE FILTERED</code> to confirm</label>
+            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <button class="bg-amber-700 text-white px-3 py-1.5 rounded text-sm hover:bg-amber-800"><i class="fas fa-filter-circle-xmark mr-1"></i>Apply filtered delete</button>
+          </form>
+        </Card>
+        <Card title="Reset practice data" icon="fas fa-rotate-left">
+          <p class="text-sm text-slate-600 mb-3">Wipes PD enrollments, deliverables, external PD submissions, and teacher goals — <strong>without</strong> touching observations, users, schools, rubric, or pedagogy library. Honors the soft-delete setting above. Use this to reset PD-system practice data after staff training.</p>
+          <form method="post" action="/admin/data/reset-practice-data" onsubmit="return confirm('Reset all PD enrollments, deliverables, external PD, and teacher goals?')">
+            <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">RESET PRACTICE DATA</code> to confirm</label>
+            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <button class="bg-sky-700 text-white px-3 py-1.5 rounded text-sm hover:bg-sky-800"><i class="fas fa-rotate-left mr-1"></i>Reset practice data</button>
+          </form>
+        </Card>
+      </div>
+
+      {/* ===== Recent audit-log preview ===== */}
+      <div class="mt-6">
+        <Card title="Recent admin audit entries" icon="fas fa-clipboard-list">
+          {audit.length === 0 ? (
+            <p class="text-sm text-slate-500">No high-trust mutations yet.</p>
+          ) : (
+            <div class="overflow-x-auto"><table class="w-full text-sm">
+              <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+                <tr><th class="py-2">When</th><th>Actor</th><th>Action</th><th>Entity</th><th class="text-right">Rows</th><th>Detail</th></tr>
+              </thead>
+              <tbody>
+                {audit.map((a: any) => (
+                  <tr class="border-b border-slate-100 align-top">
+                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(a.created_at)}</td>
+                    <td class="text-xs">{a.first_name ? `${a.first_name} ${a.last_name}` : `#${a.actor_user_id}`} <span class="text-slate-400">({a.role || '—'})</span></td>
+                    <td class="text-xs font-mono">{a.action}</td>
+                    <td class="text-xs">{a.entity_type || '—'}</td>
+                    <td class="text-xs text-right">{a.row_count || 0}</td>
+                    <td class="text-xs text-slate-600">{a.detail || ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+          <div class="mt-3 text-right"><a href="/admin/data/audit-log" class="text-sm text-aps-blue hover:underline">See full audit log →</a></div>
+        </Card>
+      </div>
+
+      {/* ===== Observation table ===== */}
+      <div class="mt-6">
+      <Card title="All observations (latest 200, including soft-deleted)" icon="fas fa-list">
         {rows.length === 0 ? (
           <p class="text-sm text-slate-500">No observations currently exist in the database.</p>
         ) : (
           <div class="overflow-x-auto"><table class="w-full text-sm">
             <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
-              <tr><th class="py-2">ID</th><th>Type</th><th>Teacher</th><th>Appraiser</th><th>When</th><th>Status</th><th></th></tr>
+              <tr><th class="py-2">ID</th><th>Type</th><th>Teacher</th><th>Observer</th><th>School</th><th>When</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
               {rows.map((o: any) => (
-                <tr class="border-b border-slate-100">
+                <tr class={`border-b border-slate-100 ${o.deleted_at ? 'opacity-60 bg-amber-50/40' : ''}`}>
                   <td class="py-2 text-slate-500 text-xs">#{o.id}</td>
-                  <td class="capitalize">{String(o.observation_type || '').replace('_',' ')}</td>
-                  <td>{o.t_first} {o.t_last}</td>
-                  <td>{o.a_first} {o.a_last}</td>
+                  <td class="capitalize text-xs">{String(o.observation_type || '').replace('_',' ')}</td>
+                  <td class="text-xs">{o.t_first} {o.t_last}</td>
+                  <td class="text-xs">{o.a_first} {o.a_last} <span class="text-slate-400">({o.a_role})</span></td>
+                  <td class="text-xs text-slate-500">{o.school_name || '—'}</td>
                   <td class="text-xs text-slate-500">{formatDateTime(o.observed_at)}</td>
-                  <td><span class={`text-xs px-2 py-0.5 rounded-full border ${o.status === 'published' ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : o.status === 'acknowledged' ? 'bg-teal-50 border-teal-300 text-teal-800' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>{o.status}</span></td>
-                  <td class="text-right">
+                  <td>
+                    {o.deleted_at
+                      ? <span class="text-xs px-2 py-0.5 rounded-full border bg-amber-50 border-amber-300 text-amber-800">soft-deleted</span>
+                      : <span class={`text-xs px-2 py-0.5 rounded-full border ${o.status === 'published' ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : o.status === 'acknowledged' ? 'bg-teal-50 border-teal-300 text-teal-800' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>{o.status}</span>}
+                  </td>
+                  <td class="text-right whitespace-nowrap">
                     <a href={`/appraiser/observations/${o.id}`} class="text-xs text-aps-blue hover:underline mr-3"><i class="fas fa-eye mr-1"></i>View</a>
-                    <form method="post" action={`/admin/data/observations/${o.id}/delete`} class="inline" onsubmit="return confirm('Delete this observation and all its scores, feedback, and focus areas opened from it? This cannot be undone.')">
-                      <button class="text-xs text-red-700 hover:underline"><i class="fas fa-trash mr-1"></i>Delete</button>
-                    </form>
+                    {o.deleted_at ? (
+                      <form method="post" action={`/admin/data/observations/${o.id}/restore`} class="inline">
+                        <button class="text-xs text-emerald-700 hover:underline"><i class="fas fa-rotate-left mr-1"></i>Restore</button>
+                      </form>
+                    ) : (
+                      <form method="post" action={`/admin/data/observations/${o.id}/delete`} class="inline" onsubmit="return confirm('Delete this observation? (Honors the soft-delete setting above.)')">
+                        <button class="text-xs text-red-700 hover:underline"><i class="fas fa-trash mr-1"></i>Delete</button>
+                      </form>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -1815,25 +2143,73 @@ function DataManagementPage({ user, counts, rows, msg }: any) {
           </table></div>
         )}
       </Card>
+      </div>
 
+      {/* ===== Clear all ===== */}
       <div class="grid md:grid-cols-2 gap-4 mt-6">
         <Card title="Clear all observations" icon="fas fa-broom">
-          <p class="text-sm text-slate-600 mb-3">Wipes every observation, score, feedback item, and focus area in one action. Useful after demoing the product to the client so they start with a clean slate. <strong>Users, schools, rubric, and pedagogy library are preserved.</strong></p>
-          <form method="post" action="/admin/data/clear-observations" onsubmit="return confirm('Really wipe ALL observation data? This cannot be undone.')">
+          <p class="text-sm text-slate-600 mb-3">Wipes every observation, score, feedback item, and focus area in one action. Honors the soft-delete setting (so by default, observations are <em>marked</em> as deleted, not removed). <strong>Users, schools, rubric, and pedagogy library are preserved.</strong></p>
+          <form method="post" action="/admin/data/clear-observations" onsubmit="return confirm('Really clear ALL observation data? Honors the soft-delete setting above.')">
             <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAR OBSERVATIONS</code> to confirm</label>
             <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
             <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm hover:bg-amber-700"><i class="fas fa-broom mr-1"></i>Clear observations</button>
           </form>
         </Card>
-        <Card title="Clear all demo data" icon="fas fa-eraser">
-          <p class="text-sm text-slate-600 mb-3">Wipes all observations <em>plus</em> the activity log. Does not touch users, schools, rubric, or pedagogy library. Use this right before handing the live site to the district.</p>
-          <form method="post" action="/admin/data/clear-all-demo" onsubmit="return confirm('Really wipe ALL demo observation data AND the activity log? This cannot be undone.')">
+        <Card title="Hard-wipe all demo data" icon="fas fa-eraser">
+          <p class="text-sm text-slate-600 mb-3">Permanently wipes all observations <em>plus</em> the activity log — <strong>regardless</strong> of the soft-delete setting. Does not touch users, schools, rubric, or pedagogy library. Use this right before handing the live site to the district.</p>
+          <form method="post" action="/admin/data/clear-all-demo" onsubmit="return confirm('Really HARD-WIPE all demo observation data AND the activity log? This cannot be undone.')">
             <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAR ALL DEMO DATA</code> to confirm</label>
             <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
             <button class="bg-red-700 text-white px-3 py-1.5 rounded text-sm hover:bg-red-800"><i class="fas fa-eraser mr-1"></i>Clear all demo data</button>
           </form>
         </Card>
       </div>
+    </Layout>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Fix 8 — Full admin-audit-log viewer page.
+// ----------------------------------------------------------------------------
+function AdminAuditLogPage({ user, rows }: any) {
+  return (
+    <Layout title="Admin Audit Log" user={user} activeNav="data">
+      <div class="flex items-start justify-between mb-1">
+        <h1 class="font-display text-2xl text-aps-navy">Admin Audit Log</h1>
+        <a href="/admin/data" class="text-sm text-aps-blue hover:underline mt-1"><i class="fas fa-arrow-left mr-1"></i>Back to Data Management</a>
+      </div>
+      <p class="text-slate-600 text-sm mb-4">High-trust mutations performed from the Data Management page. Filters and affected row ids are recorded for compliance review.</p>
+
+      <Card title={`Recent ${rows.length} entries`} icon="fas fa-clipboard-list">
+        {rows.length === 0 ? (
+          <p class="text-sm text-slate-500">No admin audit entries yet.</p>
+        ) : (
+          <div class="overflow-x-auto"><table class="w-full text-sm">
+            <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+              <tr><th class="py-2">When</th><th>Actor</th><th>Action</th><th>Entity</th><th class="text-right">Rows</th><th>Filters</th><th>IDs (first 100)</th><th>Detail</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((a: any) => {
+                let filters: any = null; let ids: any = null;
+                try { filters = a.filters ? JSON.parse(a.filters) : null; } catch {}
+                try { ids = a.entity_ids ? JSON.parse(a.entity_ids) : null; } catch {}
+                return (
+                  <tr class="border-b border-slate-100 align-top">
+                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(a.created_at)}</td>
+                    <td class="text-xs">{a.first_name ? `${a.first_name} ${a.last_name}` : `#${a.actor_user_id}`} <span class="text-slate-400">({a.role || '—'})</span></td>
+                    <td class="text-xs font-mono">{a.action}</td>
+                    <td class="text-xs">{a.entity_type || '—'}</td>
+                    <td class="text-xs text-right">{a.row_count || 0}</td>
+                    <td class="text-xs text-slate-600 max-w-[14rem]"><pre class="whitespace-pre-wrap break-words font-mono text-[11px]">{filters ? JSON.stringify(filters) : ''}</pre></td>
+                    <td class="text-xs text-slate-600 max-w-[12rem]"><pre class="whitespace-pre-wrap break-words font-mono text-[11px]">{ids ? (ids as number[]).slice(0,20).join(', ') + ((ids as number[]).length > 20 ? '…' : '') : ''}</pre></td>
+                    <td class="text-xs text-slate-600">{a.detail || ''}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table></div>
+        )}
+      </Card>
     </Layout>
   );
 }
