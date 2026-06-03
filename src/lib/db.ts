@@ -118,6 +118,7 @@ export async function getObservation(db: D1Database, id: number) {
   const o = await db.prepare(
     `SELECT o.*,
             t.first_name AS t_first, t.last_name AS t_last, t.email AS t_email, t.title AS t_title,
+            t.subject_area AS t_subject_area, t.classroom_type AS t_classroom_type, t.grade_band AS t_grade_band,
             a.first_name AS a_first, a.last_name AS a_last, a.title AS a_title
      FROM observations o
      JOIN users t ON t.id = o.teacher_id

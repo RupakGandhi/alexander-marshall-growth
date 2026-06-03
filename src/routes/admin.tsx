@@ -2,7 +2,11 @@ import { Hono } from 'hono';
 import type { Bindings, Variables, UserRole } from '../lib/types';
 import { Layout, Card, Button, DomainTabs } from '../lib/layout';
 import { requireRole, hashPassword } from '../lib/auth';
-import { getDomainsWithIndicators, getActiveFramework, logActivity, setUserSchools, getUserSchoolIds } from '../lib/db';
+import {
+  getDomainsWithIndicators, getActiveFramework, logActivity,
+  setUserSchools, getUserSchoolIds,
+  listExternalPdQueue, getNumericSetting, setSetting, recentAdminAudit, logAdminAudit,
+} from '../lib/db';
 import { formatDate, formatDateTime, levelLabels, levelColor } from '../lib/ui';
 import { parseCsvAsObjects, buildCsv } from '../lib/csv';
 
@@ -890,6 +894,52 @@ function splitPipe(s: string | undefined): string[] {
   if (!s) return [];
   return String(s).split('|').map(x => x.trim()).filter(Boolean);
 }
+
+// ============================================================================
+// Fix 5 — External PD audit (admin view).
+// Read-only district-wide list of every external_pd_submissions row. Useful
+// for compliance: super-admins can see who submitted what, what each
+// appraiser approved/declined, and which submissions are still waiting.
+// ============================================================================
+
+app.get('/external-pd', async (c) => {
+  const user = c.get('user')!;
+  const status = c.req.query('status') || undefined;
+  // Admin sees everything (no appraiserId filter).
+  const rows = await listExternalPdQueue(c.env.DB, { status });
+  return c.html(<AdminExternalPdAudit user={user} rows={rows} filterStatus={status} />);
+});
+
+// ============================================================================
+// Fix 6 — Admin-editable PD-hours-per-year target (system_settings).
+// The default seed is 22.5h (per Title II district policy). Admin can change
+// it; the new value flows into every heat-map render through getNumericSetting.
+// ============================================================================
+
+app.get('/settings/pd-hours', async (c) => {
+  const user = c.get('user')!;
+  const current = await getNumericSetting(c.env.DB, 'pd_hours_target_annual', 22.5);
+  const msg = c.req.query('msg');
+  return c.html(<PdHoursSettingsPage user={user} target={current} msg={msg} />);
+});
+
+app.post('/settings/pd-hours', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const raw = String(body.target ?? '').trim();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1000) {
+    return c.redirect('/admin/settings/pd-hours?msg=' + encodeURIComponent('Enter a positive number between 0 and 1000.'));
+  }
+  const rounded = Math.round(parsed * 4) / 4;  // 0.25h granularity
+  await setSetting(c.env.DB, 'pd_hours_target_annual', rounded, user.id, 'number');
+  await logAdminAudit(c.env.DB, user.id, 'update_setting', {
+    entityType: 'system_settings',
+    detail: `pd_hours_target_annual = ${rounded.toFixed(2)}h`,
+    filters: { key: 'pd_hours_target_annual', value: rounded },
+  });
+  return c.redirect('/admin/settings/pd-hours?msg=' + encodeURIComponent(`Annual PD-hours target updated to ${rounded.toFixed(2)}h.`));
+});
 
 // ============================================================================
 // DATA MANAGEMENT
@@ -1784,6 +1834,147 @@ function DataManagementPage({ user, counts, rows, msg }: any) {
           </form>
         </Card>
       </div>
+    </Layout>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Fix 5 — Admin audit view for external PD submissions.
+// Read-only district-wide list. Admins do NOT take review action here (that
+// happens on the appraiser page); this view exists for compliance + insight.
+// ----------------------------------------------------------------------------
+
+function extPdAuditPill(status: string) {
+  switch (status) {
+    case 'submitted':       return { label: 'Awaiting', icon: 'fa-hourglass-half', color: 'bg-amber-50 text-amber-800 border-amber-200' };
+    case 'approved':        return { label: 'Approved', icon: 'fa-circle-check',   color: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
+    case 'declined':        return { label: 'Declined', icon: 'fa-circle-xmark',   color: 'bg-red-50 text-red-800 border-red-200' };
+    case 'needs_revision':  return { label: 'Revising', icon: 'fa-rotate-left',    color: 'bg-sky-50 text-sky-800 border-sky-200' };
+    default:                return { label: status,     icon: 'fa-circle',         color: 'bg-slate-50 text-slate-700 border-slate-200' };
+  }
+}
+
+function AdminExternalPdAudit({ user, rows, filterStatus }: any) {
+  const submitted = rows.filter((r: any) => r.status === 'submitted').length;
+  const revising  = rows.filter((r: any) => r.status === 'needs_revision').length;
+  const approved  = rows.filter((r: any) => r.status === 'approved');
+  const approvedHoursTotal = approved.reduce((s: number, r: any) => s + Number(r.approved_hours || 0), 0);
+  return (
+    <Layout title="External PD audit" user={user} activeNav="admin-ext-pd">
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-clipboard-list mr-2"></i>External PD audit</h1>
+      <p class="text-slate-600 text-sm mb-4">
+        District-wide ledger of every external PD submission (conferences, workshops, outside-LMS PD).
+        Approval / decline / revision happens on the <a href="/appraiser/external-pd" class="text-aps-blue hover:underline">appraiser review queue</a>;
+        this page is read-only for super-admins to monitor compliance.
+      </p>
+
+      <div class="grid sm:grid-cols-4 gap-3 mb-4">
+        <div class="rounded-md border border-slate-200 bg-white p-3">
+          <div class="text-xs text-slate-500">Total submissions</div>
+          <div class="text-2xl font-bold text-aps-navy">{rows.length}</div>
+        </div>
+        <div class="rounded-md border border-amber-200 bg-amber-50 p-3">
+          <div class="text-xs text-amber-700">Awaiting review</div>
+          <div class="text-2xl font-bold text-amber-800">{submitted}</div>
+        </div>
+        <div class="rounded-md border border-sky-200 bg-sky-50 p-3">
+          <div class="text-xs text-sky-700">Needs revision</div>
+          <div class="text-2xl font-bold text-sky-800">{revising}</div>
+        </div>
+        <div class="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+          <div class="text-xs text-emerald-700">Approved hours (district)</div>
+          <div class="text-2xl font-bold text-emerald-800">{approvedHoursTotal.toFixed(2)}h</div>
+        </div>
+      </div>
+
+      <div class="mb-4 flex flex-wrap gap-2 text-xs">
+        <a href="/admin/external-pd" class={`px-3 py-1.5 rounded border ${!filterStatus ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>All</a>
+        <a href="/admin/external-pd?status=submitted" class={`px-3 py-1.5 rounded border ${filterStatus === 'submitted' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Awaiting</a>
+        <a href="/admin/external-pd?status=needs_revision" class={`px-3 py-1.5 rounded border ${filterStatus === 'needs_revision' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Revising</a>
+        <a href="/admin/external-pd?status=approved" class={`px-3 py-1.5 rounded border ${filterStatus === 'approved' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Approved</a>
+        <a href="/admin/external-pd?status=declined" class={`px-3 py-1.5 rounded border ${filterStatus === 'declined' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Declined</a>
+      </div>
+
+      {rows.length === 0 ? (
+        <Card><p class="text-sm text-slate-500">No external PD submissions match this filter.</p></Card>
+      ) : (
+        <Card>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-left border-b border-slate-200 text-slate-600">
+                  <th class="py-2">Teacher</th>
+                  <th>School</th>
+                  <th>Activity</th>
+                  <th>Provider</th>
+                  <th class="text-right">Hrs (self)</th>
+                  <th class="text-right">Hrs (apr)</th>
+                  <th>Status</th>
+                  <th>Reviewer</th>
+                  <th>Submitted</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r: any) => {
+                  const pill = extPdAuditPill(r.status);
+                  return (
+                    <tr class="border-b border-slate-100 hover:bg-slate-50">
+                      <td class="py-2">{r.teacher_first} {r.teacher_last}</td>
+                      <td class="text-slate-600 text-xs">{r.school_name || '—'}</td>
+                      <td>{r.title}</td>
+                      <td class="text-slate-600">{r.provider || '—'}</td>
+                      <td class="text-right tabular-nums">{Number(r.hours).toFixed(2)}</td>
+                      <td class="text-right tabular-nums">{r.approved_hours != null ? Number(r.approved_hours).toFixed(2) : <span class="text-slate-300">—</span>}</td>
+                      <td><span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span></td>
+                      <td class="text-xs text-slate-600">{r.reviewer_first ? `${r.reviewer_first} ${r.reviewer_last}` : <span class="text-slate-400 italic">—</span>}</td>
+                      <td class="text-xs text-slate-500">{formatDate(r.submitted_at)}</td>
+                      <td><a href={`/appraiser/external-pd/${r.id}`} class="text-aps-blue hover:underline text-xs">View <i class="fas fa-chevron-right"></i></a></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+    </Layout>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Fix 6 — Admin settings page for the annual PD-hours target.
+// Single-knob page on purpose: this number drives the heat-map on the
+// superintendent + appraiser + teacher views, so a misclick has wide
+// downstream effects. Keeping it dedicated and simple reduces that risk.
+// ----------------------------------------------------------------------------
+
+function PdHoursSettingsPage({ user, target, msg }: any) {
+  return (
+    <Layout title="PD-hours target" user={user} activeNav="data">
+      <div class="mb-3"><a href="/admin" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Admin overview</a></div>
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-stopwatch mr-2"></i>Annual PD-hours target</h1>
+      <p class="text-slate-600 text-sm mb-4">
+        Sets the per-teacher goal that powers the unified PD-hours heat-map on the superintendent, appraiser, and teacher dashboards.
+        The default is <strong>22.5h</strong> (Title II district policy). Edits apply immediately — there is no scheduled rollover.
+      </p>
+      {msg && <div class="mb-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+      <Card title="Target" icon="fas fa-bullseye">
+        <form method="post" action="/admin/settings/pd-hours" class="flex flex-wrap items-end gap-3">
+          <label class="block text-sm">
+            <span class="block text-slate-700 mb-1 font-medium">Hours per teacher per school year</span>
+            <input type="number" name="target" step="0.25" min="0" max="1000" value={Number(target).toFixed(2)}
+              class="w-32 border border-slate-300 rounded px-2 py-1.5 text-sm" required />
+          </label>
+          <button class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm"><i class="fas fa-save mr-1"></i>Save target</button>
+        </form>
+        <p class="text-xs text-slate-500 mt-3"><i class="fas fa-circle-info mr-1"></i>The heat-map colors at:
+          {' '}<span class="px-1 rounded bg-red-100 text-red-800">&lt; 33%</span> low,
+          {' '}<span class="px-1 rounded bg-amber-100 text-amber-800">33-65%</span> mid,
+          {' '}<span class="px-1 rounded bg-sky-100 text-sky-800">66-99%</span> near goal,
+          {' '}<span class="px-1 rounded bg-emerald-100 text-emerald-800">≥ 100%</span> met.
+        </p>
+      </Card>
     </Layout>
   );
 }

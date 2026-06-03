@@ -287,6 +287,7 @@ function navItems(role: string) {
         { key: 'admin-schools',  label: 'Schools',           href: '/admin/schools',      icon: 'fas fa-school' },
         { key: 'admin-pedagogy', label: 'Pedagogy Library',  href: '/admin/pedagogy',     icon: 'fas fa-book' },
         { key: 'admin-pd',       label: 'PD Modules',        href: '/admin/pd',           icon: 'fas fa-graduation-cap' },
+        { key: 'admin-ext-pd',   label: 'External PD',       href: '/admin/external-pd',  icon: 'fas fa-clipboard-list' },
         { key: 'admin-framework',label: 'Framework',         href: '/admin/framework',    icon: 'fas fa-list-check' },
         { key: 'admin-import',   label: 'Bulk Import',       href: '/admin/import/users', icon: 'fas fa-file-import' },
         { key: 'admin-reports',  label: 'Reports',           href: '/reports',            icon: 'fas fa-file-export' },
@@ -306,6 +307,7 @@ function navItems(role: string) {
         { key: 'ap-home',      label: 'My Teachers',   href: '/appraiser',             icon: 'fas fa-chalkboard-user' },
         { key: 'ap-obs',       label: 'Observations',  href: '/appraiser/observations',icon: 'fas fa-clipboard-list' },
         { key: 'pd-review',    label: 'PD Review',     href: '/pd/review',             icon: 'fas fa-clipboard-check' },
+        { key: 'ap-ext-pd',    label: 'External PD',   href: '/appraiser/external-pd', icon: 'fas fa-clipboard-list' },
         { key: 'ap-reports',   label: 'Reports',       href: '/reports',               icon: 'fas fa-file-export' },
       ];
     case 'coach':
@@ -406,6 +408,131 @@ export function DomainTabs(props: {
         </ul>
       </div>
     </nav>
+  );
+}
+
+// ============================================================================
+// Fix 6 — Unified PD-hours heat-map widget.
+// One renderer, three callers (superintendent / appraiser / teacher). Takes
+// the rows returned by getTeacherPDHoursSummary() and paints them as a list
+// of teacher pills, each colored by the `heat` tier the helper computed.
+// The component is purposely presentational — all aggregation logic lives
+// in src/lib/db.ts so the heat tiers stay consistent.
+// ============================================================================
+
+const HEAT_CLASSES: Record<string, { box: string; bar: string; pill: string; label: string }> = {
+  met:  { box: 'bg-emerald-50 border-emerald-200', bar: 'bg-emerald-500', pill: 'bg-emerald-100 text-emerald-900 border-emerald-300', label: 'Met target' },
+  near: { box: 'bg-sky-50 border-sky-200',         bar: 'bg-sky-500',     pill: 'bg-sky-100 text-sky-900 border-sky-300',         label: 'Near target' },
+  mid:  { box: 'bg-amber-50 border-amber-200',     bar: 'bg-amber-500',   pill: 'bg-amber-100 text-amber-900 border-amber-300',   label: 'In progress' },
+  low:  { box: 'bg-red-50 border-red-200',         bar: 'bg-red-500',     pill: 'bg-red-100 text-red-900 border-red-300',         label: 'Behind target' },
+};
+
+export function PDHoursHeatMap(props: {
+  target: number;
+  rows: Array<{
+    teacher_id: number;
+    first_name: string;
+    last_name: string;
+    school_name?: string | null;
+    internal_hours: number;
+    external_hours: number;
+    total_hours: number;
+    pct_of_target: number;
+    heat: 'low' | 'mid' | 'near' | 'met';
+  }>;
+  /** When true, suppresses the teacher's name and links — used for the
+   *  single-row teacher self-view where their identity is implicit. */
+  selfView?: boolean;
+  /** Link prefix for each tile when not in selfView (e.g. '/appraiser/teachers') */
+  linkPrefix?: string;
+  /** Hide the legend (used when embedded in a card that already explains the colors). */
+  hideLegend?: boolean;
+}) {
+  const target = Number(props.target || 0);
+  const rows = props.rows || [];
+  // District / school-wide roll-up totals to show above the grid.
+  const totals = rows.reduce(
+    (acc, r) => {
+      acc.internal += Number(r.internal_hours || 0);
+      acc.external += Number(r.external_hours || 0);
+      acc.total    += Number(r.total_hours || 0);
+      if (r.heat === 'met') acc.met += 1;
+      return acc;
+    },
+    { internal: 0, external: 0, total: 0, met: 0 }
+  );
+  const groupCount: Record<string, number> = { low: 0, mid: 0, near: 0, met: 0 };
+  for (const r of rows) groupCount[r.heat] = (groupCount[r.heat] || 0) + 1;
+
+  return (
+    <div>
+      {!props.selfView && (
+        <div class="grid sm:grid-cols-4 gap-2 mb-3 text-center text-xs">
+          {(['met','near','mid','low'] as const).map((k) => (
+            <div class={`rounded-md border p-2 ${HEAT_CLASSES[k].box}`}>
+              <div class="text-lg font-bold">{groupCount[k] || 0}</div>
+              <div class="text-[11px] uppercase tracking-wide">{HEAT_CLASSES[k].label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!props.selfView && (
+        <div class="mb-3 text-xs text-slate-600">
+          Target: <strong>{target.toFixed(2)}h</strong> · District total: <strong>{totals.total.toFixed(2)}h</strong>
+          {' '}(<span class="text-aps-blue">{totals.internal.toFixed(2)}h internal</span>
+          {' + '}<span class="text-amber-700">{totals.external.toFixed(2)}h external</span>)
+          {' · '}<strong class="text-emerald-700">{totals.met}</strong> of {rows.length} teachers have met their goal.
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <p class="text-sm text-slate-500 italic">No teachers in scope.</p>
+      ) : (
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {rows.map((r) => {
+            const cls = HEAT_CLASSES[r.heat] || HEAT_CLASSES.low;
+            const pct = Math.min(1, Math.max(0, Number(r.pct_of_target || 0)));
+            const barWidth = `${(pct * 100).toFixed(1)}%`;
+            const Inner = (
+              <div class={`p-3 rounded border ${cls.box} block`}>
+                {!props.selfView && (
+                  <div class="flex items-start justify-between gap-2 mb-1">
+                    <div class="min-w-0">
+                      <div class="font-medium text-aps-navy text-sm truncate">{r.first_name} {r.last_name}</div>
+                      <div class="text-xs text-slate-500 truncate">{r.school_name || ''}</div>
+                    </div>
+                    <span class={`shrink-0 text-[11px] px-2 py-0.5 rounded-full border ${cls.pill}`}>{cls.label}</span>
+                  </div>
+                )}
+                <div class="flex items-baseline justify-between text-sm">
+                  <span><strong class="tabular-nums">{Number(r.total_hours || 0).toFixed(2)}h</strong> <span class="text-xs text-slate-500">/ {target.toFixed(2)}h</span></span>
+                  <span class="text-xs tabular-nums">{(pct * 100).toFixed(0)}%</span>
+                </div>
+                <div class="mt-1 h-2 rounded-full bg-white/70 overflow-hidden border border-white">
+                  <div class={`h-full ${cls.bar}`} style={`width:${barWidth}`}></div>
+                </div>
+                <div class="mt-1 text-[11px] text-slate-600">
+                  <span class="text-aps-blue">{Number(r.internal_hours || 0).toFixed(2)}h internal</span>
+                  {' · '}
+                  <span class="text-aps-navy">{Number(r.external_hours || 0).toFixed(2)}h external</span>
+                </div>
+              </div>
+            );
+            return props.linkPrefix && !props.selfView ? (
+              <a href={`${props.linkPrefix}/${r.teacher_id}`} class="block hover:opacity-90 transition">{Inner}</a>
+            ) : Inner;
+          })}
+        </div>
+      )}
+
+      {!props.hideLegend && !props.selfView && (
+        <p class="text-[11px] text-slate-500 mt-3">
+          <i class="fas fa-circle-info mr-1"></i>
+          Heat-map combines verified internal-LMS PD (with hours credited at verification time) and approved external PD.
+          {' '}Target is admin-editable in <a href="/admin/settings/pd-hours" class="text-aps-blue hover:underline">Admin → PD-hours target</a>.
+        </p>
+      )}
+    </div>
   );
 }
 

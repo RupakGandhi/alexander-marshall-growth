@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
-import { Layout, Card } from '../lib/layout';
+import { Layout, Card, PDHoursHeatMap } from '../lib/layout';
 import { requireRole } from '../lib/auth';
-import { getObservation } from '../lib/db';
+import { getObservation, getTeacherPDHoursSummary } from '../lib/db';
 import { formatDate, levelColor, levelLabels, statusBadge, statusLabel } from '../lib/ui';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -33,7 +33,10 @@ app.get('/', async (c) => {
            AND (o.status='published' OR o.status='acknowledged')) AS published_obs
      FROM schools s WHERE s.district_id=1 ORDER BY s.name`
   ).all();
-  return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} welcome={welcome} />);
+  // Fix 6 — district-wide PD-hours heat-map data.  No school filter at this
+  // level (district overview), so every active teacher is included.
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} welcome={welcome} pdHours={pdHours} />);
 });
 
 // By school drill-down
@@ -347,7 +350,8 @@ export default app;
 
 // ============================== VIEWS ==============================
 
-function SuperintendentHome({ user, kpis, schools, welcome }: any) {
+function SuperintendentHome({ user, kpis, schools, welcome, pdHours }: any) {
+  pdHours = pdHours || { target: 22.5, rows: [] };
   return (
     <Layout title="District Overview" user={user} activeNav="supt-home" autoLaunchTour={!!welcome}>
       <h1 class="font-display text-2xl text-aps-navy mb-1">District Overview</h1>
@@ -381,6 +385,13 @@ function SuperintendentHome({ user, kpis, schools, welcome }: any) {
             </div>
           </div>
         }
+      </Card>
+
+      {/* Fix 6 — Unified PD-hours heat-map.  Combines verified internal-LMS
+          modules (Fix 7 credited hours) and approved external PD (Fix 5) into
+          one per-teacher progress visual. */}
+      <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mt-4">
+        <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/superintendent/teachers" />
       </Card>
 
       <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">

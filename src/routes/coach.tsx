@@ -2,7 +2,8 @@ import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
 import { Layout, Card } from '../lib/layout';
 import { requireRole } from '../lib/auth';
-import { getAssignedTeachers } from '../lib/db';
+import { getAssignedTeachers, logActivity } from '../lib/db';
+import { recommendModule } from '../lib/pd';
 import { formatDate, formatDateTime, statusBadge, statusLabel } from '../lib/ui';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -69,7 +70,54 @@ app.get('/teachers/:id', async (c) => {
      ORDER BY f.opened_at DESC`
   ).bind(teacherId).all();
 
-  return c.html(<CoachTeacher user={user} teacher={teacher} observations={obsWithFeedback} focusAreas={focus.results || []} />);
+  // Fix 4 — coaches can recommend PD modules to their teachers.  IMPORTANT:
+  // this query reads ONLY from the pd_modules + framework tables (no
+  // observation_scores, no rubric levels exposed to the coach). The
+  // dropdown still shows the module's target_level number because that's
+  // a pedagogy-library property of the module itself, not a score on the
+  // teacher.  No-scores rule is preserved.
+  const modulesRes = await c.env.DB.prepare(
+    `SELECT m.id, m.title, m.est_minutes,
+            d.code AS domain_code, i.code AS indicator_code, i.name AS indicator_name
+       FROM pd_modules m
+       JOIN framework_indicators i ON i.id = m.indicator_id
+       JOIN framework_domains    d ON d.id = i.domain_id
+      WHERE m.active = 1
+      ORDER BY d.sort_order, i.sort_order, m.title`
+  ).all();
+
+  const msg = c.req.query('msg');
+  return c.html(<CoachTeacher
+    user={user}
+    teacher={teacher}
+    observations={obsWithFeedback}
+    focusAreas={focus.results || []}
+    modules={(modulesRes.results as any[]) || []}
+    msg={msg}
+  />);
+});
+
+// Fix 4 — coach manual recommendation. Same assignment guard, same
+// recommendModule() helper as the appraiser path. No score data is
+// read or written; we only INSERT a row into pd_enrollments.
+app.post('/teachers/:id/recommend-module', async (c) => {
+  const user = c.get('user')!;
+  const teacherId = Number(c.req.param('id'));
+  const assign = await c.env.DB.prepare(
+    `SELECT 1 FROM assignments WHERE teacher_id=? AND staff_id=? AND relationship='coach' AND active=1`
+  ).bind(teacherId, user.id).first();
+  if (!assign && user.role !== 'super_admin') return c.text('Not assigned to this teacher', 403);
+  const body = await c.req.parseBody();
+  const moduleId = Number(body.module_id);
+  const note = String(body.note || '').trim() || null;
+  if (!moduleId) return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Pick a module first.')}`);
+  try {
+    await recommendModule(c.env.DB, teacherId, moduleId, user.id, note, c.env);
+    await logActivity(c.env.DB, user.id, 'pd_enrollment', moduleId, 'recommend_module', { teacherId, note });
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Module recommended — the teacher has been notified.')}`);
+  } catch (err: any) {
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Could not recommend: ' + (err?.message || 'unknown error'))}`);
+  }
 });
 
 export default app;
@@ -107,7 +155,8 @@ function CoachHome({ user, teachers, welcome }: any) {
   );
 }
 
-function CoachTeacher({ user, teacher, observations, focusAreas }: any) {
+function CoachTeacher({ user, teacher, observations, focusAreas, modules, msg }: any) {
+  modules = modules || [];
   return (
     <Layout title={`${teacher.first_name} ${teacher.last_name}`} user={user} activeNav="co-home">
       <div class="mb-4"><a href="/coach" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back</a></div>
@@ -116,6 +165,44 @@ function CoachTeacher({ user, teacher, observations, focusAreas }: any) {
         <p class="text-slate-600 text-sm">{teacher.title || 'Teacher'} · {teacher.email}</p>
         <p class="text-xs text-slate-500 mt-1 italic"><i class="fas fa-shield-alt mr-1"></i>Coach view — you see focus areas and teacher-facing feedback only. Scores and evaluator private notes are confidential.</p>
       </div>
+
+      {msg && <div class="mb-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+
+      {/* Fix 4 — coach manual recommendation.  Sits beneath the persona banner
+          so the no-scores rule is visually reinforced: the coach picks a PD
+          module from the library and writes a note, but never sees a rubric
+          level or evaluator comment. */}
+      <Card title="Recommend a PD module" icon="fas fa-hand-pointer" class="mb-4">
+        {modules.length === 0 ? (
+          <p class="text-sm text-slate-500">No active PD modules in the library yet.</p>
+        ) : (
+          <form method="post" action={`/coach/teachers/${teacher.id}/recommend-module`} class="grid md:grid-cols-3 gap-2 items-end">
+            <label class="block text-xs text-slate-600 md:col-span-1">
+              <span class="block mb-1 font-medium">Module</span>
+              <select name="module_id" required class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+                <option value="">— Select a module —</option>
+                {modules.map((m: any) => (
+                  <option value={m.id}>
+                    {m.domain_code}.{(m.indicator_code || '').toUpperCase()} · {m.title} ({m.est_minutes}m)
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label class="block text-xs text-slate-600 md:col-span-2">
+              <span class="block mb-1 font-medium">Note for the teacher <span class="text-slate-400 font-normal">(optional)</span></span>
+              <input name="note" type="text"
+                placeholder="Why this module is worth their time"
+                class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm" />
+            </label>
+            <div class="md:col-span-3">
+              <button class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm">
+                <i class="fas fa-paper-plane mr-1"></i>Recommend module
+              </button>
+              <span class="text-[11px] text-slate-500 ml-2">The teacher will see this on their dashboard.</span>
+            </div>
+          </form>
+        )}
+      </Card>
 
       <Card title="Active Focus Areas" icon="fas fa-bullseye">
         {focusAreas.length === 0 ? <p class="text-slate-500 text-sm">No active focus areas for this teacher.</p> :

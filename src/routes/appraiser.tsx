@@ -1,11 +1,13 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
-import { Layout, Card, Button, DomainTabs } from '../lib/layout';
+import { Layout, Card, Button, DomainTabs, PDHoursHeatMap } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import {
   getAssignedTeachers, getTeacherSummary, getObservation,
   getDomainsWithIndicators, getActiveFramework, getCurrentSchoolYear,
   getPedagogy, logActivity, getTeacherPerformanceSummary,
+  teacherContextNote, listExternalPdQueue, getExternalPd,
+  getTeacherPDHoursSummary, getNumericSetting,
 } from '../lib/db';
 import {
   levelColor, levelLabels, formatDate, formatDateTime,
@@ -34,7 +36,23 @@ app.get('/', async (c) => {
     ).bind(...ids).all();
     for (const r of (rows.results as any[])) latest[r.teacher_id] = r;
   }
-  return c.html(<AppraiserHome user={user} teachers={teachers} latest={latest} welcome={welcome} />);
+  // Fix 6 — PD-hours heat-map scoped to this appraiser's assigned teachers.
+  // We pull per-teacher rows by passing the teacher-id list one at a time
+  // (getTeacherPDHoursSummary supports schoolIds + teacherId but not a
+  // teacher-list at once). For typical assignments (≤30 teachers) this is
+  // a tight loop, and each call is a single fast aggregation query.
+  const heatRowsAll: any[] = [];
+  let heatTarget = 22.5;
+  for (const t of ids) {
+    const r = await getTeacherPDHoursSummary(c.env.DB, { teacherId: t });
+    if (r.rows.length) heatRowsAll.push(r.rows[0]);
+    heatTarget = r.target;
+  }
+  // Sort low → met so behind-target teachers float to the top.
+  const heatOrder = { low: 0, mid: 1, near: 2, met: 3 } as const;
+  heatRowsAll.sort((a, b) => heatOrder[a.heat as keyof typeof heatOrder] - heatOrder[b.heat as keyof typeof heatOrder]);
+  const pdHours = { target: heatTarget, rows: heatRowsAll };
+  return c.html(<AppraiserHome user={user} teachers={teachers} latest={latest} welcome={welcome} pdHours={pdHours} />);
 });
 
 // ---- Single teacher detail
@@ -49,7 +67,52 @@ app.get('/teachers/:id', async (c) => {
   const summary = await getTeacherSummary(c.env.DB, teacherId);
   if (!summary) return c.text('Teacher not found', 404);
   const performance = await getTeacherPerformanceSummary(c.env.DB, teacherId);
-  return c.html(<AppraiserTeacherDetail user={user} summary={summary} performance={performance} />);
+  // Fix 4 — modules available for manual recommendation. Active only; sorted
+  // by domain so the dropdown reads naturally for the appraiser.
+  const modulesRes = await c.env.DB.prepare(
+    `SELECT m.id, m.title, m.est_minutes, m.target_level,
+            d.code AS domain_code, i.code AS indicator_code, i.name AS indicator_name
+       FROM pd_modules m
+       JOIN framework_indicators i ON i.id = m.indicator_id
+       JOIN framework_domains    d ON d.id = i.domain_id
+      WHERE m.active = 1
+      ORDER BY d.sort_order, i.sort_order, m.target_level, m.title`
+  ).all();
+  const msg = c.req.query('msg');
+  return c.html(<AppraiserTeacherDetail
+    user={user}
+    summary={summary}
+    performance={performance}
+    modules={(modulesRes.results as any[]) || []}
+    msg={msg}
+  />);
+});
+
+// ---- Fix 4: Manually recommend a PD module to this teacher.
+// Available to appraisers and super_admins on their own teacher detail page.
+// The recommendModule() helper writes pd_enrollments.source='assigned' plus
+// the recommender's id + optional note, and fires a notification. The coach
+// uses a separate route in coach.tsx to keep the no-scores boundary clean.
+app.post('/teachers/:id/recommend-module', async (c) => {
+  const user = c.get('user')!;
+  const teacherId = Number(c.req.param('id'));
+  // Same assignment guard as the GET handler.
+  const assign = await c.env.DB.prepare(
+    `SELECT 1 FROM assignments WHERE teacher_id = ? AND staff_id = ? AND relationship='appraiser' AND active=1`
+  ).bind(teacherId, user.id).first();
+  if (!assign && user.role !== 'super_admin') return c.text('Not assigned to this teacher', 403);
+  const body = await c.req.parseBody();
+  const moduleId = Number(body.module_id);
+  const note = String(body.note || '').trim() || null;
+  if (!moduleId) return c.redirect(`/appraiser/teachers/${teacherId}?msg=${encodeURIComponent('Pick a module first.')}`);
+  try {
+    const { recommendModule } = await import('../lib/pd');
+    await recommendModule(c.env.DB, teacherId, moduleId, user.id, note, c.env);
+    await logActivity(c.env.DB, user.id, 'pd_enrollment', moduleId, 'recommend_module', { teacherId, note });
+    return c.redirect(`/appraiser/teachers/${teacherId}?msg=${encodeURIComponent('Module recommended — the teacher has been notified.')}`);
+  } catch (err: any) {
+    return c.redirect(`/appraiser/teachers/${teacherId}?msg=${encodeURIComponent('Could not recommend: ' + (err?.message || 'unknown error'))}`);
+  }
 });
 
 // ---- Start a new observation
@@ -237,6 +300,17 @@ app.post('/observations/:id/generate-feedback', async (c) => {
   const o = await getObservation(c.env.DB, id);
   if (!o || (o.appraiser_id !== user.id && user.role !== 'super_admin')) return c.text('Forbidden', 403);
 
+  // Fix 11: classroom-context awareness. The teacher's subject_area / grade_band /
+  // classroom_type live on users.* and arrived on `o` via the JOIN as t_subject_area
+  // etc. teacherContextNote() returns '' when all three are empty so we degrade
+  // gracefully for any teacher whose profile hasn't been filled in yet — no
+  // existing observations regress.
+  const ctxNote = teacherContextNote({
+    subject_area:   (o as any).t_subject_area,
+    classroom_type: (o as any).t_classroom_type,
+    grade_band:     (o as any).t_grade_band,
+  });
+
   // Wipe prior auto-generated items (preserve custom ones)
   await c.env.DB.prepare(
     `DELETE FROM feedback_items WHERE observation_id = ? AND source = 'pedagogy_library'`
@@ -247,10 +321,11 @@ app.post('/observations/:id/generate-feedback', async (c) => {
   // If there are raw scripted notes, include an organized summary chunk
   if (scripted) {
     const summaryChunk = organizeScriptedNotes(scripted);
+    const body = ctxNote ? `${ctxNote}\n\n${summaryChunk}` : summaryChunk;
     await c.env.DB.prepare(
       `INSERT INTO feedback_items (observation_id, indicator_id, category, title, body, sort_order, source)
        VALUES (?, NULL, 'glow', ?, ?, ?, 'pedagogy_library')`
-    ).bind(id, 'What I saw in your classroom', summaryChunk, order++).run();
+    ).bind(id, 'What I saw in your classroom', body, order++).run();
   }
 
   for (const s of (o.scores as any[])) {
@@ -270,7 +345,10 @@ app.post('/observations/:id/generate-feedback', async (c) => {
     ).bind(id, s.indicator_id, category, `${indLabel} — ${levelLabel}`, glowBody, order++).run();
 
     if (moves && moves.length && s.level < 4) {
-      const nextBody = moves.slice(0, 4).map((m: string) => `• ${m}`).join('\n');
+      // Fix 11: prepend the context note to the "next steps" body so the
+      // appraiser sees concrete moves filtered through grade-band / subject lens.
+      const movesBody = moves.slice(0, 4).map((m: string) => `• ${m}`).join('\n');
+      const nextBody = ctxNote ? `${ctxNote}\n\n${movesBody}` : movesBody;
       await c.env.DB.prepare(
         `INSERT INTO feedback_items (observation_id, indicator_id, category, title, body, sort_order, source)
          VALUES (?,?, 'next_step', ?, ?, ?, 'pedagogy_library')`
@@ -453,15 +531,126 @@ app.post('/observations/:id/delete', async (c) => {
   return c.redirect('/appraiser');
 });
 
+// ============================================================================
+// Fix 5 — External PD Submission Review Queue
+// ============================================================================
+// Teachers post external PD via /teacher/external-pd (handled in teacher.tsx).
+// The appraiser sees the queue here, scoped to their assigned teachers.
+// Three review actions: approve (with hour count), needs_revision, decline.
+// Super-admins see ALL submissions and can act on any of them.
+// ----------------------------------------------------------------------------
+
+app.get('/external-pd', async (c) => {
+  const user = c.get('user')!;
+  const status = c.req.query('status') || undefined;
+  // Appraisers see only their assigned teachers; super_admin sees everything.
+  const rows = await listExternalPdQueue(c.env.DB, {
+    status,
+    appraiserId: user.role === 'super_admin' ? undefined : user.id,
+  });
+  return c.html(<ExternalPdQueue user={user} rows={rows} filterStatus={status} />);
+});
+
+app.get('/external-pd/:id', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const row = await getExternalPd(c.env.DB, id);
+  if (!row) return c.text('Not found', 404);
+  // Permission gate: appraiser must be assigned to this teacher.
+  if (user.role !== 'super_admin') {
+    const ok = await c.env.DB.prepare(
+      `SELECT 1 FROM assignments WHERE teacher_id=? AND staff_id=? AND relationship='appraiser' AND active=1`
+    ).bind(row.teacher_id, user.id).first();
+    if (!ok) return c.text('Not assigned to this teacher', 403);
+  }
+  const msg = c.req.query('msg');
+  return c.html(<ExternalPdDetail user={user} row={row} msg={msg} />);
+});
+
+app.post('/external-pd/:id/review', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const row = await getExternalPd(c.env.DB, id);
+  if (!row) return c.text('Not found', 404);
+  if (user.role !== 'super_admin') {
+    const ok = await c.env.DB.prepare(
+      `SELECT 1 FROM assignments WHERE teacher_id=? AND staff_id=? AND relationship='appraiser' AND active=1`
+    ).bind(row.teacher_id, user.id).first();
+    if (!ok) return c.text('Not assigned to this teacher', 403);
+  }
+  const body = await c.req.parseBody();
+  const action = String(body.action || '').trim();   // 'approve' | 'revise' | 'decline'
+  const note = String(body.review_note || '').trim() || null;
+  // Approved hours: defaults to the teacher's self-reported value but can be
+  // overridden. We round to 0.25h to match the internal-credit granularity.
+  let approvedHours: number | null = null;
+  if (action === 'approve') {
+    const raw = String(body.approved_hours ?? '').trim();
+    const parsed = raw !== '' ? Number(raw) : Number(row.hours);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 200) {
+      approvedHours = Math.round(parsed * 4) / 4;
+    } else {
+      return c.redirect(`/appraiser/external-pd/${id}?msg=${encodeURIComponent('Enter a valid hour value between 0 and 200.')}`);
+    }
+  }
+  const newStatus =
+    action === 'approve' ? 'approved'
+    : action === 'revise' ? 'needs_revision'
+    : action === 'decline' ? 'declined'
+    : null;
+  if (!newStatus) return c.redirect(`/appraiser/external-pd/${id}?msg=${encodeURIComponent('Pick approve, revise, or decline.')}`);
+
+  await c.env.DB.prepare(
+    `UPDATE external_pd_submissions
+        SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
+            review_note = ?, approved_hours = ?
+      WHERE id = ?`
+  ).bind(newStatus, user.id, note, approvedHours, id).run();
+
+  // Notify teacher of the decision.
+  const titles: Record<string, string> = {
+    approved: 'External PD approved',
+    needs_revision: 'External PD needs revision',
+    declined: 'External PD declined',
+  };
+  const bodyText =
+    newStatus === 'approved'
+      ? `Your external PD "${row.title}" was approved for ${approvedHours?.toFixed(2)} hour${approvedHours === 1 ? '' : 's'} of credit.${note ? ` Note: ${note}` : ''}`
+      : newStatus === 'needs_revision'
+      ? `Your supervisor asked for another pass on "${row.title}".${note ? ` Note: ${note}` : ''}`
+      : `"${row.title}" was declined.${note ? ` Reason: ${note}` : ''}`;
+  const { notify } = await import('../lib/notifications');
+  await notify(c.env.DB, {
+    user_id: row.teacher_id,
+    kind: 'external_pd_' + newStatus,
+    title: titles[newStatus],
+    body: bodyText,
+    url: '/teacher#external-pd',
+    entity_type: 'external_pd_submission', entity_id: id, actor_user_id: user.id,
+  }, c.env);
+
+  await logActivity(c.env.DB, user.id, 'external_pd_submission', id, 'review_' + newStatus, { approved_hours: approvedHours, note });
+  return c.redirect(`/appraiser/external-pd/${id}?msg=${encodeURIComponent('Decision recorded — teacher notified.')}`);
+});
+
 export default app;
 
 // ============================== VIEWS ==============================
 
-function AppraiserHome({ user, teachers, latest, welcome }: any) {
+function AppraiserHome({ user, teachers, latest, welcome, pdHours }: any) {
+  pdHours = pdHours || { target: 22.5, rows: [] };
   return (
     <Layout title="My Teachers" user={user} activeNav="ap-home" autoLaunchTour={!!welcome}>
       <h1 class="font-display text-2xl text-aps-navy mb-1">My Teachers</h1>
       <p class="text-slate-600 text-sm mb-6">Assigned for observation and evaluation · {teachers.length} teacher{teachers.length!==1?'s':''}</p>
+
+      {/* Fix 6 — PD-hours heat-map scoped to this appraiser's caseload. */}
+      {pdHours.rows.length > 0 && (
+        <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mb-6">
+          <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/appraiser/teachers" />
+        </Card>
+      )}
+
       {teachers.length === 0 ? (
         <Card><p class="text-slate-500 text-sm">No teachers assigned. Contact your super admin for assignments.</p></Card>
       ) : (
@@ -514,8 +703,9 @@ function AppraiserHome({ user, teachers, latest, welcome }: any) {
   );
 }
 
-function AppraiserTeacherDetail({ user, summary, performance }: any) {
+function AppraiserTeacherDetail({ user, summary, performance, modules, msg }: any) {
   const { teacher, observations, focusAreas } = summary;
+  modules = modules || [];
   const perf = performance || { domains: [], latestPerIndicator: [], counts: {}, totals: {} };
   const totalScores = Number(perf.totals?.total_scores || 0);
   const overallAvg = perf.totals?.overall_avg ? Number(perf.totals.overall_avg) : null;
@@ -527,6 +717,7 @@ function AppraiserTeacherDetail({ user, summary, performance }: any) {
   return (
     <Layout title={`${teacher.first_name} ${teacher.last_name}`} user={user} activeNav="ap-home">
       <div class="mb-4"><a href="/appraiser" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back to my teachers</a></div>
+      {msg && <div class="mb-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
 
       <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
@@ -670,6 +861,41 @@ function AppraiserTeacherDetail({ user, summary, performance }: any) {
                 ))}
               </ul>
             }
+          </Card>
+
+          {/* Fix 4 — Manually recommend a PD module to this teacher.  The
+              recommender_note threads through to the teacher's "Recommended
+              for You" card so they see WHY this module is on their list. */}
+          <Card title="Recommend a PD module" icon="fas fa-hand-pointer">
+            {modules.length === 0 ? (
+              <p class="text-sm text-slate-500">No active PD modules in the library yet.</p>
+            ) : (
+              <form method="post" action={`/appraiser/teachers/${teacher.id}/recommend-module`} class="space-y-2">
+                <label class="block text-xs text-slate-600">
+                  <span class="block mb-1 font-medium">Module</span>
+                  <select name="module_id" required class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+                    <option value="">— Select a module —</option>
+                    {modules.map((m: any) => (
+                      <option value={m.id}>
+                        {m.domain_code}.{(m.indicator_code || '').toUpperCase()} · {m.title} ({m.est_minutes}m)
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label class="block text-xs text-slate-600">
+                  <span class="block mb-1 font-medium">Note for the teacher <span class="text-slate-400 font-normal">(optional)</span></span>
+                  <textarea name="note" rows={3}
+                    placeholder="e.g. After Tuesday's observation, I think this anchor-charts module will help you sustain the level-3 routine you started."
+                    class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm"></textarea>
+                </label>
+                <button class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm w-full">
+                  <i class="fas fa-paper-plane mr-1"></i>Recommend module
+                </button>
+                <p class="text-[11px] text-slate-500 mt-1">
+                  The teacher will see this on their "Recommended for You" card and receive a notification.
+                </p>
+              </form>
+            )}
           </Card>
         </div>
       </div>
@@ -1225,5 +1451,175 @@ function FeedbackColumn({ o, items, cat, label, icon, editable }: any) {
         </form>
       )}
     </Card>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Fix 5 views: External PD queue + detail
+// ----------------------------------------------------------------------------
+
+function extPdPill(status: string) {
+  switch (status) {
+    case 'submitted':       return { label: 'Awaiting review', icon: 'fa-hourglass-half', color: 'bg-amber-50 text-amber-800 border-amber-200' };
+    case 'approved':        return { label: 'Approved',        icon: 'fa-circle-check',   color: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
+    case 'declined':        return { label: 'Declined',        icon: 'fa-circle-xmark',   color: 'bg-red-50 text-red-800 border-red-200' };
+    case 'needs_revision':  return { label: 'Needs revision',  icon: 'fa-rotate-left',    color: 'bg-sky-50 text-sky-800 border-sky-200' };
+    default:                return { label: status,            icon: 'fa-circle',         color: 'bg-slate-50 text-slate-700 border-slate-200' };
+  }
+}
+
+function ExternalPdQueue({ user, rows, filterStatus }: any) {
+  const submitted = rows.filter((r: any) => r.status === 'submitted');
+  const revising  = rows.filter((r: any) => r.status === 'needs_revision');
+  const approved  = rows.filter((r: any) => r.status === 'approved');
+  const declined  = rows.filter((r: any) => r.status === 'declined');
+  return (
+    <Layout title="External PD review" user={user} activeNav="ap-ext-pd">
+      <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-clipboard-list mr-2"></i>External PD review queue</h1>
+      <p class="text-slate-600 text-sm mb-4">
+        Conferences, workshops, and outside-LMS PD that your teachers attended. Approved hours count toward each teacher's unified PD-hours total
+        alongside internal LMS modules.
+      </p>
+
+      <div class="mb-4 flex flex-wrap gap-2 text-xs">
+        <a href="/appraiser/external-pd" class={`px-3 py-1.5 rounded border ${!filterStatus ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>All ({rows.length})</a>
+        <a href="/appraiser/external-pd?status=submitted" class={`px-3 py-1.5 rounded border ${filterStatus === 'submitted' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Awaiting review ({submitted.length})</a>
+        <a href="/appraiser/external-pd?status=needs_revision" class={`px-3 py-1.5 rounded border ${filterStatus === 'needs_revision' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Needs revision ({revising.length})</a>
+        <a href="/appraiser/external-pd?status=approved" class={`px-3 py-1.5 rounded border ${filterStatus === 'approved' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Approved ({approved.length})</a>
+        <a href="/appraiser/external-pd?status=declined" class={`px-3 py-1.5 rounded border ${filterStatus === 'declined' ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>Declined ({declined.length})</a>
+      </div>
+
+      {rows.length === 0 ? (
+        <Card><p class="text-sm text-slate-500">Nothing here right now.</p></Card>
+      ) : (
+        <Card>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-left border-b border-slate-200 text-slate-600">
+                  <th class="py-2">Teacher</th>
+                  <th>Activity</th>
+                  <th>Provider</th>
+                  <th class="text-right">Hours</th>
+                  <th>Submitted</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r: any) => {
+                  const pill = extPdPill(r.status);
+                  const hoursDisplay = r.status === 'approved' && r.approved_hours != null
+                    ? `${Number(r.approved_hours).toFixed(2)}h (apr)`
+                    : `${Number(r.hours).toFixed(2)}h`;
+                  return (
+                    <tr class="border-b border-slate-100 hover:bg-slate-50">
+                      <td class="py-2">{r.teacher_first} {r.teacher_last}<div class="text-xs text-slate-500">{r.school_name || '—'}</div></td>
+                      <td>{r.title}</td>
+                      <td class="text-slate-600">{r.provider || <span class="text-slate-400 italic">—</span>}</td>
+                      <td class="text-right tabular-nums">{hoursDisplay}</td>
+                      <td class="text-xs text-slate-500">{formatDate(r.submitted_at)}</td>
+                      <td><span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span></td>
+                      <td><a href={`/appraiser/external-pd/${r.id}`} class="text-aps-blue hover:underline text-xs">Open <i class="fas fa-chevron-right"></i></a></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+    </Layout>
+  );
+}
+
+function ExternalPdDetail({ user, row, msg }: any) {
+  const pill = extPdPill(row.status);
+  const isDecided = row.status === 'approved' || row.status === 'declined';
+  let domains: string[] = [];
+  try { domains = JSON.parse(row.domain_alignment || '[]') || []; } catch {}
+  return (
+    <Layout title={`External PD: ${row.title}`} user={user} activeNav="ap-ext-pd">
+      <div class="mb-2"><a href="/appraiser/external-pd" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>External PD queue</a></div>
+      <h1 class="font-display text-2xl text-aps-navy">{row.title}</h1>
+      <p class="text-slate-600 text-sm">
+        Submitted by <strong>{row.teacher_first} {row.teacher_last}</strong>
+        {row.school_name ? ` · ${row.school_name}` : ''} · {formatDate(row.submitted_at)}
+      </p>
+      <div class="mt-2"><span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span></div>
+      {msg && <div class="mt-3 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">{msg}</div>}
+
+      <Card title="Submission" icon="fas fa-file-lines" class="mt-4">
+        <div class="grid md:grid-cols-2 gap-3 text-sm">
+          <div><div class="text-xs text-slate-500">Provider</div><div>{row.provider || '—'}</div></div>
+          <div><div class="text-xs text-slate-500">Dates</div><div>{row.start_date ? formatDate(row.start_date) : '—'}{row.end_date && row.end_date !== row.start_date ? ` → ${formatDate(row.end_date)}` : ''}</div></div>
+          <div><div class="text-xs text-slate-500">Self-reported hours</div><div class="font-medium">{Number(row.hours).toFixed(2)}h</div></div>
+          <div><div class="text-xs text-slate-500">Domain alignment</div><div>{domains.length ? domains.join(', ') : <span class="text-slate-400 italic">none</span>}</div></div>
+        </div>
+        {row.certificate_url && (
+          <div class="mt-3 text-sm">
+            <span class="text-xs text-slate-500 block">Certificate</span>
+            <a href={row.certificate_url} target="_blank" rel="noopener" class="text-aps-blue hover:underline break-all"><i class="fas fa-up-right-from-square mr-1"></i>{row.certificate_url}</a>
+          </div>
+        )}
+        {row.description && (
+          <div class="mt-3">
+            <div class="text-xs text-slate-500 mb-1">Description</div>
+            <div class="p-3 bg-slate-50 border border-slate-200 rounded text-sm whitespace-pre-wrap">{row.description}</div>
+          </div>
+        )}
+      </Card>
+
+      {isDecided && (
+        <Card title="Decision" icon="fas fa-gavel" class="mt-4">
+          <div class="text-sm">
+            <strong>{pill.label}</strong>
+            {row.reviewer_first ? ` by ${row.reviewer_first} ${row.reviewer_last}` : ''}
+            {row.reviewed_at ? ` on ${formatDateTime(row.reviewed_at)}` : ''}
+          </div>
+          {row.status === 'approved' && row.approved_hours != null && (
+            <div class="mt-2 inline-flex items-center text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300">
+              <i class="fas fa-clock mr-1"></i>{Number(row.approved_hours).toFixed(2)} approved PD hours
+            </div>
+          )}
+          {row.review_note && <div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded text-sm whitespace-pre-wrap">{row.review_note}</div>}
+        </Card>
+      )}
+
+      {!isDecided && (
+        <Card title="Review" icon="fas fa-gavel" class="mt-4">
+          <form method="post" action={`/appraiser/external-pd/${row.id}/review`} class="space-y-3">
+            <label class="block text-sm">
+              <span class="block text-slate-700 mb-1 font-medium">Review note <span class="text-slate-400 font-normal">(visible to teacher)</span></span>
+              <textarea name="review_note" rows={3} class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
+                placeholder="e.g. Great alignment with domain B. Approving 6 of the 8 self-reported hours since the keynote wasn't instructional."></textarea>
+            </label>
+            <div class="flex flex-wrap items-end gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded">
+              <div>
+                <label class="block text-xs font-semibold text-emerald-900 mb-1" for={`ap-hours-${row.id}`}><i class="fas fa-clock mr-1"></i>Approved PD hours</label>
+                <input
+                  id={`ap-hours-${row.id}`}
+                  type="number"
+                  name="approved_hours"
+                  step="0.25"
+                  min="0"
+                  max="200"
+                  value={Number(row.hours).toFixed(2)}
+                  class="w-28 border border-emerald-300 rounded px-2 py-1.5 text-sm"
+                />
+                <div class="text-xs text-emerald-800 mt-1">Default = teacher's self-reported value ({Number(row.hours).toFixed(2)}h).</div>
+              </div>
+              <button name="action" value="approve" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm font-medium shadow-sm">
+                <i class="fas fa-circle-check mr-1"></i>Approve &amp; Credit Hours
+              </button>
+            </div>
+            <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
+              <button name="action" value="revise"  class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-sm"><i class="fas fa-rotate-left mr-1"></i>Ask for revision</button>
+              <button name="action" value="decline" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-sm"><i class="fas fa-circle-xmark mr-1"></i>Decline</button>
+            </div>
+          </form>
+        </Card>
+      )}
+    </Layout>
   );
 }

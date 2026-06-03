@@ -324,9 +324,27 @@ reviewPd.post('/:id/verify', async (c) => {
     ).bind(e.teacher_id, user.id).first();
     if (!ok) return c.text('Forbidden', 403);
   }
-  await verifyDeliverable(c.env.DB, id, user.id, action === 'verify', note, c.env);
-  await logActivity(c.env.DB, user.id, 'pd_enrollment', id, action === 'verify' ? 'verify' : 'request_revision');
-  return c.redirect(`/pd/review/${id}?msg=${action === 'verify' ? 'Verified' : 'Sent+back+for+revision'}`);
+  // Fix 7 — when the supervisor clicks "Approve & Credit Hours" the form
+  // submits a non-empty credit_hours value. We parse it defensively (NaN /
+  // negative / out-of-range fall back to null so the legacy "no credit" path
+  // runs and the aggregation reads 0 hours for this enrollment).
+  let creditHours: number | null = null;
+  if (action === 'verify') {
+    const raw = String(body.credit_hours ?? '').trim();
+    if (raw !== '') {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0 && parsed <= 100) {
+        // Round to 0.25h granularity (the same step the UI uses) so audit
+        // trails don't pick up floating-point noise like 1.7500000000003.
+        creditHours = Math.round(parsed * 4) / 4;
+      }
+    }
+  }
+  await verifyDeliverable(c.env.DB, id, user.id, action === 'verify', note, c.env, creditHours);
+  await logActivity(c.env.DB, user.id, 'pd_enrollment', id,
+    action === 'verify' ? (creditHours ? 'verify_with_credit' : 'verify') : 'request_revision',
+    creditHours ? { credit_hours: creditHours } : undefined);
+  return c.redirect(`/pd/review/${id}?msg=${action === 'verify' ? (creditHours ? `Verified+%26+${creditHours}h+credited` : 'Verified') : 'Sent+back+for+revision'}`);
 });
 
 reviewPd.post('/:id/assign', async (c) => {
@@ -1507,13 +1525,46 @@ function ReviewPdDetail({ user, e, teacher, reflections, criteria, scoreMap, msg
 
       {(e.status === 'submitted' || e.status === 'needs_revision') && (
         <Card title="Verify" icon="fas fa-gavel" class="mt-4">
-          <form method="post" action={`/pd/review/${e.id}/verify`} class="space-y-2">
+          {/* Fix 7 — Artifact Approval Gates PD Credit.  The default hour value
+              is the module's est_minutes / 60 rounded to the nearest 0.25h.
+              The supervisor can override (or zero out) before clicking
+              "Approve & Credit Hours".  "Verify complete" without crediting
+              hours remains available for cases where the module wasn't a
+              clock-hour module (e.g. a self-paced reflection). */}
+          <form method="post" action={`/pd/review/${e.id}/verify`} class="space-y-3">
             <label class="text-sm block">Note to teacher <span class="text-slate-400">(optional)</span>
               <textarea name="note" rows={3} class="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"></textarea>
             </label>
-            <div class="flex items-center gap-2">
-              <button name="action" value="verify" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded text-sm"><i class="fas fa-check mr-1"></i>Verify complete</button>
-              <button name="action" value="revise" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-sm"><i class="fas fa-rotate-left mr-1"></i>Ask for revision</button>
+            <div class="flex flex-wrap items-end gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded">
+              <div>
+                <label class="block text-xs font-semibold text-emerald-900 mb-1" for={`credit-hours-${e.id}`}>
+                  <i class="fas fa-clock mr-1"></i>PD hours to credit
+                </label>
+                <input
+                  id={`credit-hours-${e.id}`}
+                  type="number"
+                  name="credit_hours"
+                  step="0.25"
+                  min="0"
+                  max="100"
+                  value={e.est_minutes ? (Math.round((e.est_minutes / 60) * 4) / 4).toFixed(2) : '1.00'}
+                  class="w-28 border border-emerald-300 rounded px-2 py-1.5 text-sm"
+                />
+                <div class="text-xs text-emerald-800 mt-1">Default = module's estimate ({e.est_minutes || 60} min). Set to 0 to verify without crediting hours.</div>
+              </div>
+              <button
+                name="action"
+                value="verify"
+                class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm font-medium shadow-sm"
+              ><i class="fas fa-circle-check mr-1"></i>Approve &amp; Credit Hours</button>
+            </div>
+            <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
+              <button
+                name="action"
+                value="revise"
+                class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-sm"
+              ><i class="fas fa-rotate-left mr-1"></i>Ask for revision</button>
+              <span class="text-xs text-slate-500">Sends the deliverable back to the teacher with your note.</span>
             </div>
           </form>
         </Card>
@@ -1522,6 +1573,15 @@ function ReviewPdDetail({ user, e, teacher, reflections, criteria, scoreMap, msg
       {e.status === 'verified' && (
         <Card title="Verified" icon="fas fa-circle-check" class="mt-4">
           <div class="text-sm text-emerald-900">{e.verification_note || 'Marked complete.'}</div>
+          {/* Fix 7 — show credited hours when the verifier banked them.  This
+              is the audit trail the heat-map aggregation reads from. */}
+          {e.hours_credited != null && e.hours_credited > 0 && (
+            <div class="mt-2 inline-flex items-center text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300">
+              <i class="fas fa-clock mr-1"></i>
+              {Number(e.hours_credited).toFixed(2)} PD hours credited
+              {e.credited_at ? ` on ${formatDateTime(e.credited_at)}` : ''}
+            </div>
+          )}
           <div class="text-xs text-emerald-700 mt-1">{formatDateTime(e.verified_at)}</div>
         </Card>
       )}
