@@ -8,6 +8,96 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 4, 2026] — Pre-launch sweep + reports get sortable columns + heat-map sort/filter toolbar
+
+Triggered by the June 4 audit report (which confirmed all prior blockers cleared) and
+Dr. Gandhi's directive: *"Do that and do the heat map column sorting. Do that sorting
+in all admin reports and superintendent reports so they have the flexibility to
+visualize the data however they need."* This entry covers the two re-verification
+sweeps the audit asked for **and** the report-flexibility upgrade.
+
+### Pre-launch verification sweeps — both PASSED
+
+| # | Sweep | Result |
+| --- | --- | --- |
+| 1 | End-to-end publish workflow on freshly-wiped DB: principal Shannon Faller → mini observation on teacher Jil Stahosky → score indicator 1 at level 2 → publish with signature | ✅ 1 obs, 1 score, 4 notifications, 1 auto-enrollment created with `target_level=2`, `est_minutes=60` (Option A tier baseline) — teacher dashboard renders growth-oriented language with zero level-prefix leaks |
+| 2 | PD module CSV export → re-import idempotency on 180-module library | ✅ Export = 1.74 MB / 22,049 lines (multi-line module content); re-import = `"180 updated · 0 created · 0 skipped"`; row count, max_id, and `sum_est_min` all match before/after exactly |
+
+### Hard-wipe FK fix (carried forward from June 3 night)
+
+| # | Finding | Status | Action |
+| --- | --- | --- | --- |
+| W1 | `CLEAR ALL DEMO DATA` returns 500 with `D1_ERROR: FOREIGN KEY constraint failed: SQLITE_CONSTRAINT_FOREIGNKEY` | 🔴 Blocker | **Fixed** — `pd_enrollments.source_observation_id → observations(id)` is non-cascading; route now deletes `pd_enrollments` before `observations` (also documented full FK cascade map inline) |
+
+### Reports flexibility upgrade — sortable columns + heat-map controls
+
+Every admin and superintendent table now has client-side multi-column sorting,
+and the PD Hours Heat-Map gets a sort + filter toolbar. Progressive enhancement:
+if JS is disabled, tables render in their original order with no broken UI.
+
+**Two new self-contained static helpers** (zero dependencies, ~6 KB total):
+
+- `public/static/sortable.js` — Drives any `<table data-sortable="true" id="…">`. Type-aware comparators (`text` / `number` / `date` / `rating`), shift-click multi-sort with priority badges, stable sort, sessionStorage persistence per `pathname:tableId`, per-table reset button via `<button data-sort-reset="…">`. Per-cell `data-sort-value` overrides formatted display values so `formatDateTime("Jun 4, 2026, 11:42 AM CDT")` sorts by underlying ISO timestamp. Per-column `data-sort-disable="true"` excludes action/decoration columns.
+- `public/static/heatmap-sort.js` — Drives PDHoursHeatMap (tile-based, not table-based). 9 sort modes (heat group / hours / % of target / internal / external / name / school) + 6 filter modes (all + 5 heat groups). Live "N of M shown" count. WeakMap-stored original DOM order so reset is deterministic. Persists per `pathname:gridId`.
+
+Both helpers wired globally via `<script defer>` in `src/lib/layout.tsx`.
+
+### Sortable surfaces (10 tables + 1 heat-map)
+
+| Surface | Table id | Columns |
+| --- | --- | --- |
+| `/admin/users` | `admin-users-table` | Name / Email / Role / School / Last login |
+| `/admin/schools` | `admin-schools-table` | Name / Grade span / Address / Phone |
+| `/admin/data` (audit summary) | `admin-data-recent-audit` | When / Actor / Action / Entity / Rows / Detail |
+| `/admin/data` (all observations) | `admin-all-observations` | ID / Type / Teacher / Observer / School / When / Status |
+| `/admin/data/audit-log` | `admin-audit-log` | When / Actor / Action / Entity / Rows / Filters / Detail |
+| `/admin/external-pd` | `admin-external-pd-audit` | Teacher / School / Activity / Provider / Hrs(self) / Hrs(apr) / Status / Reviewer / Submitted |
+| `/superintendent` | `supt-by-school-table` | School / Grades / Teachers / Observations / Published |
+| `/superintendent/schools` | `supt-school-${id}-teachers` (per school) | Teacher / Title / Published Obs / Last Observed |
+| `/superintendent/teachers` | `supt-all-teachers` | Teacher / School / Title / Obs / Published / Last observed |
+| `/superintendent/teachers/:id` | `supt-teacher-obs-history` | Date / Type / Appraiser / Status |
+| `/superintendent/observations/:id` | `supt-obs-scores` | Domain / Indicator / Rating (numeric) |
+| `/superintendent/insights` | `supt-insights-groups` | Group / Observations / Scores / Average (numeric) / Distribution(no-sort) |
+| `/superintendent` (heat-map widget) | `pd-heatmap-grid-*` | Sort + Filter dropdowns, 9 modes × 6 filters |
+
+### UX details
+
+- Each sortable table gets a small `<button data-sort-reset>` ("Reset sort" with rotate-left icon) above the table; click to clear the saved sort and return to server-side order
+- A one-line tooltip ("Click any column header to sort. Shift-click for multi-column sort.") sits below each reset button so the affordance is discoverable
+- Header arrows render via CSS only — no extra DOM. Active column gets an arrow + priority badge `(1)`, `(2)` etc. for multi-sort chains
+- `data-sort-value` overrides applied to every date cell so the sort key is the raw ISO timestamp, not the human-readable "Jun 4, 2026, 11:42 AM CDT" formatting
+- Insights Average cell wraps a colored badge but sorts numerically because of `data-sort-value={aAvg}`
+- Heat-map "Original (heat group)" reset uses a per-grid WeakMap of original DOM nodes — survives sort + filter cycles correctly
+
+### JSX fragment fixes
+
+The sortable wiring exposed three ternary-else branches that previously held a single
+node but now hold three siblings (reset-button div + tooltip p + table div). All three
+wrapped in fragments to satisfy esbuild's JSX parser:
+
+- `superintendent.tsx:527-544` — Observation History table (per-teacher detail)
+- `superintendent.tsx:693-748` — Insights group-by table
+- `admin.tsx:2214-2236` — Recent audit-log preview on `/admin/data`
+- `admin.tsx:2244-2283` — All observations table on `/admin/data`
+- `admin.tsx:2323-2352` — Full audit-log viewer on `/admin/data/audit-log`
+
+### Files touched
+
+- `public/static/sortable.js` — **new** (reusable progressive-enhancement table enhancer)
+- `public/static/heatmap-sort.js` — **new** (PDHoursHeatMap sort + filter helper)
+- `src/lib/layout.tsx` — global `<script defer>` for both helpers; PDHoursHeatMap now emits stable `gridId`, sort/filter toolbar with 9 sort + 6 filter options + count label, per-tile `data-heatmap-tile` + `data-heat`/`data-total`/`data-pct`/`data-internal`/`data-external`/`data-name`/`data-school` attributes
+- `src/routes/admin.tsx` — 6 tables wired; 4 date cells got `data-sort-value`; 3 ternaries fragment-wrapped
+- `src/routes/superintendent.tsx` — 6 tables wired; date + average cells got `data-sort-value`; 2 ternaries fragment-wrapped
+- `migrations/` — **no schema change** (this is a UI/UX layer)
+
+### Deploy
+
+- Built clean: 63 modules → `dist/_worker.js` 598.25 kB
+- Deployed via BYOK to `https://alexander-marshall-growth.pages.dev` (aliased from `8c2a6e27.alexander-marshall-growth.pages.dev`) — canonical URL is locked and never changes per Dr. Gandhi's standing directive
+- Both static helpers verified live on production via curl
+
+---
+
 ## [June 3, 2026 — evening] — Second verification pass: two blockers cleared
 
 Triggered by a second pre-launch verification report (ChatGPT retest as Dr. Rupak Gandhi).

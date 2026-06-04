@@ -1,7 +1,7 @@
 # Alexander Public Schools — Marshall Growth Platform
 
 > **Production**: <https://alexander-marshall-growth.pages.dev> · **Launch target**: August 16, 2026 (FIRM)
-> **Last deploy**: June 2, 2026 — 11 leadership-meeting fixes shipped (see CHANGELOG.md)
+> **Last deploy**: June 4, 2026 — Pre-launch verification sweeps PASSED + sortable columns on every admin/superintendent report + PD-hours heat-map sort/filter toolbar (see CHANGELOG.md)
 
 ## ⭐ What's New (June 2 2026 upgrade — 11 leadership-meeting fixes for Aug 16 launch)
 

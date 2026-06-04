@@ -128,6 +128,14 @@ export function Layout(props: { title: string; user: User | null; children: any;
           />
         )}
         <script src="/static/app.js" defer></script>
+        {/* June 4, 2026 — sortable tables for every admin + superintendent
+            report. Adds click-to-sort + shift-click multi-sort to any table
+            tagged with data-sortable="true". Pure progressive enhancement —
+            tables work without JS, just unsorted. */}
+        <script src="/static/sortable.js" defer></script>
+        {/* June 4, 2026 — heat-map tile sort + filter controls (drives the
+            "Sort tiles by:" and "Filter:" dropdowns on the PDHoursHeatMap). */}
+        <script src="/static/heatmap-sort.js" defer></script>
         {tourPayload && <script src="/static/tour.js" defer></script>}
       </body>
     </html>
@@ -468,6 +476,12 @@ export function PDHoursHeatMap(props: {
   const groupCount: Record<string, number> = { low: 0, mid: 0, near: 0, met: 0 };
   for (const r of rows) groupCount[r.heat] = (groupCount[r.heat] || 0) + 1;
 
+  // June 4, 2026 — stable id for the tile grid so the sort toolbar can re-order
+  // tiles in place via the heatmap-sort.js helper (loaded globally from layout).
+  // Crypto.randomUUID would be nicer but we want SSR determinism for snapshot
+  // tests and the heat-map only ever renders once per page anyway.
+  const gridId = `pd-heatmap-grid-${(props.exportPrefix || 'default').replace(/[^a-z0-9]/gi, '-')}`;
+
   return (
     <div>
       {!props.selfView && props.exportPrefix && (
@@ -509,10 +523,51 @@ export function PDHoursHeatMap(props: {
         </div>
       )}
 
+      {/* June 4, 2026 — sort/group toolbar.  Lets superintendents and admins
+          re-order the tile grid by total hours, % of target, internal vs.
+          external split, name, or school without reloading the page.  The
+          underlying re-order is done client-side via the data-* attributes
+          on each tile (heatmap-sort.js, loaded globally). Server-rendered
+          default order is preserved as the "Original (group by heat)" option. */}
+      {!props.selfView && rows.length > 0 && (
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2 text-xs text-slate-600">
+          <div class="flex items-center gap-2 flex-wrap">
+            <label class="flex items-center gap-1">
+              <i class="fas fa-sort"></i>
+              <span class="text-slate-500">Sort tiles by:</span>
+              <select data-heatmap-sort={gridId} class="border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                <option value="default">Original (heat group)</option>
+                <option value="total_desc">Total hours (high → low)</option>
+                <option value="total_asc">Total hours (low → high)</option>
+                <option value="pct_desc">% of target (high → low)</option>
+                <option value="pct_asc">% of target (low → high)</option>
+                <option value="internal_desc">Internal LMS hours (high → low)</option>
+                <option value="external_desc">External PD hours (high → low)</option>
+                <option value="name_asc">Teacher name (A → Z)</option>
+                <option value="name_desc">Teacher name (Z → A)</option>
+                <option value="school_asc">School (A → Z)</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-1">
+              <span class="text-slate-500">Filter:</span>
+              <select data-heatmap-filter={gridId} class="border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                <option value="all">All teachers</option>
+                <option value="met">Met goal only</option>
+                <option value="near">Near goal only</option>
+                <option value="mid">Mid-progress only</option>
+                <option value="low">Low-progress only</option>
+                <option value="below_target">Below target (any color)</option>
+              </select>
+            </label>
+          </div>
+          <span class="text-[11px] text-slate-400" data-heatmap-count={gridId}>{rows.length} of {rows.length} shown</span>
+        </div>
+      )}
+
       {rows.length === 0 ? (
         <p class="text-sm text-slate-500 italic">No teachers in scope.</p>
       ) : (
-        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        <div id={gridId} class="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
           {rows.map((r) => {
             const cls = HEAT_CLASSES[r.heat] || HEAT_CLASSES.low;
             const pct = Math.min(1, Math.max(0, Number(r.pct_of_target || 0)));
@@ -542,9 +597,22 @@ export function PDHoursHeatMap(props: {
                 </div>
               </div>
             );
+            // June 4 — data-* attributes so heatmap-sort.js can re-order tiles
+            // in place by total / pct / internal / external / name / school /
+            // heat without touching the server-rendered DOM structure.
+            const tileAttrs = {
+              'data-heatmap-tile': '',
+              'data-heat': r.heat,
+              'data-total': String(Number(r.total_hours || 0)),
+              'data-pct': String(Number(r.pct_of_target || 0)),
+              'data-internal': String(Number(r.internal_hours || 0)),
+              'data-external': String(Number(r.external_hours || 0)),
+              'data-name': `${r.last_name || ''} ${r.first_name || ''}`.trim().toLowerCase(),
+              'data-school': String(r.school_name || '').toLowerCase(),
+            } as any;
             return props.linkPrefix && !props.selfView ? (
-              <a href={`${props.linkPrefix}/${r.teacher_id}`} class="block hover:opacity-90 transition">{Inner}</a>
-            ) : Inner;
+              <a {...tileAttrs} href={`${props.linkPrefix}/${r.teacher_id}`} class="block hover:opacity-90 transition">{Inner}</a>
+            ) : <div {...tileAttrs}>{Inner}</div>;
           })}
         </div>
       )}

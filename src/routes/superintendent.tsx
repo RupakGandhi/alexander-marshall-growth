@@ -424,8 +424,10 @@ function SuperintendentHome({ user, kpis, schools, welcome, pdHours }: any) {
       </Card>
 
       <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">
-        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">School</th><th>Grades</th><th>Teachers</th><th>Observations</th><th>Published</th><th></th></tr></thead>
+        <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="supt-by-school-table" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+        <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="supt-by-school-table" data-sortable="true" class="w-full text-sm">
+          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">School</th><th data-sort-type="text">Grades</th><th data-sort-type="number">Teachers</th><th data-sort-type="number">Observations</th><th data-sort-type="number">Published</th><th data-sort-disable="true"></th></tr></thead>
           <tbody>
             {schools.map((s: any) => (
               <tr class="border-b border-slate-100">
@@ -463,15 +465,17 @@ function SuperintendentSchools({ user, data }: any) {
       <div class="space-y-4" data-tour="supt-schools-list">
         {data.map((d: any) => (
           <Card title={`${d.school.name} · ${d.school.grade_span || ''}`} icon="fas fa-school">
-            <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-              <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>Title</th><th>Published Obs</th><th>Last Observed</th><th></th></tr></thead>
+            <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset={`supt-school-${d.school.id}-teachers`} class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+            <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+            <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id={`supt-school-${d.school.id}-teachers`} data-sortable="true" class="w-full text-sm">
+              <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">Teacher</th><th data-sort-type="text">Title</th><th data-sort-type="number">Published Obs</th><th data-sort-type="date">Last Observed</th><th data-sort-disable="true"></th></tr></thead>
               <tbody>
                 {d.teachers.map((t: any) => (
                   <tr class="border-b border-slate-100">
                     <td class="py-2 font-medium">{t.first_name} {t.last_name}</td>
                     <td class="text-slate-600">{t.title || '—'}</td>
                     <td>{t.pub}</td>
-                    <td class="text-slate-500">{formatDate(t.last_obs)}</td>
+                    <td class="text-slate-500" data-sort-value={t.last_obs || ''}>{formatDate(t.last_obs)}</td>
                     <td><a href={`/superintendent/teachers/${t.id}`} class="text-aps-blue hover:underline">View →</a></td>
                   </tr>
                 ))}
@@ -489,8 +493,10 @@ function SuperintendentTeachers({ user, rows }: any) {
     <Layout title="By Teacher" user={user} activeNav="supt-teacher">
       <h1 class="font-display text-2xl text-aps-navy mb-4">All Teachers</h1>
       <Card data-tour="supt-teachers-list">
-        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Teacher</th><th>School</th><th>Title</th><th>Obs</th><th>Published</th><th>Last observed</th><th></th></tr></thead>
+        <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="supt-all-teachers" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+        <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="supt-all-teachers" data-sortable="true" class="w-full text-sm">
+          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">Teacher</th><th data-sort-type="text">School</th><th data-sort-type="text">Title</th><th data-sort-type="number">Obs</th><th data-sort-type="number">Published</th><th data-sort-type="date">Last observed</th><th data-sort-disable="true"></th></tr></thead>
           <tbody>
             {rows.map((t: any) => (
               <tr class="border-b border-slate-100">
@@ -499,7 +505,7 @@ function SuperintendentTeachers({ user, rows }: any) {
                 <td class="text-slate-600">{t.title || '—'}</td>
                 <td>{t.obs_count}</td>
                 <td>{t.pub_count}</td>
-                <td class="text-slate-500">{formatDate(t.last_obs)}</td>
+                <td class="text-slate-500" data-sort-value={t.last_obs || ''}>{formatDate(t.last_obs)}</td>
                 <td><a href={`/superintendent/teachers/${t.id}`} class="text-aps-blue hover:underline">View →</a></td>
               </tr>
             ))}
@@ -518,13 +524,15 @@ function SuperintendentTeacherDetail({ user, t, observations }: any) {
       <p class="text-slate-600 text-sm mb-4">{t.title || 'Teacher'} · {t.school_name || '—'} · {t.email}</p>
 
       <Card title="Observation History" icon="fas fa-clock-rotate-left">
-        {observations.length === 0 ? <p class="text-slate-500 text-sm">No observations.</p> :
-          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-            <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Date</th><th>Type</th><th>Appraiser</th><th>Status</th><th></th></tr></thead>
+        {observations.length === 0 ? <p class="text-slate-500 text-sm">No observations.</p> : <>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="supt-teacher-obs-history" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="supt-teacher-obs-history" data-sortable="true" class="w-full text-sm">
+            <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="date">Date</th><th data-sort-type="text">Type</th><th data-sort-type="text">Appraiser</th><th data-sort-type="text">Status</th><th data-sort-disable="true"></th></tr></thead>
             <tbody>
               {observations.map((o: any) => (
                 <tr class="border-b border-slate-100">
-                  <td class="py-2">{formatDate(o.observed_at)}</td>
+                  <td class="py-2" data-sort-value={o.observed_at || ''}>{formatDate(o.observed_at)}</td>
                   <td>{o.observation_type}</td>
                   <td>{o.a_first} {o.a_last}</td>
                   <td><span class={`px-2 py-0.5 rounded-full text-xs border ${statusBadge(o.status)}`}>{statusLabel(o.status)}</span></td>
@@ -533,7 +541,7 @@ function SuperintendentTeacherDetail({ user, t, observations }: any) {
               ))}
             </tbody>
           </table></div>
-        }
+        </>}
       </Card>
     </Layout>
   );
@@ -552,14 +560,16 @@ function SuperintendentObservationView({ user, o }: any) {
 
       {(o.scores || []).length > 0 && (
         <Card title="Scores" icon="fas fa-table-list" class="mt-3">
-          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-            <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Domain</th><th>Indicator</th><th>Rating</th></tr></thead>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="supt-obs-scores" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort. Rating sorts numerically.</p>
+          <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="supt-obs-scores" data-sortable="true" class="w-full text-sm">
+            <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">Domain</th><th data-sort-type="text">Indicator</th><th data-sort-type="rating">Rating</th></tr></thead>
             <tbody>
               {o.scores.map((s: any) => (
                 <tr class="border-b border-slate-100">
                   <td class="py-2">{s.domain_code}. {s.domain_name}</td>
                   <td>{s.indicator_code}. {s.indicator_name}</td>
-                  <td>{s.level ? <span class={`px-2 py-0.5 rounded-full text-xs border ${levelColor[s.level]}`}>{s.level} · {levelLabels[s.level]}</span> : <span class="text-slate-400">—</span>}</td>
+                  <td data-sort-value={s.level == null ? '' : String(s.level)}>{s.level ? <span class={`px-2 py-0.5 rounded-full text-xs border ${levelColor[s.level]}`}>{s.level} · {levelLabels[s.level]}</span> : <span class="text-slate-400">—</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -680,16 +690,18 @@ function SuperintendentInsights({ user, summary, groups, groupBy, heatmap, pdHot
 
       {/* Main group-by table */}
       <Card title={`Performance by ${groupBy}`} icon="fas fa-layer-group" class="mb-4">
-        {groups.length === 0 ? <p class="text-sm text-slate-500">No scored indicators match the current filters.</p> : (
-          <div class="overflow-x-auto"><table class="w-full text-sm">
+        {groups.length === 0 ? <p class="text-sm text-slate-500">No scored indicators match the current filters.</p> : (<>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="supt-insights-groups" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort. The server-side Sort dropdown above sets the starting view; in-page sorts work without a page reload.</p>
+          <div class="overflow-x-auto"><table id="supt-insights-groups" data-sortable="true" class="w-full text-sm">
             <thead>
               <tr class="text-left border-b border-slate-200 text-slate-600">
-                <th class="py-2">{groupBy === 'domain' ? 'Domain' : groupBy === 'appraiser' ? 'Appraiser' : groupBy === 'teacher' ? 'Teacher' : 'School'}</th>
-                <th>Observations</th>
-                <th>Scores</th>
-                <th class="w-[200px]">Average</th>
-                <th class="w-[260px]">Distribution</th>
-                <th></th>
+                <th class="py-2" data-sort-type="text">{groupBy === 'domain' ? 'Domain' : groupBy === 'appraiser' ? 'Appraiser' : groupBy === 'teacher' ? 'Teacher' : 'School'}</th>
+                <th data-sort-type="number">Observations</th>
+                <th data-sort-type="number">Scores</th>
+                <th class="w-[200px]" data-sort-type="number">Average</th>
+                <th class="w-[260px]" data-sort-disable="true">Distribution</th>
+                <th data-sort-disable="true"></th>
               </tr>
             </thead>
             <tbody>
@@ -705,7 +717,7 @@ function SuperintendentInsights({ user, summary, groups, groupBy, heatmap, pdHot
                     </td>
                     <td class="text-slate-700">{g.n_observations}</td>
                     <td class="text-slate-700">{gn}</td>
-                    <td>
+                    <td data-sort-value={aAvg == null ? '' : String(aAvg)}>
                       <div class={`inline-flex items-center gap-2 px-2 py-1 rounded ${avgColor(aAvg)}`}>
                         <span class="font-display text-lg leading-none">{aAvg ? aAvg.toFixed(2) : '—'}</span>
                         <span class="text-xs opacity-90">/ 4.0</span>
@@ -733,7 +745,7 @@ function SuperintendentInsights({ user, summary, groups, groupBy, heatmap, pdHot
               })}
             </tbody>
           </table></div>
-        )}
+        </>)}
       </Card>
 
       <div class="grid md:grid-cols-2 gap-4 mb-4">

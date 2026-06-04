@@ -1570,8 +1570,10 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           </select>
           <button class="bg-aps-navy text-white px-3 rounded">Filter</button>
         </form>
-        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Name</th><th>Email</th><th>Role</th><th>School</th><th>Last login</th><th></th></tr></thead>
+        <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-users-table" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+        <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click another header for multi-column sort.</p>
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="admin-users-table" data-sortable="true" class="w-full text-sm">
+          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">Name</th><th data-sort-type="text">Email</th><th data-sort-type="text">Role</th><th data-sort-type="text">School</th><th data-sort-type="date">Last login</th><th data-sort-disable="true"></th></tr></thead>
           <tbody>
             {rows.map((u: any) => (
               <tr class="border-b border-slate-100">
@@ -1660,7 +1662,7 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                     </div>
                   ) : <span class="text-slate-400">—</span>}
                 </td>
-                <td class="text-slate-500 text-xs">{formatDateTime(u.last_login_at)}</td>
+                <td class="text-slate-500 text-xs" data-sort-value={u.last_login_at || ''}>{formatDateTime(u.last_login_at)}</td>
                 <td></td>
               </tr>
             ))}
@@ -1797,8 +1799,10 @@ function SchoolsPage({ user, schools, msg }: any) {
         </form>
       </Card>
       <Card title="All schools" icon="fas fa-school" class="mt-4">
-        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table class="w-full text-sm">
-          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2">Name</th><th>Grade span</th><th>Address</th><th>Phone</th></tr></thead>
+        <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-schools-table" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+        <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+        <div class="overflow-x-auto -mx-3 sm:-mx-5 px-3 sm:px-5"><table id="admin-schools-table" data-sortable="true" class="w-full text-sm">
+          <thead><tr class="text-left border-b border-slate-200 text-slate-600"><th class="py-2" data-sort-type="text">Name</th><th data-sort-type="text">Grade span</th><th data-sort-type="text">Address</th><th data-sort-type="text">Phone</th></tr></thead>
           <tbody>
             {schools.map((s: any) => (
               <tr class="border-b border-slate-100">
@@ -2209,15 +2213,17 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
         <Card title="Recent admin audit entries" icon="fas fa-clipboard-list">
           {audit.length === 0 ? (
             <p class="text-sm text-slate-500">No high-trust mutations yet.</p>
-          ) : (
-            <div class="overflow-x-auto"><table class="w-full text-sm">
+          ) : (<>
+            <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-data-recent-audit" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+            <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+            <div class="overflow-x-auto"><table id="admin-data-recent-audit" data-sortable="true" class="w-full text-sm">
               <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
-                <tr><th class="py-2">When</th><th>Actor</th><th>Action</th><th>Entity</th><th class="text-right">Rows</th><th>Detail</th></tr>
+                <tr><th class="py-2" data-sort-type="date">When</th><th data-sort-type="text">Actor</th><th data-sort-type="text">Action</th><th data-sort-type="text">Entity</th><th class="text-right" data-sort-type="number">Rows</th><th data-sort-type="text">Detail</th></tr>
               </thead>
               <tbody>
                 {audit.map((a: any) => (
                   <tr class="border-b border-slate-100 align-top">
-                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(a.created_at)}</td>
+                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap" data-sort-value={a.created_at || ''}>{formatDateTime(a.created_at)}</td>
                     <td class="text-xs">{a.first_name ? `${a.first_name} ${a.last_name}` : `#${a.actor_user_id}`} <span class="text-slate-400">({a.role || '—'})</span></td>
                     <td class="text-xs font-mono">{a.action}</td>
                     <td class="text-xs">{a.entity_type || '—'}</td>
@@ -2227,7 +2233,7 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
                 ))}
               </tbody>
             </table></div>
-          )}
+          </>)}
           <div class="mt-3 text-right"><a href="/admin/data/audit-log" class="text-sm text-aps-blue hover:underline">See full audit log →</a></div>
         </Card>
       </div>
@@ -2237,20 +2243,22 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
       <Card title="All observations (latest 200, including soft-deleted)" icon="fas fa-list">
         {rows.length === 0 ? (
           <p class="text-sm text-slate-500">No observations currently exist in the database.</p>
-        ) : (
-          <div class="overflow-x-auto"><table class="w-full text-sm">
+        ) : (<>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-all-observations" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+          <div class="overflow-x-auto"><table id="admin-all-observations" data-sortable="true" class="w-full text-sm">
             <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
-              <tr><th class="py-2">ID</th><th>Type</th><th>Teacher</th><th>Observer</th><th>School</th><th>When</th><th>Status</th><th></th></tr>
+              <tr><th class="py-2" data-sort-type="number">ID</th><th data-sort-type="text">Type</th><th data-sort-type="text">Teacher</th><th data-sort-type="text">Observer</th><th data-sort-type="text">School</th><th data-sort-type="date">When</th><th data-sort-type="text">Status</th><th data-sort-disable="true"></th></tr>
             </thead>
             <tbody>
               {rows.map((o: any) => (
                 <tr class={`border-b border-slate-100 ${o.deleted_at ? 'opacity-60 bg-amber-50/40' : ''}`}>
-                  <td class="py-2 text-slate-500 text-xs">#{o.id}</td>
+                  <td class="py-2 text-slate-500 text-xs" data-sort-value={o.id}>#{o.id}</td>
                   <td class="capitalize text-xs">{String(o.observation_type || '').replace('_',' ')}</td>
                   <td class="text-xs">{o.t_first} {o.t_last}</td>
                   <td class="text-xs">{o.a_first} {o.a_last} <span class="text-slate-400">({o.a_role})</span></td>
                   <td class="text-xs text-slate-500">{o.school_name || '—'}</td>
-                  <td class="text-xs text-slate-500">{formatDateTime(o.observed_at)}</td>
+                  <td class="text-xs text-slate-500" data-sort-value={o.observed_at || ''}>{formatDateTime(o.observed_at)}</td>
                   <td>
                     {o.deleted_at
                       ? <span class="text-xs px-2 py-0.5 rounded-full border bg-amber-50 border-amber-300 text-amber-800">soft-deleted</span>
@@ -2272,7 +2280,7 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
               ))}
             </tbody>
           </table></div>
-        )}
+        </>)}
       </Card>
       </div>
 
@@ -2314,10 +2322,12 @@ function AdminAuditLogPage({ user, rows }: any) {
       <Card title={`Recent ${rows.length} entries`} icon="fas fa-clipboard-list">
         {rows.length === 0 ? (
           <p class="text-sm text-slate-500">No admin audit entries yet.</p>
-        ) : (
-          <div class="overflow-x-auto"><table class="w-full text-sm">
+        ) : (<>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-audit-log" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort.</p>
+          <div class="overflow-x-auto"><table id="admin-audit-log" data-sortable="true" class="w-full text-sm">
             <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
-              <tr><th class="py-2">When</th><th>Actor</th><th>Action</th><th>Entity</th><th class="text-right">Rows</th><th>Filters</th><th>IDs (first 100)</th><th>Detail</th></tr>
+              <tr><th class="py-2" data-sort-type="date">When</th><th data-sort-type="text">Actor</th><th data-sort-type="text">Action</th><th data-sort-type="text">Entity</th><th class="text-right" data-sort-type="number">Rows</th><th data-sort-type="text">Filters</th><th data-sort-disable="true">IDs (first 100)</th><th data-sort-type="text">Detail</th></tr>
             </thead>
             <tbody>
               {rows.map((a: any) => {
@@ -2326,7 +2336,7 @@ function AdminAuditLogPage({ user, rows }: any) {
                 try { ids = a.entity_ids ? JSON.parse(a.entity_ids) : null; } catch {}
                 return (
                   <tr class="border-b border-slate-100 align-top">
-                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(a.created_at)}</td>
+                    <td class="py-2 text-xs text-slate-500 whitespace-nowrap" data-sort-value={a.created_at || ''}>{formatDateTime(a.created_at)}</td>
                     <td class="text-xs">{a.first_name ? `${a.first_name} ${a.last_name}` : `#${a.actor_user_id}`} <span class="text-slate-400">({a.role || '—'})</span></td>
                     <td class="text-xs font-mono">{a.action}</td>
                     <td class="text-xs">{a.entity_type || '—'}</td>
@@ -2339,7 +2349,7 @@ function AdminAuditLogPage({ user, rows }: any) {
               })}
             </tbody>
           </table></div>
-        )}
+        </>)}
       </Card>
     </Layout>
   );
@@ -2406,20 +2416,22 @@ function AdminExternalPdAudit({ user, rows, filterStatus }: any) {
         <Card><p class="text-sm text-slate-500">No external PD submissions match this filter.</p></Card>
       ) : (
         <Card>
+          <div class="flex items-center justify-end mb-1"><button type="button" data-sort-reset="admin-external-pd-audit" class="text-xs text-slate-500 hover:text-aps-navy hover:underline"><i class="fas fa-rotate-left mr-1"></i>Reset sort</button></div>
+          <p class="text-[11px] text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Click any column header to sort. Shift-click for multi-column sort. Hours sort numerically.</p>
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table id="admin-external-pd-audit" data-sortable="true" class="w-full text-sm">
               <thead>
                 <tr class="text-left border-b border-slate-200 text-slate-600">
-                  <th class="py-2">Teacher</th>
-                  <th>School</th>
-                  <th>Activity</th>
-                  <th>Provider</th>
-                  <th class="text-right">Hrs (self)</th>
-                  <th class="text-right">Hrs (apr)</th>
-                  <th>Status</th>
-                  <th>Reviewer</th>
-                  <th>Submitted</th>
-                  <th></th>
+                  <th class="py-2" data-sort-type="text">Teacher</th>
+                  <th data-sort-type="text">School</th>
+                  <th data-sort-type="text">Activity</th>
+                  <th data-sort-type="text">Provider</th>
+                  <th class="text-right" data-sort-type="number">Hrs (self)</th>
+                  <th class="text-right" data-sort-type="number">Hrs (apr)</th>
+                  <th data-sort-type="text">Status</th>
+                  <th data-sort-type="text">Reviewer</th>
+                  <th data-sort-type="date">Submitted</th>
+                  <th data-sort-disable="true"></th>
                 </tr>
               </thead>
               <tbody>
@@ -2435,7 +2447,7 @@ function AdminExternalPdAudit({ user, rows, filterStatus }: any) {
                       <td class="text-right tabular-nums">{r.approved_hours != null ? Number(r.approved_hours).toFixed(2) : <span class="text-slate-300">—</span>}</td>
                       <td><span class={`text-xs px-2 py-0.5 rounded-full border ${pill.color}`}><i class={`fas ${pill.icon} mr-1`}></i>{pill.label}</span></td>
                       <td class="text-xs text-slate-600">{r.reviewer_first ? `${r.reviewer_first} ${r.reviewer_last}` : <span class="text-slate-400 italic">—</span>}</td>
-                      <td class="text-xs text-slate-500">{formatDate(r.submitted_at)}</td>
+                      <td class="text-xs text-slate-500" data-sort-value={r.submitted_at || ''}>{formatDate(r.submitted_at)}</td>
                       <td><a href={`/appraiser/external-pd/${r.id}`} class="text-aps-blue hover:underline text-xs">View <i class="fas fa-chevron-right"></i></a></td>
                     </tr>
                   );
