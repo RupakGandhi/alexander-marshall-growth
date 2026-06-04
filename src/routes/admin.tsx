@@ -1210,18 +1210,44 @@ app.post('/data/clear-all-demo', async (c) => {
     return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "CLEAR ALL DEMO DATA" exactly to confirm.'));
   }
   // Always hard-clear here — this is the "wipe everything before handover" button by design.
+  //
+  // June 3, 2026 — order-of-operations fix. The June 3 verification report flagged
+  // this route as returning 500 in production. Root cause: `pd_enrollments` has a
+  // non-cascading FK `source_observation_id → observations(id)`. When teachers
+  // were auto-enrolled from a low-score observation, the resulting enrollment row
+  // pinned the observation in place — and `DELETE FROM observations` triggered
+  // SQLITE_CONSTRAINT_FOREIGNKEY.
+  //
+  // FK map (verified against migrations 0001 + 0003 + 0006):
+  //   observation_scores.observation_id    → CASCADE  (safe, but we DELETE explicitly anyway for the audit count)
+  //   feedback_items.observation_id        → CASCADE  (same)
+  //   focus_areas.opened_observation_id    → no CASCADE → must DELETE first
+  //   pd_enrollments.source_observation_id → no CASCADE → must DELETE first  ← was missing
+  //   pd_deliverables.enrollment_id        → CASCADE on pd_enrollments
+  //   pd_reflections.enrollment_id         → CASCADE on pd_enrollments
+  //
+  // So the correct teardown order is: scores/feedback/focus → pd_enrollments
+  // (cascades to deliverables/reflections) → observations → activity_log.
   await c.env.DB.prepare('DELETE FROM observation_scores').run();
   await c.env.DB.prepare('DELETE FROM feedback_items').run();
   await c.env.DB.prepare('DELETE FROM focus_areas').run();
+  // Clear PD enrollments that pin observations in place. Deliverables + reflections
+  // cascade automatically. External PD submissions and teacher goals are NOT
+  // tied to observations and are intentionally preserved here — they belong to
+  // /admin/data/reset-practice-data, which is a separate button by design.
+  const rEnr = await c.env.DB.prepare('DELETE FROM pd_enrollments').run();
   const rObs = await c.env.DB.prepare('DELETE FROM observations').run();
   const rAct = await c.env.DB.prepare('DELETE FROM activity_log').run();
-  const rowCount = ((rObs.meta as any)?.changes || 0) + ((rAct.meta as any)?.changes || 0);
+  const rowCount =
+    ((rEnr.meta as any)?.changes || 0) +
+    ((rObs.meta as any)?.changes || 0) +
+    ((rAct.meta as any)?.changes || 0);
   await logActivity(c.env.DB, user.id, 'system', 0, 'clear_all_demo');
   await logAdminAudit(c.env.DB, user.id, 'clear_all_demo', {
     entityType: 'bulk', rowCount,
-    detail: 'Wiped observations + activity_log (handover reset).',
+    detail: 'Wiped observations + PD enrollments (cascading deliverables/reflections) + activity_log (handover reset).',
   });
-  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observation data and activity log cleared. Users, schools, rubric and pedagogy library preserved.'));
+  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observation data, PD auto-enrollments, and activity log cleared. Users, schools, rubric, pedagogy library, external PD, and teacher goals preserved.'));
 });
 
 // ----------------------------------------------------------------------------
