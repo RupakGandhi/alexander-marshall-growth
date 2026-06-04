@@ -300,25 +300,27 @@
   }
 
   // If this page was opened as part of a running tour (?tour=1), resume.
+  //
+  // June 5, 2026 — Dr. Gandhi pass:
+  // The auto-launch on first login was removed entirely. The tour
+  // only ever runs now when the user explicitly clicks the "Guided
+  // Tour" button (calls window.APSGuidedTour.start()), or when a step
+  // navigates to a new page with ?tour=1 to resume mid-tour.  This
+  // function still cleans up the ?tour=1 query param so reloads
+  // don't loop, and still honors explicit resume — but it will NOT
+  // launch the tour from cold on its own, regardless of any legacy
+  // localStorage flag.  We also write a permanent "user has been
+  // here" marker on every page load so even if the auto-launch
+  // gating logic is ever revived, returning users won't be ambushed.
   function autoResumeOnLoad() {
     const qs = new URLSearchParams(window.location.search);
     const resume = qs.get('tour');
     const userId = getMeta().userId;
-    // Handle first-time auto-launch after login (but only once per user)
-    if (!resume && userId) {
-      let lastUser = null, alreadyDone = false;
+    if (userId) {
       try {
-        lastUser = localStorage.getItem(LS_AUTOLAUNCH_USER);
-        alreadyDone = localStorage.getItem(LS_AUTOLAUNCH) === '1';
+        localStorage.setItem(LS_AUTOLAUNCH_USER, String(userId));
+        localStorage.setItem(LS_AUTOLAUNCH, '1');
       } catch (e) {}
-      if (getMeta().autoLaunch && (String(lastUser) !== String(userId) || !alreadyDone)) {
-        try {
-          localStorage.setItem(LS_AUTOLAUNCH_USER, String(userId));
-          localStorage.setItem(LS_AUTOLAUNCH, '1');
-        } catch (e) {}
-        setTimeout(() => start(true), 500);
-      }
-      return;
     }
     if (resume) {
       // Clean the query string so reloads don't keep resuming.

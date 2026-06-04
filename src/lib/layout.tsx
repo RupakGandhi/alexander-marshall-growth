@@ -24,17 +24,29 @@ export function roleHomeUrl(role: string): string {
 }
 
 export function Layout(props: { title: string; user: User | null; children: any; activeNav?: string; autoLaunchTour?: boolean }) {
-  const { title, user, children, activeNav, autoLaunchTour } = props;
+  const { title, user, children, activeNav } = props;
   const nav = user ? navFor(user, activeNav) : null;
 
   // Embed the role-specific tour payload as a JSON blob. The tour engine
   // (/static/tour.js) reads this on DOMContentLoaded.
+  //
+  // June 5, 2026 — Dr. Gandhi pass:
+  // The tour NEVER auto-launches anymore.  Previously, the very first time
+  // a user logged in (welcome=1 in the URL) we kicked off a multi-step
+  // overlay walk-through that hijacked their first impression of the
+  // platform.  That was disorienting — especially for principals and the
+  // superintendent who already know what they're looking for.  The
+  // "Guided Tour" button still lives in the top nav, and clicking it
+  // launches the tour on demand.  We intentionally ignore the
+  // `autoLaunchTour` prop the caller may still be passing (kept for type
+  // compatibility) so no future code path can accidentally re-enable
+  // auto-launch.
   const tourSteps = user ? getTour(user.role as any) : [];
   const tourPayload = user && tourSteps.length ? {
     userId: user.id,
     role: user.role,
     roleLabel: roleLabel(user.role),
-    autoLaunch: !!autoLaunchTour,
+    autoLaunch: false,
     steps: tourSteps,
   } : null;
 
