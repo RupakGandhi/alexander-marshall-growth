@@ -1,7 +1,7 @@
 # Alexander Public Schools — Marshall Growth Platform
 
 > **Production**: <https://alexander-marshall-growth.pages.dev> · **Launch target**: August 16, 2026 (FIRM)
-> **Last deploy**: June 4, 2026 (late evening) — Instant-save scoring (no reload, no scroll loss) + speed-grade bulk-score affordances per domain and across the whole rubric + sticky live scoreboard + Focus Areas now explain their auto-trigger rule (see CHANGELOG.md)
+> **Last deploy**: June 4, 2026 (late evening, pass 2) — "Module Library" rename on the teacher PD home + **universal scroll-preserving save**: every form in every role now updates in place via a single global AJAX interceptor (no per-form wiring; server endpoints unchanged) (see CHANGELOG.md)
 
 ## ⭐ What's New (June 2 2026 upgrade — 11 leadership-meeting fixes for Aug 16 launch)
 

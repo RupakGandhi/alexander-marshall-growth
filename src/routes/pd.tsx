@@ -748,7 +748,16 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
       )}
 
       {suggested.length > 0 && (
-        <Card title="Suggested modules" icon="fas fa-lightbulb" class="mb-4">
+        // June 4 2026 (late evening) — renamed from "Suggested modules" to
+        // "Module Library" per Dr. Gandhi. The previous label implied these
+        // were personally recommended for the teacher, when in fact this is
+        // just a preview of the full module catalog the teacher can browse
+        // at any time.  The link below ("Browse all modules") deep-links
+        // into the full /teacher/pd/library page.
+        <Card title="Module Library" icon="fas fa-book" class="mb-4">
+          <p class="text-xs text-slate-600 mb-3">
+            A sample of modules available across the rubric. Add any to your LMS to start working through them at your own pace — or open the full library to filter by domain and indicator.
+          </p>
           <div class="grid md:grid-cols-2 gap-3">
             {suggested.map((m: any) => (
               <div class="border border-slate-200 rounded-md p-3 bg-white">
@@ -765,7 +774,7 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
               </div>
             ))}
           </div>
-          <div class="mt-3 text-right"><a href="/teacher/pd/library" class="text-xs text-aps-blue hover:underline">Browse full library <i class="fas fa-chevron-right"></i></a></div>
+          <div class="mt-3 text-right"><a href="/teacher/pd/library" class="text-xs text-aps-blue hover:underline">Browse all modules <i class="fas fa-chevron-right"></i></a></div>
         </Card>
       )}
     </Layout>

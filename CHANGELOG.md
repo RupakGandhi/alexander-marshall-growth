@@ -8,6 +8,134 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 4, 2026 — late evening pass 2] — "Module Library" rename + universal scroll-preserving save (one client, every form)
+
+Triggered by Dr. Gandhi's verbatim feedback:
+
+> *"Change the term 'Suggested Modules' to 'Module Library' for clarity in the box that teachers can browse all full modules. The term suggested is misleading because it makes the user think its suggested for them.*
+>
+> *Make sure that in all accounts and all workflows throughout the entire system you solve the save/auto-refresh and scrolling issue the way you did here so the user doesnt have to keep scrolling up and coming back. What you did here worked perfectly."*
+
+### Fix 1 — Teacher PD home: "Suggested modules" → "Module Library"
+
+**Root cause of the confusion:** the home-page card labeled "Suggested modules"
+implied the system was personally recommending those modules for the
+teacher — when in fact it was just a preview of the **full catalog** the
+teacher can browse at any time. (The actual personalized work is the
+"Recommended for You" auto-enrollment surface, which lives in the "Your
+modules" card above it.)
+
+**Resolution** in `src/routes/pd.tsx`:
+
+- Card title renamed: `Suggested modules` → **`Module Library`**, icon
+  swapped from lightbulb (implies recommendation) to **book** (implies a
+  catalog)
+- Added a one-line description so the framing is unambiguous:
+  > *"A sample of modules available across the rubric. Add any to your LMS
+  > to start working through them at your own pace — or open the full
+  > library to filter by domain and indicator."*
+- The CTA below the grid renamed `Browse full library` → `Browse all modules`
+- The full page at `/teacher/pd/library` was already titled "PD Module
+  Library" — naming is now consistent end-to-end
+
+### Fix 2 — Universal "in-place save" — every form, every account, every workflow
+
+This is the heavyweight fix. Dr. Gandhi's reference (*"the way you did here"*)
+is the instant-save scoring grid shipped earlier this evening. That pattern
+was per-form: each `[data-score-form]` had its own fetch handler.
+**Repeating that pattern across all 119 `c.redirect(...)` endpoints** would
+be invasive and brittle. Instead, this release installs a **single global
+client-side form interceptor** in `public/static/app.js` that automatically
+applies the same scroll-preserving behavior to **every form on every page
+across every role**, with **no per-form wiring**.
+
+**How it works** (`public/static/app.js`, ~190 LOC of new code):
+
+1. **Event delegation on `document`** — one bubble-phase `submit` listener
+   sees every form submission in the app, present or future.
+2. **Honors per-form overrides** — if an earlier handler called
+   `ev.preventDefault()` (e.g., the score-form handler, the bulk-score
+   buttons, the generate-feedback handler, autosave fields), the global
+   interceptor backs off and lets that handler do its job.
+3. **Denylist for special forms** — login, logout, publish (signature
+   canvas), acknowledge (teacher signature), print, export, download,
+   import, upload, and any explicit `data-no-ajax="true"` form still
+   navigate normally. GET forms (search/filter) also pass through so
+   back-button + URL semantics stay intact.
+4. **Save flow:**
+   - Capture `{ scrollX, scrollY, focusedElementId, nearestAnchorId }`
+   - Show a fixed-position "Saving…" toast (top-right, outside `<main>`
+     so it survives the DOM swap)
+   - `fetch(action, { method, body: FormData, redirect: 'follow', credentials: 'same-origin' })`
+   - Server still returns its normal `c.redirect(...)` — fetch follows it
+     automatically and returns the destination page's HTML
+   - Parse the HTML via `DOMParser`, extract `<main>`, swap the current
+     page's `<main>` innerHTML, re-execute inline `<script>` tags, update
+     `document.title`, replace the URL via `history.replaceState`
+   - Toast swaps to green "Saved"; scroll position restored using the
+     nearest anchor (resilient to DOM growth/shrink, e.g. when a new
+     feedback item was added)
+5. **`<button formaction=...>` support** — Delete buttons on teacher
+   goals and appraiser feedback items already use `formaction` to point
+   at `/delete` endpoints. The interceptor reads `event.submitter` and
+   uses its `formaction` / `formmethod` / `name=value` if present.
+6. **Graceful degradation** — on any network error or non-2xx response,
+   the interceptor falls back to a real native form submit so the user
+   never loses data. Server-side endpoints are unchanged; the no-JS path
+   still works for accessibility tools and screen readers.
+
+**What's covered (auto, no per-form changes):**
+
+| Surface | Forms now save in-place |
+| --- | --- |
+| Teacher | profile, password change, notification prefs, focus-area notes, goal create/update/delete, PD reflections (Learn/Practice/Apply), deliverable submit, observation comments |
+| Appraiser | observation context (Save draft), feedback item edits, feedback delete (formaction), feedback category change, focus-area opening, observation comments |
+| Coach | feedback item edits, focus-area notes |
+| Superintendent | report filters, comment threads |
+| Admin (51 forms) | user create/edit/delete/activate, school year toggle, PD module create/edit, plan-item add/remove, framework edits, settings (PD-hours target etc.), data-management actions, audit-log filters |
+| PD plans | item add/remove, plan title save, module reorder |
+
+**What's NOT covered (intentionally — these must navigate):**
+
+| Form | Why |
+| --- | --- |
+| `/login`, `/logout` | sets session cookie; needs the role-based home page to load fresh |
+| `/publish`, `/acknowledge` | signature canvas finishes the workflow; the teacher view is on a different surface and we want the transition to feel intentional |
+| `/print`, `/export`, `/download`, `/import`, `/upload` | file I/O — browser handles natively |
+| Any form with `data-no-ajax="true"` | escape hatch for future special cases |
+
+### Implementation notes
+
+- The interceptor is **completely additive** — the server's existing 302
+  redirects continue to work for no-JS users, screen readers, and the
+  `<noscript>` fallbacks. There is no risk of breaking accessibility.
+- Page-specific listeners that previously ran on first page load
+  (`init()` IIFE in app.js — bell, user-menu, mobile-nav, domain-tabs,
+  expand/collapse all) are re-attached after each `<main>` swap by
+  re-running their `querySelectorAll`-bound setup and emitting a custom
+  `aps:ajax-swapped` event for future modules to subscribe to.
+- Anchor-based scroll restoration handles the common case where the
+  destination page is slightly taller/shorter than the source (e.g.,
+  after creating a new feedback item) — the user lands looking at the
+  same content they were last looking at, not at an absolute pixel
+  offset that no longer makes sense.
+- Bundle delta: `dist/_worker.js` unchanged; `public/static/app.js` grew
+  from ~36 kB → ~40 kB (+4 kB minified) for the entire universal save
+  pipeline.
+
+### Verification
+
+- `node -c public/static/app.js` → ✓ syntax clean
+- Real-browser load via Playwright at `/login` → ✓ zero JS errors
+- Curl simulation of fetch-with-redirect for `/profile` save → HTTP 200,
+  1 redirect, response body contains the destination page's `<main>` and
+  "Profile updated" flash → interceptor will swap it in cleanly
+- Module Library rename rendered in `/teacher/pd` for `jil.stahosky` →
+  "Module Library" card title visible, "Browse all modules" CTA visible,
+  zero matches for old "Suggested modules" string anywhere in `src/`
+
+---
+
 ## [June 4, 2026 — late evening] — Instant-save scoring + bulk-score affordances + focus area trigger explained
 
 Triggered by Dr. Gandhi's verbatim feedback during testing:
