@@ -299,30 +299,149 @@ app.post('/observations/:id/save', async (c) => {
 });
 
 // ---- Score an indicator (AJAX from editor)
+//
+// June 4, 2026 (evening) UX upgrade: the in-page JS now POSTs every score
+// change as JSON ("Accept: application/json" or "X-Requested-With:
+// XMLHttpRequest"). The fetch response carries the fresh score AND the
+// recomputed scoreboard totals so the page can update without a reload.
+// Legacy no-JS form submits still get the 302 redirect fallback.
 app.post('/observations/:id/score', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
   const body = await c.req.parseBody();
   const indicatorId = Number(body.indicator_id);
-  const level = body.level !== '' && body.level !== undefined ? Number(body.level) : null;
+  const rawLevel = body.level;
+  const level = (rawLevel === '' || rawLevel === undefined || rawLevel === null) ? null : Number(rawLevel);
   const note = String(body.evidence_note || '');
   // verify ownership
   const own = await c.env.DB.prepare(
     `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
   ).bind(id, user.id).first();
   if (!own) return c.text('Forbidden', 403);
-  await c.env.DB.prepare(
-    `INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note)
-     VALUES (?,?,?,?)
-     ON CONFLICT(observation_id, indicator_id)
-     DO UPDATE SET level=excluded.level, evidence_note=excluded.evidence_note, updated_at=CURRENT_TIMESTAMP`
-  ).bind(id, indicatorId, level, note).run();
+  if (level == null) {
+    // Treat "Not scored" as a soft delete so the indicator returns to the
+    // "unscored" pool — this is what the bulk Reset action depends on.
+    await c.env.DB.prepare(
+      `DELETE FROM observation_scores WHERE observation_id=? AND indicator_id=?`
+    ).bind(id, indicatorId).run();
+  } else {
+    await c.env.DB.prepare(
+      `INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note)
+       VALUES (?,?,?,?)
+       ON CONFLICT(observation_id, indicator_id)
+       DO UPDATE SET level=excluded.level, evidence_note=excluded.evidence_note, updated_at=CURRENT_TIMESTAMP`
+    ).bind(id, indicatorId, level, note).run();
+  }
   await logActivity(c.env.DB, user.id, 'observation', id, 'score', { indicatorId, level });
-  if (c.req.header('accept')?.includes('application/json')) {
-    return c.json({ ok: true });
+  const wantsJson = c.req.header('accept')?.includes('application/json')
+    || c.req.header('x-requested-with')?.toLowerCase() === 'xmlhttprequest';
+  if (wantsJson) {
+    const totals = await scoreboardTotals(c.env.DB, id);
+    return c.json({ ok: true, indicator_id: indicatorId, level, totals });
   }
   return c.redirect(`/appraiser/observations/${id}#ind-${indicatorId}`);
 });
+
+// ---- Bulk score a list of unscored indicators in one shot (AJAX)
+// Used by the "Apply rating X to all unscored in this domain" speed-grade
+// action.  Only writes when the indicator currently has no score row OR a NULL
+// level — never overwrites an existing rating, so the appraiser's manual work
+// is safe.  Pass scope='all' or scope='domain' + domain_code.
+app.post('/observations/:id/bulk-score', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  const rawLevel = body.level;
+  const level = (rawLevel === '' || rawLevel === undefined || rawLevel === null) ? null : Number(rawLevel);
+  const scope = String(body.scope || 'domain');                  // 'all' | 'domain'
+  const domainCode = String(body.domain_code || '').toUpperCase();
+  const own = await c.env.DB.prepare(
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
+  ).bind(id, user.id).first();
+  if (!own) return c.json({ ok: false, err: 'forbidden' }, 403);
+  // Find indicators that are currently UNscored.  Scope to the observation's
+  // own framework (each observation pins a framework_id at creation time) so
+  // the bulk action only touches indicators actually shown to this user.
+  const fwRow = await c.env.DB.prepare(
+    `SELECT framework_id FROM observations WHERE id=?`
+  ).bind(id).first<any>();
+  const frameworkId = Number(fwRow?.framework_id || 0);
+  let sql = `
+    SELECT i.id FROM framework_indicators i
+    JOIN framework_domains d ON d.id = i.domain_id
+    LEFT JOIN observation_scores os ON os.observation_id = ? AND os.indicator_id = i.id
+    WHERE d.framework_id = ? AND (os.id IS NULL OR os.level IS NULL)
+  `;
+  const binds: any[] = [id, frameworkId];
+  if (scope === 'domain' && domainCode) {
+    sql += ` AND d.code = ?`;
+    binds.push(domainCode);
+  }
+  const rows = await c.env.DB.prepare(sql).bind(...binds).all();
+  const ids: number[] = ((rows.results as any[]) || []).map(r => Number(r.id));
+  if (level == null) {
+    // scope=reset: clear the score rows for those indicators
+    for (const indId of ids) {
+      await c.env.DB.prepare(
+        `DELETE FROM observation_scores WHERE observation_id=? AND indicator_id=?`
+      ).bind(id, indId).run();
+    }
+  } else {
+    for (const indId of ids) {
+      await c.env.DB.prepare(
+        `INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note)
+         VALUES (?,?,?,'')
+         ON CONFLICT(observation_id, indicator_id)
+         DO UPDATE SET level=excluded.level, updated_at=CURRENT_TIMESTAMP`
+      ).bind(id, indId, level).run();
+    }
+  }
+  await logActivity(c.env.DB, user.id, 'observation', id, 'bulk_score', {
+    scope, domainCode: domainCode || null, level, count: ids.length,
+  });
+  const totals = await scoreboardTotals(c.env.DB, id);
+  return c.json({ ok: true, applied: ids.length, indicator_ids: ids, level, totals });
+});
+
+// Helper used by both /score and /bulk-score JSON responses so the client
+// can refresh the sticky scoreboard pill without reloading. Scoped to the
+// observation's own framework so the totals match what's actually rendered.
+async function scoreboardTotals(db: D1Database, observationId: number) {
+  const fwRow = await db.prepare(
+    `SELECT framework_id FROM observations WHERE id=?`
+  ).bind(observationId).first<any>();
+  const frameworkId = Number(fwRow?.framework_id || 0);
+  const total = await db.prepare(
+    `SELECT COUNT(*) AS n FROM framework_indicators i
+       JOIN framework_domains d ON d.id = i.domain_id
+      WHERE d.framework_id = ?`
+  ).bind(frameworkId).first<any>();
+  const scored = await db.prepare(
+    `SELECT COUNT(*) AS n FROM observation_scores
+       WHERE observation_id=? AND level IS NOT NULL`
+  ).bind(observationId).first<any>();
+  const perDomain = await db.prepare(
+    `SELECT d.code AS domain_code,
+            COUNT(i.id) AS total,
+            SUM(CASE WHEN os.id IS NOT NULL AND os.level IS NOT NULL THEN 1 ELSE 0 END) AS scored
+       FROM framework_domains d
+       JOIN framework_indicators i ON i.domain_id = d.id
+       LEFT JOIN observation_scores os
+              ON os.observation_id=? AND os.indicator_id=i.id
+      WHERE d.framework_id = ?
+      GROUP BY d.code
+      ORDER BY d.code`
+  ).bind(observationId, frameworkId).all();
+  return {
+    scored: Number(scored?.n || 0),
+    total:  Number(total?.n  || 0),
+    perDomain: ((perDomain.results as any[]) || []).map((r: any) => ({
+      domain_code: r.domain_code,
+      scored: Number(r.scored || 0),
+      total:  Number(r.total  || 0),
+    })),
+  };
+}
 
 // ---- Auto-generate feedback chunks from scored indicators + pedagogy library
 // Accepts both classic form POSTs (redirects) and XHR with `Accept: application/json`
@@ -1152,7 +1271,48 @@ function ObservationEditor({ user, o, domains, msg }: any) {
 
       {/* Scoring grid */}
       <h2 class="font-display text-xl text-aps-navy mt-8 mb-3">Marshall Rubric Scoring</h2>
-      <p class="text-sm text-slate-600 mb-3">Click any cell to assign a rating for that indicator. You can leave indicators unscored for mini-observations and only score the ones you had evidence for.</p>
+      <p class="text-sm text-slate-600 mb-3">
+        Click any rating tile to record a score — <strong>auto-saves instantly</strong>, no need to press anything else.
+        Leave indicators on "Not scored" if you didn't gather evidence for them (common for mini-observations).
+      </p>
+
+      {/* June 4 2026 (evening) — Sticky live scoreboard.  Visible at all times
+          so the appraiser knows their progress without scrolling back to the
+          top.  Updates after every score change via the JSON /score endpoint. */}
+      {editable && (
+        <div id="aps-scoreboard"
+             class="sticky top-[112px] sm:top-[120px] z-20 bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-2 mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs"
+             data-obs-id={o.id}>
+          <div class="font-medium text-aps-navy">
+            <i class="fas fa-list-check mr-1"></i>
+            <span id="aps-scoreboard-scored">{(() => {
+              let n = 0;
+              for (const d of domains) for (const i of d.indicators) if (scoreMap.has(i.id) && scoreMap.get(i.id).level != null) n++;
+              return n;
+            })()}</span>
+            <span> / </span>
+            <span id="aps-scoreboard-total">{(() => { let n = 0; for (const d of domains) n += d.indicators.length; return n; })()}</span>
+            <span class="text-slate-500"> indicators scored</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-1">
+            {domains.map((d: any) => {
+              const scored = d.indicators.filter((i:any) => scoreMap.has(i.id) && scoreMap.get(i.id).level != null).length;
+              return (
+                <a href={`#obs-domain-${d.code}`}
+                   data-scoreboard-domain={d.code}
+                   class="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 bg-slate-50 hover:bg-aps-navy hover:text-white hover:border-aps-navy transition-colors">
+                  <span class="font-display font-bold">{d.code}</span>
+                  <span><span data-scoreboard-domain-scored={d.code}>{scored}</span>/<span data-scoreboard-domain-total={d.code}>{d.indicators.length}</span></span>
+                </a>
+              );
+            })}
+          </div>
+          <span id="aps-scoreboard-saving"
+                class="ml-auto text-xs px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800 hidden">
+            <i class="fas fa-check mr-1"></i>All scores saved
+          </span>
+        </div>
+      )}
 
       {/* Fix 1 (June 2, 2026 brief) — sticky tabbed domain navigation that
           lets appraisers jump between Domains A-F without losing scroll
@@ -1165,10 +1325,16 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           jump-nav still drive instant navigation.  Two QoL helpers added below
           the tabs: "Expand all" / "Collapse all" buttons so power users can flip
           everything open in one click when they want the long-form view. */}
-      <div class="flex items-center justify-end gap-3 mt-2 text-xs">
-        <button type="button" data-obs-domains-action="expand" class="text-aps-blue hover:underline"><i class="fas fa-chevron-down mr-1"></i>Expand all domains</button>
-        <span class="text-slate-300">·</span>
-        <button type="button" data-obs-domains-action="collapse" class="text-slate-600 hover:underline hover:text-aps-navy"><i class="fas fa-chevron-up mr-1"></i>Collapse all</button>
+      <div class="flex flex-wrap items-center justify-between gap-2 mt-2 text-xs">
+        <div class="text-slate-500">
+          <i class="fas fa-circle-info mr-1"></i>
+          Speed-grade tip: each domain has a bulk action so you can set every unscored indicator to one level in one click.
+        </div>
+        <div class="flex items-center gap-3">
+          <button type="button" data-obs-domains-action="expand" class="text-aps-blue hover:underline"><i class="fas fa-chevron-down mr-1"></i>Expand all domains</button>
+          <span class="text-slate-300">·</span>
+          <button type="button" data-obs-domains-action="collapse" class="text-slate-600 hover:underline hover:text-aps-navy"><i class="fas fa-chevron-up mr-1"></i>Collapse all</button>
+        </div>
       </div>
 
       <div class="space-y-3 mt-2">
@@ -1177,11 +1343,29 @@ function ObservationEditor({ user, o, domains, msg }: any) {
             <summary class="px-4 py-3 cursor-pointer flex items-center gap-2">
               <span class="w-8 h-8 rounded-full bg-aps-navy text-white font-display flex items-center justify-center text-sm">{d.code}</span>
               <span class="font-display text-aps-navy">{d.name}</span>
-              <span class="ml-auto text-xs text-slate-500">
-                {d.indicators.filter((i:any)=>scoreMap.has(i.id)).length} / {d.indicators.length} scored
+              <span class="ml-auto text-xs text-slate-500" data-domain-summary-count={d.code}>
+                <span data-domain-summary-scored={d.code}>{d.indicators.filter((i:any)=>scoreMap.has(i.id) && scoreMap.get(i.id).level != null).length}</span> / {d.indicators.length} scored
               </span>
             </summary>
             <div class="px-4 pb-4 space-y-2">
+              {editable && (
+                <div class="flex flex-wrap items-center gap-2 p-2 bg-slate-50 border border-slate-200 rounded text-xs"
+                     data-bulk-domain={d.code}>
+                  <span class="text-slate-600 font-medium"><i class="fas fa-bolt mr-1 text-aps-gold"></i>Speed-grade unscored in this domain:</span>
+                  <button type="button" data-bulk-level="4" data-bulk-domain-code={d.code}
+                          class="px-2 py-1 rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100">All <strong>4</strong> · HE</button>
+                  <button type="button" data-bulk-level="3" data-bulk-domain-code={d.code}
+                          class="px-2 py-1 rounded border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100">All <strong>3</strong> · E</button>
+                  <button type="button" data-bulk-level="2" data-bulk-domain-code={d.code}
+                          class="px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100">All <strong>2</strong> · IN</button>
+                  <button type="button" data-bulk-level="1" data-bulk-domain-code={d.code}
+                          class="px-2 py-1 rounded border border-red-300 bg-red-50 text-red-900 hover:bg-red-100">All <strong>1</strong> · DNM</button>
+                  <span class="text-slate-300">·</span>
+                  <button type="button" data-bulk-level="" data-bulk-domain-code={d.code}
+                          class="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Reset to "Not scored"</button>
+                  <span class="ml-auto text-slate-400 text-[11px]"><i class="fas fa-shield-halved mr-1"></i>Won't overwrite scores you already set.</span>
+                </div>
+              )}
               {d.indicators.map((i: any) => (
                 <IndicatorRow o={o} d={d} i={i} score={scoreMap.get(i.id)} editable={editable} />
               ))}
@@ -1189,6 +1373,25 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           </details>
         ))}
       </div>
+
+      {/* June 4 2026 (evening) — Whole-form bulk actions for the extreme cases
+          Dr. Gandhi described: principals who didn't score anything (scripted
+          notes only) should be able to publish without manually marking 64
+          unscored, and principals doing a thorough walkthrough should be able
+          to set a baseline across all 64 in one click. */}
+      {editable && (
+        <div class="mt-4 p-3 bg-aps-wheat/30 border border-aps-gold/40 rounded-lg flex flex-wrap items-center gap-2 text-xs">
+          <span class="font-medium text-aps-navy"><i class="fas fa-layer-group mr-1"></i>All 64 indicators at once:</span>
+          <button type="button" data-bulk-level="4" data-bulk-domain-code="" class="px-2 py-1 rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100">All unscored → 4 · HE</button>
+          <button type="button" data-bulk-level="3" data-bulk-domain-code="" class="px-2 py-1 rounded border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100">All unscored → 3 · E</button>
+          <button type="button" data-bulk-level="2" data-bulk-domain-code="" class="px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100">All unscored → 2 · IN</button>
+          <button type="button" data-bulk-level="1" data-bulk-domain-code="" class="px-2 py-1 rounded border border-red-300 bg-red-50 text-red-900 hover:bg-red-100">All unscored → 1 · DNM</button>
+          <span class="text-slate-400">·</span>
+          <span class="text-slate-700">Mini-obs shortcut:</span>
+          <button type="button" data-bulk-level="" data-bulk-domain-code="" class="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Reset all to "Not scored"</button>
+          <span class="ml-auto text-slate-500 text-[11px]"><i class="fas fa-shield-halved mr-1"></i>These actions only touch unscored indicators — your manual ratings are safe.</span>
+        </div>
+      )}
 
       {/* Generate feedback — async + scroll-preserving (April 2026 UI polish).
           When JS is available we POST with fetch + show a toast right next to
@@ -1261,45 +1464,215 @@ function ObservationEditor({ user, o, domains, msg }: any) {
         )}
       </Card>
 
-      {/* April 2026 UI polish: async feedback generation + unsaved-score outline.
-          (1) Fetch-based POST to /generate-feedback — we stay on the page, keep
-              the scroll position exactly where it was, show a toast right next
-              to the button, and let the page reflect the fresh items via a
-              one-time location.reload() (so all the feedback edit forms stay
-              connected to their real DB ids).
-          (2) Red outline + tooltip on any IndicatorRow where the appraiser has
-              selected a level but not yet clicked "Save score".  Clears once
-              the row is saved. */}
+      {/* June 4 2026 (late evening) — Instant-save scoring + bulk-score
+          affordances + scroll-preserving feedback regeneration.
+          (1) [data-score-form] submits never navigate — radio change posts
+              JSON to /score, updates the rating badge + "Saved" pill + sticky
+              scoreboard.  Evidence note auto-saves on blur.  Scroll position
+              never moves.
+          (2) [data-bulk-level][data-bulk-domain-code] buttons confirm, then
+              POST /bulk-score scoped to ALL or a single domain.  Returns the
+              list of indicator ids that were touched; we refresh each row's
+              radio + badge + scoreboard counts in place — no reload.
+          (3) Async feedback generation (unchanged from April 2026): fetch
+              POST to /generate-feedback, then one-time reload that restores
+              scroll position from sessionStorage. */}
       <script dangerouslySetInnerHTML={{ __html: `
         (function(){
-          // ---- Unsaved score outlines ---------------------------------------
-          document.querySelectorAll('form[action*="/score"]').forEach(function(form){
+          var OBS_ID = ${JSON.stringify(o.id)};
+          var LEVEL_COLOR = {
+            '4': 'bg-emerald-100 text-emerald-800 border-emerald-300',
+            '3': 'bg-sky-100 text-sky-800 border-sky-300',
+            '2': 'bg-amber-100 text-amber-800 border-amber-300',
+            '1': 'bg-red-100 text-red-800 border-red-300'
+          };
+          var LEVEL_LABEL = {
+            '4': 'Highly Effective',
+            '3': 'Effective',
+            '2': 'Improvement Necessary',
+            '1': 'Does Not Meet Standards'
+          };
+          var BADGE_BASE = 'text-xs px-2 py-0.5 rounded-full border';
+
+          // ---- Helpers ------------------------------------------------------
+          function updateBadge(row, level){
+            if (!row) return;
+            var badge = row.querySelector('[data-row-rating-badge]');
+            if (!badge) return;
+            var key = (level == null || level === '') ? null : String(level);
+            if (!key) {
+              badge.className = BADGE_BASE + ' hidden';
+              badge.textContent = '';
+            } else {
+              badge.className = BADGE_BASE + ' ' + (LEVEL_COLOR[key] || '');
+              badge.textContent = key + ' · ' + (LEVEL_LABEL[key] || '');
+            }
+            // Recolor the radio tiles so the selected one keeps the highlight
+            // even when we toggled it via JS rather than a real click.
+            var labels = row.querySelectorAll('form[data-score-form] label');
+            labels.forEach(function(lbl){
+              var input = lbl.querySelector('input[type="radio"][name="level"]');
+              if (!input) return;
+              var v = input.value;
+              var isSel = (v === (key || '')) || (v === '' && !key);
+              // Reset to default unselected styling.
+              lbl.className = lbl.className
+                .replace(/bg-(emerald|sky|amber|red)-100/g, '')
+                .replace(/text-(emerald|sky|amber|red)-800/g, '')
+                .replace(/border-(emerald|sky|amber|red)-300/g, '')
+                .replace(/\\s+/g, ' ');
+              // Strip any prior highlight, then re-apply if selected.
+              if (isSel && v && LEVEL_COLOR[v]) {
+                lbl.className = 'cursor-pointer border rounded p-2 ' + LEVEL_COLOR[v];
+              } else {
+                lbl.className = 'cursor-pointer border rounded p-2 border-slate-200 hover:bg-slate-50';
+              }
+              input.checked = isSel;
+            });
+          }
+          var savedPillTimers = new WeakMap();
+          function showSavedPill(row){
+            if (!row) return;
+            var pill = row.querySelector('[data-row-saved-pill]');
+            if (!pill) return;
+            pill.classList.remove('hidden');
+            if (savedPillTimers.has(pill)) clearTimeout(savedPillTimers.get(pill));
+            savedPillTimers.set(pill, setTimeout(function(){ pill.classList.add('hidden'); }, 1500));
+          }
+          function updateScoreboard(totals){
+            if (!totals) return;
+            var top = document.getElementById('aps-scoreboard-scored');
+            if (top) top.textContent = String(totals.scored);
+            if (totals.perDomain && Array.isArray(totals.perDomain)) {
+              totals.perDomain.forEach(function(d){
+                var el = document.querySelector('[data-scoreboard-domain-scored="' + d.domain_code + '"]');
+                if (el) el.textContent = String(d.scored);
+                // Domain accordion summary counter too, if present.
+                var sum = document.querySelector('[data-domain-summary-scored="' + d.domain_code + '"]');
+                if (sum) sum.textContent = String(d.scored);
+              });
+            }
+            // Show "All saved" cap when 100%.
+            var sav = document.getElementById('aps-scoreboard-saving');
+            if (sav && totals.total > 0 && totals.scored === totals.total) {
+              sav.classList.remove('hidden');
+            } else if (sav) {
+              sav.classList.add('hidden');
+            }
+          }
+          function flashSavingPill(){
+            var sav = document.getElementById('aps-scoreboard-saving');
+            if (!sav) return;
+            sav.classList.remove('hidden');
+            sav.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i>Saving…';
+            sav.className = 'ml-auto text-xs px-2 py-0.5 rounded-full border border-sky-200 bg-sky-50 text-sky-800';
+          }
+          function clearSavingPill(allSaved){
+            var sav = document.getElementById('aps-scoreboard-saving');
+            if (!sav) return;
+            if (allSaved) {
+              sav.className = 'ml-auto text-xs px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800';
+              sav.innerHTML = '<i class="fas fa-check mr-1"></i>All scores saved';
+            } else {
+              sav.classList.add('hidden');
+            }
+          }
+
+          // ---- (1) Instant-save score forms ---------------------------------
+          document.querySelectorAll('[data-score-form]').forEach(function(form){
+            var row = form.closest('[data-indicator-row]');
+            if (!row) return;
             var radios = form.querySelectorAll('input[type="radio"][name="level"]');
-            var saveBtn = form.querySelector('button[type="submit"]');
-            var row = form.closest('.border');
-            function markDirty(){
-              if (!row) return;
-              row.style.outline = '2px solid #dc2626';
-              row.style.outlineOffset = '2px';
-              row.title = 'Unsaved — click Save score to record this rating.';
-              if (saveBtn) {
-                saveBtn.classList.remove('bg-aps-navy');
-                saveBtn.classList.add('bg-red-600','animate-pulse');
-                saveBtn.innerHTML = '<i class="fas fa-exclamation-circle mr-1"></i>Save score (unsaved)';
+            var note   = form.querySelector('textarea[name="evidence_note"]');
+            var inFlight = false;
+            async function saveRow(triggeredByRadio){
+              if (inFlight) return;
+              inFlight = true;
+              flashSavingPill();
+              try {
+                var fd = new FormData(form);
+                var r = await fetch(form.action, {
+                  method: 'POST',
+                  body: fd,
+                  credentials: 'same-origin',
+                  headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                var j = await r.json();
+                if (j && j.ok) {
+                  updateBadge(row, j.level);
+                  showSavedPill(row);
+                  updateScoreboard(j.totals);
+                  clearSavingPill(j.totals && j.totals.scored === j.totals.total);
+                } else {
+                  clearSavingPill(false);
+                  alert('Could not save score — please try again.');
+                }
+              } catch (e) {
+                clearSavingPill(false);
+                alert('Network error saving score — please try again.');
+              } finally {
+                inFlight = false;
               }
             }
-            radios.forEach(function(r){
-              r.addEventListener('change', markDirty);
+            radios.forEach(function(rd){
+              rd.addEventListener('change', function(){ saveRow(true); });
             });
-            var note = form.querySelector('textarea[name="evidence_note"]');
-            if (note) note.addEventListener('input', markDirty);
-            // Submit clears dirty state before the navigation happens.
-            form.addEventListener('submit', function(){
-              if (row) { row.style.outline = ''; row.title = ''; }
+            if (note) note.addEventListener('blur', function(){ saveRow(false); });
+            // Block any accidental Enter-key submit from causing a reload.
+            form.addEventListener('submit', function(ev){ ev.preventDefault(); saveRow(false); });
+          });
+
+          // ---- (2) Bulk-score buttons ---------------------------------------
+          document.querySelectorAll('[data-bulk-level][data-bulk-domain-code]').forEach(function(btn){
+            btn.addEventListener('click', async function(){
+              var level = btn.getAttribute('data-bulk-level');     // "4","3","2","1", or ""
+              var domainCode = btn.getAttribute('data-bulk-domain-code'); // "" = all
+              var scope = domainCode ? 'domain' : 'all';
+              var label = (level === '' ? '"Not scored"' : ('level ' + level + ' · ' + (LEVEL_LABEL[level] || '')));
+              var where = domainCode ? ('Domain ' + domainCode) : 'ALL domains';
+              if (!confirm('Apply ' + label + ' to every UNSCORED indicator in ' + where + '?\\n\\nYour existing scores will NOT be changed.')) return;
+              var orig = btn.innerHTML;
+              btn.disabled = true;
+              btn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i>Applying…';
+              flashSavingPill();
+              try {
+                var fd = new FormData();
+                fd.set('level', level);
+                fd.set('scope', scope);
+                fd.set('domain_code', domainCode);
+                var r = await fetch('/appraiser/observations/' + OBS_ID + '/bulk-score', {
+                  method: 'POST',
+                  body: fd,
+                  credentials: 'same-origin',
+                  headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                var j = await r.json();
+                if (j && j.ok) {
+                  (j.indicator_ids || []).forEach(function(id){
+                    var row = document.querySelector('[data-indicator-row="' + id + '"]');
+                    if (row) { updateBadge(row, j.level); showSavedPill(row); }
+                  });
+                  updateScoreboard(j.totals);
+                  clearSavingPill(j.totals && j.totals.scored === j.totals.total);
+                  // Friendly inline confirmation on the button itself.
+                  btn.innerHTML = '<i class="fas fa-check mr-1"></i>Applied to ' + j.applied;
+                  setTimeout(function(){ btn.innerHTML = orig; btn.disabled = false; }, 1600);
+                } else {
+                  btn.innerHTML = orig;
+                  btn.disabled = false;
+                  clearSavingPill(false);
+                  alert('Bulk apply failed — please try again.');
+                }
+              } catch (e) {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+                clearSavingPill(false);
+                alert('Network error during bulk apply.');
+              }
             });
           });
 
-          // ---- Async feedback generation ------------------------------------
+          // ---- (3) Async feedback generation --------------------------------
           var genForm = document.getElementById('aps-generate-feedback-form');
           var status = document.getElementById('aps-generate-feedback-status');
           var progress = document.getElementById('aps-feedback-progress');
@@ -1420,13 +1793,20 @@ function IndicatorRow({ o, d, i, score, editable }: any) {
   const descriptors: any[] = i.descriptors || [];
   const current = score?.level;
   return (
-    <div id={`ind-${i.id}`} class="border border-slate-200 rounded">
+    <div id={`ind-${i.id}`} data-indicator-row={i.id} data-domain-code={d.code} class="border border-slate-200 rounded">
       <div class="px-3 py-2 flex items-center gap-2 bg-slate-50 border-b border-slate-200">
         <span class="text-xs text-slate-500">{d.code}.{(i.code || '').toUpperCase()}</span>
         <span class="font-medium text-aps-navy">{i.name}</span>
-        {current && <span class={`ml-auto px-2 py-0.5 rounded-full text-xs border ${levelColor[current]}`}>{current} · {levelLabels[current]}</span>}
+        <span data-row-saved-pill
+              class="ml-auto text-xs px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800 hidden">
+          <i class="fas fa-check mr-1"></i>Saved
+        </span>
+        <span data-row-rating-badge
+              class={`text-xs px-2 py-0.5 rounded-full border ${current ? levelColor[current] : 'hidden'}`}>
+          {current ? `${current} · ${levelLabels[current]}` : ''}
+        </span>
       </div>
-      <form method="post" action={`/appraiser/observations/${o.id}/score`} class="px-3 py-3 space-y-2">
+      <form method="post" action={`/appraiser/observations/${o.id}/score`} data-score-form class="px-3 py-3 space-y-2">
         <input type="hidden" name="indicator_id" value={i.id} />
         <div class="grid md:grid-cols-4 gap-2 text-xs">
           {[4,3,2,1].map(lvl => {
@@ -1447,10 +1827,17 @@ function IndicatorRow({ o, d, i, score, editable }: any) {
           </label>
         </div>
         <label class="block text-xs">
-          <span class="block text-slate-600 mb-1">Evidence note (visible to teacher when published)</span>
+          <span class="block text-slate-600 mb-1">Evidence note (visible to teacher when published) <span class="text-slate-400">— optional, auto-saves as you type</span></span>
           <textarea name="evidence_note" rows={2} class="w-full border border-slate-300 rounded px-2 py-1.5 text-xs" placeholder="What you saw/heard that supports this rating" disabled={!editable}>{score?.evidence_note || ''}</textarea>
         </label>
-        {editable && <button type="submit" class="text-xs bg-aps-navy text-white px-3 py-1 rounded hover:bg-aps-blue"><i class="fas fa-save mr-1"></i>Save score</button>}
+        {/* June 4 2026 (evening) — Save button is now a no-JS fallback only.
+            When JS is loaded, ratings save instantly on click and notes save
+            on blur via fetch.  The button shows only as a backup. */}
+        {editable && (
+          <noscript>
+            <button type="submit" class="text-xs bg-aps-navy text-white px-3 py-1 rounded hover:bg-aps-blue"><i class="fas fa-save mr-1"></i>Save score</button>
+          </noscript>
+        )}
       </form>
     </div>
   );
@@ -1467,6 +1854,20 @@ function FeedbackColumn({ o, items, cat, label, icon, editable }: any) {
   };
   return (
     <Card title={label} icon={icon}>
+      {/* June 4 2026 (late evening) — Dr. Gandhi asked what triggers a focus
+          area.  Auto-generation only flags an indicator as a focus area when
+          its score is 1 (Does Not Meet Standards).  Scores of 2 land in
+          Growth Areas; 3 and 4 land in Strengths.  Appraisers can also force
+          an item into Focus Areas by changing its category in the dropdown
+          on any feedback item (or by manually adding one here). */}
+      {cat === 'focus_area' && (
+        <div class="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-3">
+          <i class="fas fa-info-circle mr-1"></i>
+          <strong>How focus areas appear:</strong> generated automatically from any indicator scored <strong>1 · DNM</strong>,
+          or manually — change any feedback item's category to <em>Focus area</em>, or add one below.
+          They become the teacher's active focus areas when you publish.
+        </div>
+      )}
       {items.length === 0 && (
         <div class="text-xs text-slate-600 mb-3 p-3 bg-slate-50 border border-dashed border-slate-200 rounded">
           <div class="font-medium text-slate-700 mb-1"><i class="fas fa-lightbulb mr-1 text-aps-gold"></i>Nothing here yet.</div>

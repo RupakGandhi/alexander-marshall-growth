@@ -8,6 +8,145 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 4, 2026 — late evening] — Instant-save scoring + bulk-score affordances + focus area trigger explained
+
+Triggered by Dr. Gandhi's verbatim feedback during testing:
+
+> *"Also when making saves as a user in any field, the page auto refreshes and scrolls all the way to the top. The user thne has to scroll all the way back down to what they were doing and that is annoying. Lets solve that for them.*
+>
+> *Also, what triggers a focus area appearing in the system? Did an observation and it didnt generate*
+>
+> *Also think about the principal user experience during observations. How do we streamline this as easy as possible to them. Sometimes they may not score any element and will just have scripted nots, other times they may have to score all 64. How do we make that experience of scoring as smooth and easy and flexible for them in all situations? Having to press save 64 times when mass scoring would be very hard."*
+
+### Fix 1 — Scoring now auto-saves instantly (no reload, no scroll loss)
+
+**Root cause:** the `/observations/:id/score` endpoint was a classic
+form-POST-then-302-redirect — the browser navigated away to the redirect target,
+which forced a fresh page render and reset the scroll position to the top. The
+old inline JS only highlighted "unsaved" rows in red; it never intercepted the
+submit, so every score click cost the appraiser a 60-row scroll back to where
+they were.
+
+**Resolution** in `src/routes/appraiser.tsx`:
+
+- `/observations/:id/score` is now **JSON-aware**: when the request carries
+  `Accept: application/json` or `X-Requested-With: XMLHttpRequest`, it returns
+  `{ ok, indicator_id, level, totals }` with the recomputed scoreboard counts
+  instead of redirecting. Legacy no-JS form POSTs still get the 302 fallback.
+- The endpoint also accepts `level=""` as an explicit **soft delete** — pick
+  "Not scored" and the row is removed from `observation_scores`, returning the
+  indicator to the unscored pool (which the new bulk action depends on).
+- New inline JS handler intercepts every `[data-score-form]`:
+  - Radio change → instant `fetch()` POST → updates the rating badge + flashes
+    a "Saved" pill for 1.5s + refreshes the sticky scoreboard counters — all
+    in place, no scroll movement, no reload.
+  - Evidence-note textarea → auto-saves on blur.
+  - Form submit (Enter key etc.) is `preventDefault()`-ed and rerouted through
+    the same fetch path.
+- The per-row "Save score" button is now a **`<noscript>` fallback only** — when
+  JS is loaded, no button click is ever required to record a score. Helpful
+  inline copy on the scoring section was updated: *"Click any rating tile to
+  record a score — auto-saves instantly, no need to press anything else."*
+
+### Fix 2 — Speed-grade affordances: score 0 or 64 indicators with the same effort
+
+Dr. Gandhi's two extreme cases:
+
+- **Walkthrough / scripted-notes-only:** appraiser doesn't score any indicator
+  and just wants to publish narrative notes
+- **Full formal observation:** appraiser needs to set all ~60 indicators in a
+  reasonable time without 60 individual button clicks
+
+**Resolution** — new bulk-score system in `appraiser.tsx`:
+
+- New endpoint `POST /observations/:id/bulk-score` accepts `level=4|3|2|1|""`
+  and `scope=all|domain` (+ `domain_code` when scoped). **Critical safety
+  contract:** the SQL `WHERE (os.id IS NULL OR os.level IS NULL)` clause
+  ensures the bulk action only touches **currently unscored** indicators — a
+  rating the appraiser already set manually is **never** overwritten. Verified
+  end-to-end with a smoke test (manually scored 1 indicator → bulk-applied
+  level 3 to "all" → applied 49 of the 50 unscored, the manually scored row
+  stayed at its original value).
+- The query is scoped to the **observation's own framework_id**, so the bulk
+  action only sees the indicators actually rendered to this user.
+- Each domain `<details>` accordion now has a **per-domain bulk toolbar**:
+  > 🎯 Speed-grade unscored in this domain: [All 4 · HE] [All 3 · E] [All 2 · IN] [All 1 · DNM] · [Reset to "Not scored"]
+- A **whole-form bulk-actions row** sits below all six domains for the "all 60
+  in one click" case: *"All 64 indicators at once: [All unscored → 4] [→ 3]
+  [→ 2] [→ 1]  ·  [Reset all to "Not scored"]"*
+- Every bulk button shows a confirm dialog naming the scope and reassuring the
+  appraiser that existing scores won't be touched. After fetch returns, every
+  affected row's rating badge + saved pill animate in place; the sticky
+  scoreboard updates per-domain and overall in real time.
+
+### Fix 3 — Sticky live scoreboard (no more "did that save?")
+
+- New `#aps-scoreboard` strip sits sticky below the global header at
+  `top: 112px / 120px`, **visible at all times** while scoring. It shows
+  `N / 60 indicators scored` plus six per-domain pills (`A · 7/10`, `B · 0/10`,
+  …) that link to their domain anchors. When 60/60 is reached, an "All scores
+  saved" badge appears. Every score change — single or bulk — updates these
+  counters via the JSON response totals, no reload required.
+
+### Fix 4 — Focus area trigger explanation surfaced in the UI
+
+**Dr. Gandhi's report:** *"Did an observation and it didnt generate."* He
+expected a focus area to appear and one didn't. **Root cause** (it's working as
+designed, but the design wasn't visible to the user): the auto-feedback
+generator's category rule in `generateFeedbackForObservation` is:
+
+```
+level >= 3 → 'glow'             (Strengths)
+level === 2 → 'grow'             (Growth Areas)
+level <= 1 → 'focus_area'        (Focus Areas)
+```
+
+Only indicators scored **1 · Does Not Meet Standards** auto-create a focus
+area. Dr. Gandhi's test indicator was scored at level 2, so it correctly
+landed in Growth Areas, not Focus Areas. There was also no visible explanation
+of this rule, so the system felt opaque.
+
+**Resolution** in `FeedbackColumn`:
+
+- The Focus Areas column now renders a small amber hint at the top **explaining
+  exactly when a focus area appears**:
+  > 💡 **How focus areas appear:** generated automatically from any indicator
+  > scored **1 · DNM**, or manually — change any feedback item's category to
+  > *Focus area*, or add one below. They become the teacher's active focus
+  > areas when you publish.
+- The hint is intentionally only on the focus-area column (the other three
+  columns are self-explanatory). It clarifies both the auto-rule **and** the
+  always-available manual override (existing dropdown / "Add new" form).
+- The promotion-to-teacher pipeline at `/publish` is unchanged — feedback
+  items with `category='focus_area'` already insert into `focus_areas` and
+  show up on the teacher's dashboard.
+
+### Implementation notes
+
+- All three SQL queries in `scoreboardTotals()` and `/bulk-score` use the
+  correct table names (`framework_indicators`, `framework_domains`) and scope
+  by `framework_id` so totals match the rendered UI exactly.
+- The text-field auto-save engine (`[data-autosave]` on Subject, Grade,
+  Scripted Notes, Private Notes, Overall Summary) was already AJAX as of the
+  June 2 release — that flow remains untouched. This change closes the last
+  redirect-on-save loop: the scoring grid.
+- Bundle delta: `dist/_worker.js` grew from 599.01 kB → 616.53 kB (+17 kB) to
+  accommodate the new client-side helpers and the bulk-score endpoint.
+
+### Verification
+
+Local smoke tests against `localhost:3000` as Shannon Faller (appraiser):
+
+| Test                                                         | Result                       |
+| ------------------------------------------------------------ | ---------------------------- |
+| `POST /score` w/ JSON header, level=3                         | `ok:true`, totals returned ✓ |
+| `POST /score` w/ JSON header, level=""                        | soft-delete, scored:0 ✓      |
+| `POST /bulk-score` scope=domain, code=A, level=3              | applied 10, only Domain A ✓  |
+| `POST /bulk-score` scope=all, level=3 with 1 manual score=2   | applied 49, manual preserved ✓ |
+| Rendered draft page: bulk buttons, scoreboard, focus hint     | 35 bulk btns, 6 toolbars, 60 noscript ✓ |
+
+---
+
 ## [June 4, 2026 — evening] — Two UX fixes from Dr. Gandhi: PD-hours nav surfacing + collapsed observation domains
 
 Triggered by Dr. Gandhi's verbatim feedback during testing:
