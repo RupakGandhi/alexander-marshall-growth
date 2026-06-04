@@ -8,6 +8,85 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 5, 2026] — "Recommended Modules" revert + universal Prose renderer for auto-generated feedback
+
+Triggered by Dr. Gandhi's verbatim feedback (with screenshot of a
+markdown-table-formatted "What I saw in your classroom" feedback item
+rendering as raw pipe characters to the teacher):
+
+> *"You did one over correction, You changed Recommended Modules title to 'Your modules' --> Change that back to Recommended Modules. Make no other changes and keep everything the same, Make sure all capitalization and everything is appropriate.*
+>
+> *Also make sure that all auto generated content and feedback and the way the text transfers through the system is always nicely formatted and displayed nicely. Especially the preseeded auto generated feedback so its never hard to read for any user (see screenshot of an example thats harder to read)."*
+
+### Fix 1 — `Recommended Modules` rename revert
+
+* `src/routes/pd.tsx` — the teacher PD home card that lists each teacher's
+  active modules is back to **`Recommended Modules`** (was briefly
+  "Your modules" in an earlier session — that was the over-correction).
+* Capitalization matches the other section headers ("Strengths", "Growth
+  Areas", "Focus Areas", "Module Library").
+* The separate "Module Library" preview card (renamed from "Suggested
+  modules" on June 4) is unchanged.
+
+### Fix 2 — universal `<Prose>` renderer (`src/lib/prose.tsx`, NEW)
+
+* New `Prose` component intelligently formats any feedback `body`,
+  `description`, `overall_summary`, or `review_note` so the same string
+  that previously rendered as raw pipes now renders as a real table.
+* Detects three patterns common in LLM-generated and human-pasted
+  feedback:
+  - **Markdown pipe tables** (`| # | Note |\n|---|---|\n| 1 | ... |`)
+    — rendered as a real `<table>` with sticky headers and striped rows.
+    Recognized separator variants: `|---|---|`, `| -: | --- |`,
+    `| :--: | :--- |`, `|-|-|`.
+  - **Bulleted lists** (`•`, `-`, `*`, `·` prefixes) — rendered as `<ul>`.
+  - **Numbered lists** (`1.`, `1)`, `(1)`) — rendered as `<ol>`.
+  - Everything else stays as paragraphs with preserved line breaks.
+* Inline `**bold**` is honored (very common in LLM output).
+* XSS-safe: every text node passes through Hono JSX auto-escaping. No
+  `dangerouslySetInnerHTML`.
+* Bundle impact: +2.24 kB worker — Cloudflare's 1 MB limit still has
+  ~38% headroom (`dist/_worker.js` 619.00 kB vs 1024 kB cap).
+
+### Coverage matrix — every feedback render site routed through `<Prose>`
+
+| Route                                                       | What it renders                                                       |
+| ----------------------------------------------------------- | --------------------------------------------------------------------- |
+| `teacher.tsx` `/teacher/observations/:id`                   | overall_summary, glow/grow/next/focus feedback bodies                 |
+| `teacher.tsx` `/teacher/focus`                              | focus area descriptions                                               |
+| `appraiser.tsx` teacher detail                              | focus area descriptions (160-char preview)                            |
+| `appraiser.tsx` feedback editor (read-only mode)            | feedback bodies                                                       |
+| `appraiser.tsx` external-PD detail                          | submission description, reviewer note                                 |
+| `coach.tsx` teacher detail                                  | focus area descriptions, overall_summary, glow/grow/focus/next bodies |
+| `superintendent.tsx` observation detail                     | overall_summary                                                       |
+| `superintendent.tsx` district feedback feed                 | feedback descriptions (300-char preview)                              |
+
+### Verification
+
+* `node /tmp/parse_test.mjs` — parser produces correct AST for:
+  1. Screenshot's exact `| # | Observation Note |` payload → 1 paragraph + 1 table (2 headers, 4 data rows)
+  2. Bulleted list (`•` prefix) → 1 paragraph + 1 `ul`
+  3. Numbered list (`1.` prefix) → 1 paragraph + 1 `ol`
+  4. Plain prose → 1 paragraph (no over-formatting)
+* `npm run build` — clean (64 modules, 619.00 kB)
+* `grep -c "Your modules" rendered HTML` → **0** (revert verified)
+* `grep -c "Recommended Modules" rendered HTML` → **1** (revert verified)
+* `grep -c "Module Library" rendered HTML` → **1** (preview card preserved)
+* `grep -c "aps-prose" dist/_worker.js` → **1** (Prose shipped)
+
+### Implementation notes for future sessions
+
+* `Prose` lives in `src/lib/prose.tsx`. It's a pure JSX component — no
+  client-side JS needed. Server-rendered, fully static output.
+* If a future feedback type starts using a new markdown pattern (e.g.
+  `> blockquotes` or `### headings`), extend `parseBlocks()` in
+  `src/lib/prose.tsx` and add a corresponding render branch.
+* The `<pre>` block at `appraiser.tsx:1193` that shows raw saved
+  scripted_notes is INTENTIONALLY left as `<pre>` — that's the
+  appraiser-only "what's literally in the DB right now" debug view.
+
+---
+
 ## [June 4, 2026 — late evening pass 2] — "Module Library" rename + universal scroll-preserving save (one client, every form)
 
 Triggered by Dr. Gandhi's verbatim feedback:

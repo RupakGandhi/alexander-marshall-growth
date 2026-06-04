@@ -14,6 +14,7 @@ import { teacherEnrollments } from '../lib/pd';
 import { softenTitleForTeacher, softenSourceForTeacher } from '../lib/teacher_labels';
 import { levelColor, levelLabels, formatDate, formatDateTime, statusBadge, statusLabel, escapeHtml } from '../lib/ui';
 import { notify } from '../lib/notifications';
+import { Prose } from '../lib/prose';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['teacher']));
@@ -778,29 +779,31 @@ function TeacherObservationView({ user, o, msg }: any) {
 
       {o.overall_summary && (
         <Card id="obs-summary" title="Overall Summary from your Appraiser" icon="fas fa-message">
-          <p class="whitespace-pre-wrap text-slate-700">{o.overall_summary}</p>
+          {/* June 5 2026 — use <Prose> so tables/bullets in auto-generated
+              summaries render as real lists instead of raw pipe syntax. */}
+          <Prose text={o.overall_summary} size="sm" />
         </Card>
       )}
 
       <div class="grid md:grid-cols-2 gap-4 mt-4">
         {glows.length > 0 && (
           <Card id="obs-glows" title={`Strengths (${glows.length})`} icon="fas fa-star" class="border-emerald-200">
-            <ul class="space-y-2">{glows.map((f) => <li class="text-sm"><span class="font-medium">{f.title || 'Strength'}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
+            <ul class="space-y-3">{glows.map((f) => <li class="text-sm"><div class="font-medium text-slate-800 mb-1">{f.title || 'Strength'}</div><Prose text={f.body} size="sm" /></li>)}</ul>
           </Card>
         )}
         {grows.length > 0 && (
           <Card id="obs-grows" title={`Growth Areas (${grows.length})`} icon="fas fa-seedling" class="border-sky-200">
-            <ul class="space-y-2">{grows.map((f) => <li class="text-sm"><span class="font-medium">{f.title || 'Growth area'}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
+            <ul class="space-y-3">{grows.map((f) => <li class="text-sm"><div class="font-medium text-slate-800 mb-1">{f.title || 'Growth area'}</div><Prose text={f.body} size="sm" /></li>)}</ul>
           </Card>
         )}
         {next.length > 0 && (
           <Card id="obs-next" title={`Suggested Next Steps (${next.length})`} icon="fas fa-forward" class="border-aps-sky">
-            <ul class="space-y-2">{next.map((f) => <li class="text-sm"><span class="font-medium">{f.title || ''}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
+            <ul class="space-y-3">{next.map((f) => <li class="text-sm"><div class="font-medium text-slate-800 mb-1">{f.title || ''}</div><Prose text={f.body} size="sm" /></li>)}</ul>
           </Card>
         )}
         {focus.length > 0 && (
           <Card id="obs-focus" title={`Focus Areas (${focus.length})`} icon="fas fa-bullseye" class="border-aps-gold">
-            <ul class="space-y-2">{focus.map((f) => <li class="text-sm"><span class="font-medium">{f.title}</span><div class="whitespace-pre-wrap text-slate-700">{f.body}</div></li>)}</ul>
+            <ul class="space-y-3">{focus.map((f) => <li class="text-sm"><div class="font-medium text-slate-800 mb-1">{f.title}</div><Prose text={f.body} size="sm" /></li>)}</ul>
           </Card>
         )}
       </div>
@@ -882,7 +885,7 @@ function TeacherFocus({ user, summary }: any) {
               <li class="border border-slate-200 rounded-md p-4">
                 <div class="text-xs text-slate-500">{f.domain_code && `Domain ${f.domain_code} · ${f.indicator_code?.toUpperCase()}. ${f.indicator_name}`}</div>
                 <div class="font-medium text-aps-navy text-lg">{f.title}</div>
-                {f.description && <div class="text-sm text-slate-700 mt-1 whitespace-pre-wrap">{f.description}</div>}
+                {f.description && <div class="mt-1"><Prose text={f.description} size="sm" /></div>}
                 <div class="text-xs text-slate-400 mt-2">Opened {formatDate(f.opened_at)}</div>
               </li>
             ))}

@@ -696,7 +696,12 @@ function TeacherPdHome({ user, enrollments, suggested, plans, msg }: any) {
         <StatMini label="Plans" value={plans.length} icon="fa-calendar" />
       </div>
 
-      <Card title="Your modules" icon="fas fa-list-check" class="mb-4" data-tour="t-pd-home">
+      {/* June 5, 2026 — reverted from "Your modules" back to "Recommended Modules"
+          per Dr. Gandhi.  The card lists the modules the system has recommended
+          for this teacher based on their lowest observation scores; the previous
+          "Your modules" wording was an over-correction.  Title casing matches
+          the other section headers ("Strengths", "Growth Areas", etc.). */}
+      <Card title="Recommended Modules" icon="fas fa-list-check" class="mb-4" data-tour="t-pd-home">
         {active.length === 0 ? <p class="text-sm text-slate-500">No active modules right now. Your lowest observation scores will automatically add modules here — or browse the library below.</p> : (
           <div class="space-y-2">
             {active.map((e: any) => <EnrollmentRow e={e} />)}

@@ -1,7 +1,7 @@
 # Alexander Public Schools — Marshall Growth Platform
 
 > **Production**: <https://alexander-marshall-growth.pages.dev> · **Launch target**: August 16, 2026 (FIRM)
-> **Last deploy**: June 4, 2026 (late evening, pass 2) — "Module Library" rename on the teacher PD home + **universal scroll-preserving save**: every form in every role now updates in place via a single global AJAX interceptor (no per-form wiring; server endpoints unchanged) (see CHANGELOG.md)
+> **Last deploy**: June 5, 2026 — `Recommended Modules` rename revert on the teacher PD home + **universal `<Prose>` renderer**: every auto-generated feedback body, summary, focus area description, and reviewer note now renders markdown tables, bullets, and numbered lists as real structured HTML instead of raw pipe characters (see CHANGELOG.md)
 
 ## ⭐ What's New (June 2 2026 upgrade — 11 leadership-meeting fixes for Aug 16 launch)
 

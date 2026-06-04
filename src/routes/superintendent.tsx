@@ -4,6 +4,7 @@ import { Layout, Card, PDHoursHeatMap } from '../lib/layout';
 import { requireRole } from '../lib/auth';
 import { getObservation, getTeacherPDHoursSummary } from '../lib/db';
 import { formatDate, levelColor, levelLabels, statusBadge, statusLabel } from '../lib/ui';
+import { Prose } from '../lib/prose';
 import { buildPdHoursCsv, renderPdHoursPrint } from '../lib/pd_hours_export';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -556,7 +557,7 @@ function SuperintendentObservationView({ user, o }: any) {
       <div class="mb-4"><a href={`/superintendent/teachers/${o.teacher_id}`} class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Back</a></div>
       <h1 class="font-display text-2xl text-aps-navy">{o.observation_type} · {o.t_first} {o.t_last}</h1>
       <p class="text-slate-600 text-sm">{formatDate(o.observed_at)} · by {o.a_first} {o.a_last}</p>
-      {o.overall_summary && <Card title="Summary" icon="fas fa-message" class="mt-3"><p class="whitespace-pre-wrap">{o.overall_summary}</p></Card>}
+      {o.overall_summary && <Card title="Summary" icon="fas fa-message" class="mt-3"><Prose text={o.overall_summary} size="sm" /></Card>}
 
       {(o.scores || []).length > 0 && (
         <Card title="Scores" icon="fas fa-table-list" class="mt-3">
@@ -805,7 +806,7 @@ function SuperintendentInsights({ user, summary, groups, groupBy, heatmap, pdHot
                   <span>· <a href={`/superintendent/observations/${f.obs_id}`} class="text-aps-blue hover:underline">open observation</a></span>
                 </div>
                 {f.title ? <div class="font-medium text-aps-navy">{f.title}</div> : null}
-                {f.description ? <div class="text-slate-700 text-xs whitespace-pre-wrap">{String(f.description).slice(0, 300)}{String(f.description).length > 300 ? '…' : ''}</div> : null}
+                {f.description ? <div class="text-slate-700"><Prose text={`${String(f.description).slice(0, 300)}${String(f.description).length > 300 ? '…' : ''}`} size="xs" /></div> : null}
               </li>
             ))}
           </ul>

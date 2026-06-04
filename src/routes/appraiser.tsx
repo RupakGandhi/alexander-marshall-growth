@@ -13,6 +13,7 @@ import {
   levelColor, levelLabels, formatDate, formatDateTime,
   statusBadge, statusLabel, escapeHtml,
 } from '../lib/ui';
+import { Prose } from '../lib/prose';
 import { notify } from '../lib/notifications';
 import { autoEnrollForObservation } from '../lib/pd';
 import { buildPdHoursCsv, renderPdHoursPrint } from '../lib/pd_hours_export';
@@ -1010,7 +1011,7 @@ function AppraiserTeacherDetail({ user, summary, performance, modules, msg }: an
                   <li class="text-sm border border-slate-200 rounded p-2">
                     <div class="text-xs text-slate-500">{f.domain_code}.{(f.indicator_code || '').toUpperCase()} {f.indicator_name}</div>
                     <div class="font-medium text-aps-navy">{f.title}</div>
-                    {f.description && <div class="text-xs text-slate-600 mt-1 whitespace-pre-wrap">{f.description.slice(0,160)}</div>}
+                    {f.description && <div class="text-xs text-slate-600 mt-1"><Prose text={f.description.slice(0,160)} size="xs" /></div>}
                   </li>
                 ))}
               </ul>
@@ -1896,7 +1897,7 @@ function FeedbackColumn({ o, items, cat, label, icon, editable }: any) {
                   </div>
                 </form>
               ) : (
-                <div class="mt-2 text-sm whitespace-pre-wrap">{f.body}</div>
+                <div class="mt-2"><Prose text={f.body} size="sm" /></div>
               )}
             </details>
           </li>
@@ -2025,7 +2026,7 @@ function ExternalPdDetail({ user, row, msg }: any) {
         {row.description && (
           <div class="mt-3">
             <div class="text-xs text-slate-500 mb-1">Description</div>
-            <div class="p-3 bg-slate-50 border border-slate-200 rounded text-sm whitespace-pre-wrap">{row.description}</div>
+            <div class="p-3 bg-slate-50 border border-slate-200 rounded"><Prose text={row.description} size="sm" /></div>
           </div>
         )}
       </Card>
@@ -2042,7 +2043,7 @@ function ExternalPdDetail({ user, row, msg }: any) {
               <i class="fas fa-clock mr-1"></i>{Number(row.approved_hours).toFixed(2)} approved PD hours
             </div>
           )}
-          {row.review_note && <div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded text-sm whitespace-pre-wrap">{row.review_note}</div>}
+          {row.review_note && <div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded"><Prose text={row.review_note} size="sm" /></div>}
         </Card>
       )}
 

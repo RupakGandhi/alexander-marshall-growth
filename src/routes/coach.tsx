@@ -5,6 +5,7 @@ import { requireRole } from '../lib/auth';
 import { getAssignedTeachers, logActivity } from '../lib/db';
 import { recommendModule } from '../lib/pd';
 import { formatDate, formatDateTime, statusBadge, statusLabel } from '../lib/ui';
+import { Prose } from '../lib/prose';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', requireRole(['coach', 'super_admin']));
@@ -211,7 +212,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, msg }:
               <li class="border border-slate-200 rounded-md p-3">
                 <div class="text-xs text-slate-500">{f.domain_code}.{(f.indicator_code || '').toUpperCase()} · {f.indicator_name}</div>
                 <div class="font-medium text-aps-navy text-lg">{f.title}</div>
-                {f.description && <div class="text-sm text-slate-700 mt-1 whitespace-pre-wrap">{f.description}</div>}
+                {f.description && <div class="mt-1"><Prose text={f.description} size="sm" /></div>}
                 <div class="text-xs text-slate-400 mt-2">Opened {formatDate(f.opened_at)}</div>
               </li>
             ))}
@@ -231,7 +232,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, msg }:
               </div>
               <span class={`px-2 py-0.5 rounded-full text-xs border ${statusBadge(o.status)}`}>{statusLabel(o.status)}</span>
             </div>
-            {o.overall_summary && <div class="mt-3 text-sm whitespace-pre-wrap text-slate-700">{o.overall_summary}</div>}
+            {o.overall_summary && <div class="mt-3"><Prose text={o.overall_summary} size="sm" /></div>}
             <div class="grid md:grid-cols-2 gap-3 mt-3">
               {['glow','grow','focus_area','next_step'].map((cat: string) => {
                 const items = o.feedback.filter((f: any) => f.category === cat);
@@ -245,7 +246,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, msg }:
                       {items.map((f: any) => (
                         <li class="text-sm">
                           {f.title && <div class="font-medium">{f.title}</div>}
-                          <div class="whitespace-pre-wrap text-slate-700">{f.body}</div>
+                          <Prose text={f.body} size="sm" />
                         </li>
                       ))}
                     </ul>
