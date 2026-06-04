@@ -523,13 +523,19 @@
           try { history.replaceState(null, '', '#' + prefix + '-' + code); } catch(_) {}
         }
       }
-      // Click handler — intercept anchor jumps so we get smooth scroll
+      // Click handler — intercept anchor jumps so we get smooth scroll.
+      // If the target is a <details> element (June 4 2026: observation domains
+      // collapse by default to minimize scrolling), auto-expand it on tab-click
+      // so the appraiser lands on visible content.
       tabs.forEach(function(a){
         a.addEventListener('click', function(ev){
           var code = a.getAttribute('data-domain-tab');
           var target = document.getElementById(prefix + '-' + code);
           if (target) {
             ev.preventDefault();
+            if (target.tagName === 'DETAILS' && !target.open) {
+              target.open = true;
+            }
             var top = target.getBoundingClientRect().top + window.scrollY - 110;
             window.scrollTo({ top: top, behavior: 'smooth' });
             activate(code, { updateHash: true });
@@ -560,12 +566,31 @@
           setTimeout(function(){
             var target = document.getElementById(initialHash);
             if (target) {
+              // Auto-expand <details> sections when deep-linked
+              if (target.tagName === 'DETAILS' && !target.open) {
+                target.open = true;
+              }
               var top = target.getBoundingClientRect().top + window.scrollY - 110;
               window.scrollTo({ top: top, behavior: 'auto' });
             }
           }, 50);
         }
       }
+    });
+
+    // June 4 2026 — Expand all / Collapse all helpers for the observation
+    // domain accordions on the appraiser scoring page.  Buttons identified by
+    // data-obs-domains-action="expand" or "collapse".  Operates on every
+    // <details data-domain-section> on the current page.
+    document.querySelectorAll('[data-obs-domains-action]').forEach(function(btn){
+      btn.addEventListener('click', function(ev){
+        ev.preventDefault();
+        var action = btn.getAttribute('data-obs-domains-action');
+        var open = (action === 'expand');
+        document.querySelectorAll('details[data-domain-section]').forEach(function(d){
+          d.open = open;
+        });
+      });
     });
   }
   if (document.readyState === 'loading') {

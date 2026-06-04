@@ -420,7 +420,7 @@ function SuperintendentHome({ user, kpis, schools, welcome, pdHours }: any) {
           modules (Fix 7 credited hours) and approved external PD (Fix 5) into
           one per-teacher progress visual. */}
       <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mt-4">
-        <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/superintendent/teachers" exportPrefix="/superintendent/pd-hours" />
+        <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/superintendent/teachers" exportPrefix="/superintendent/pd-hours" userRole={user?.role} />
       </Card>
 
       <Card title="By School" icon="fas fa-school" class="mt-4" data-tour="supt-by-school">

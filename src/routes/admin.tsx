@@ -2470,7 +2470,7 @@ function AdminExternalPdAudit({ user, rows, filterStatus }: any) {
 
 function PdHoursSettingsPage({ user, target, msg }: any) {
   return (
-    <Layout title="PD-hours target" user={user} activeNav="data">
+    <Layout title="PD-hours target" user={user} activeNav="admin-pd-hours">
       <div class="mb-3"><a href="/admin" class="text-sm text-aps-blue hover:underline"><i class="fas fa-arrow-left mr-1"></i>Admin overview</a></div>
       <h1 class="font-display text-2xl text-aps-navy mb-1"><i class="fas fa-stopwatch mr-2"></i>Annual PD-hours target</h1>
       <p class="text-slate-600 text-sm mb-4">

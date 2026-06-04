@@ -301,6 +301,7 @@ function navItems(role: string) {
         { key: 'admin-reports',  label: 'Reports',           href: '/reports',            icon: 'fas fa-file-export' },
         { key: 'admin-district', label: 'District',          href: '/admin/district',     icon: 'fas fa-building-columns' },
         { key: 'data',           label: 'Data Management',   href: '/admin/data',         icon: 'fas fa-database' },
+        { key: 'admin-pd-hours', label: 'PD-Hours Target',   href: '/admin/settings/pd-hours', icon: 'fas fa-stopwatch' },
       ];
     case 'superintendent':
       return [
@@ -459,6 +460,10 @@ export function PDHoursHeatMap(props: {
    *  When provided, renders Download CSV + Print/PDF buttons in the widget header.
    *  Each prefix must expose `/csv` and `/print` GET endpoints. */
   exportPrefix?: string;
+  /** Role of the viewing user — used to decide whether to show the
+   *  "Admin → PD-hours target" legend link (only super_admin can reach it).
+   *  Other roles see the same legend text without the dead-end link. */
+  userRole?: string;
 }) {
   const target = Number(props.target || 0);
   const rows = props.rows || [];
@@ -621,7 +626,9 @@ export function PDHoursHeatMap(props: {
         <p class="text-[11px] text-slate-500 mt-3">
           <i class="fas fa-circle-info mr-1"></i>
           Heat-map combines verified internal-LMS PD (with hours credited at verification time) and approved external PD.
-          {' '}Target is admin-editable in <a href="/admin/settings/pd-hours" class="text-aps-blue hover:underline">Admin → PD-hours target</a>.
+          {props.userRole === 'super_admin'
+            ? <>{' '}Target is admin-editable in <a href="/admin/settings/pd-hours" class="text-aps-blue hover:underline">Admin → PD-hours target</a>.</>
+            : <>{' '}Target is set by district admin.</>}
         </p>
       )}
     </div>

@@ -682,7 +682,7 @@ function AppraiserHome({ user, teachers, latest, welcome, pdHours }: any) {
       {/* Fix 6 — PD-hours heat-map scoped to this appraiser's caseload. */}
       {pdHours.rows.length > 0 && (
         <Card title="PD Hours Heat-Map" icon="fas fa-stopwatch" class="mb-6">
-          <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/appraiser/teachers" exportPrefix="/appraiser/pd-hours" />
+          <PDHoursHeatMap target={pdHours.target} rows={pdHours.rows} linkPrefix="/appraiser/teachers" exportPrefix="/appraiser/pd-hours" userRole={user?.role} />
         </Card>
       )}
 
@@ -1159,13 +1159,21 @@ function ObservationEditor({ user, o, domains, msg }: any) {
           position. With JS disabled it falls back to anchor links. */}
       <DomainTabs domains={domains.map((d: any) => ({ id: d.id, code: d.code, name: d.name }))} idPrefix="obs-domain" />
 
-      <div class="space-y-3 mt-3">
+      {/* June 4 2026 UX request from Dr. Gandhi: minimize scrolling.  All six
+          domain accordions now COLLAPSE by default — appraisers expand only the
+          domain(s) they're actively scoring.  Domain tabs above + the DomainTabs
+          jump-nav still drive instant navigation.  Two QoL helpers added below
+          the tabs: "Expand all" / "Collapse all" buttons so power users can flip
+          everything open in one click when they want the long-form view. */}
+      <div class="flex items-center justify-end gap-3 mt-2 text-xs">
+        <button type="button" data-obs-domains-action="expand" class="text-aps-blue hover:underline"><i class="fas fa-chevron-down mr-1"></i>Expand all domains</button>
+        <span class="text-slate-300">·</span>
+        <button type="button" data-obs-domains-action="collapse" class="text-slate-600 hover:underline hover:text-aps-navy"><i class="fas fa-chevron-up mr-1"></i>Collapse all</button>
+      </div>
+
+      <div class="space-y-3 mt-2">
         {domains.map((d: any) => (
-          // April 2026 UI polish: open ALL domains by default so Domain E (the
-          // "Professional Responsibilities" domain that used to stay collapsed)
-          // is visible without an extra click.  Appraisers can still collapse
-          // any domain by clicking its header.
-          <details id={`obs-domain-${d.code}`} data-domain-section={d.code} class="bg-white rounded-lg border border-slate-200 scroll-mt-32" open>
+          <details id={`obs-domain-${d.code}`} data-domain-section={d.code} class="bg-white rounded-lg border border-slate-200 scroll-mt-32">
             <summary class="px-4 py-3 cursor-pointer flex items-center gap-2">
               <span class="w-8 h-8 rounded-full bg-aps-navy text-white font-display flex items-center justify-center text-sm">{d.code}</span>
               <span class="font-display text-aps-navy">{d.name}</span>

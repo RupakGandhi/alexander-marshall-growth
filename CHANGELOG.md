@@ -8,6 +8,69 @@ role permissions, forced-first-login password flow) byte-for-byte.
 
 ---
 
+## [June 4, 2026 — evening] — Two UX fixes from Dr. Gandhi: PD-hours nav surfacing + collapsed observation domains
+
+Triggered by Dr. Gandhi's verbatim feedback during testing:
+
+> *"The link to `https://alexander-marshall-growth.pages.dev/admin/settings/pd-hours` is broken so I cant actually get to where I need to edit the pd hours? Fix that. Also, can you always have the observation boxes collapsed by default so there isnt as much scrolling. We want to minimize as much scrolling as possible so if the boxes are collapsed by default each time that would be best."*
+
+### Fix 1 — PD-hours target was unreachable from the global nav
+
+**Root cause** (not a 404): the route `/admin/settings/pd-hours` always worked,
+but it was reachable **only** from the `/admin` overview's quick-link button.
+From any other admin page (Users, Data Management, Audit Log, etc.) there was no
+nav entry pointing at it, so Dr. Gandhi correctly experienced the link as "broken
+— I can't actually get there." Additionally, the heat-map widget on the
+superintendent dashboard rendered a legend link to the admin-only route, which
+sent superintendents to `/login` (looks broken to them too).
+
+**Resolution:**
+
+- Added **PD-Hours Target** as a top-level item in the super_admin sidebar nav,
+  right under **Data Management**, with the `fas fa-stopwatch` icon
+- `PdHoursSettingsPage` now sets `activeNav="admin-pd-hours"` so the nav item
+  highlights correctly when on the page
+- Heat-map legend is now role-aware: super_admins still see the "Admin →
+  PD-hours target" inline link; everyone else (superintendent / appraiser /
+  teacher) sees plain copy "Target is set by district admin." — no dead-end click
+
+### Fix 2 — Observation domain accordions collapsed by default
+
+**Resolution** in `appraiser.tsx`:
+
+- All six Marshall domain `<details>` blocks (A–F) now render **without** the
+  `open` attribute — they collapse on initial load
+- Added an "Expand all domains" / "Collapse all" mini-toolbar **above** the
+  accordions for one-click bulk control when needed
+- Enhanced the sticky DomainTabs handler in `public/static/app.js` so that
+  clicking a domain tab **auto-expands** the corresponding `<details>` block
+  before scrolling — no extra click required. Deep-links like
+  `/appraiser/observations/42#obs-domain-C` also auto-expand on first paint
+- The existing per-domain "scored N / M" count still renders in the collapsed
+  summary, so the appraiser sees at-a-glance progress before deciding which
+  domain to open next
+
+This collapses ~6 screens of scrolling into a single screen on the observation
+form, which is the highest-traffic surface in the platform. Power users (who
+prefer the long-form view) can still click "Expand all" once and have everything
+laid out as before.
+
+### Files touched
+
+- `src/lib/layout.tsx` — nav item add, `PDHoursHeatMap.userRole` prop, role-aware legend
+- `src/routes/admin.tsx` — `PdHoursSettingsPage` `activeNav` update
+- `src/routes/appraiser.tsx` — removed `open` from domain `<details>`; added expand/collapse mini-toolbar; passes `userRole` to heat-map
+- `src/routes/superintendent.tsx` — passes `userRole` to heat-map
+- `public/static/app.js` — domain-tab click handler auto-expands `<details>`; initial-hash also expands; new event delegation for `data-obs-domains-action` buttons
+
+### Deploy
+
+- Built clean: 63 modules → `dist/_worker.js` 599.01 kB
+- Deployed via BYOK to `https://alexander-marshall-growth.pages.dev` (aliased from `371c83f7.alexander-marshall-growth.pages.dev`)
+- URL is locked and never changes per Dr. Gandhi's standing directive
+
+---
+
 ## [June 4, 2026] — Pre-launch sweep + reports get sortable columns + heat-map sort/filter toolbar
 
 Triggered by the June 4 audit report (which confirmed all prior blockers cleared) and
