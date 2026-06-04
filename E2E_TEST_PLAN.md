@@ -21,18 +21,18 @@
 
 ---
 
-## 1. Test accounts (all share password `demo1234`)
+## 1. Test accounts (all share the seeded district password `Alexander2026!`)
 
 | Role | Name | Email | Password | What they see |
 |---|---|---|---|---|
-| **Teacher** | Jil Stahosky | `jil.stahosky@k12.nd.us` | `demo1234` | Personal dashboard, PD LMS, observations she received, focus areas, external PD submissions |
-| **Appraiser** | Aaron Allard | `aaron.allard@k12.nd.us` | `demo1234` | Teachers he supervises (incl. Jil), observation tool, PD review queue, external PD review queue |
-| **Appraiser** | Shannon Faller | `shannon.faller@k12.nd.us` | `demo1234` | Different teacher caseload (use if you need a second appraiser perspective) |
-| **Coach** | Jacki Hansel | `jacki.hansel@k12.nd.us` | `demo1234` | Read-only view of her assigned teachers' published feedback (no scores) + PD review queue |
-| **Superintendent** | Leslie Bieber | `leslie.bieber@k12.nd.us` | `demo1234` | District-wide overview, school rollups, all observations and feedback |
-| **Super Admin** | District Administrator | `admin@alexanderschoolnd.us` | `demo1234` | Everything: user management, framework editor, PD module editor, data tools, settings |
+| **Teacher** | Jil Stahosky | `jil.stahosky@k12.nd.us` | `Alexander2026!` | Personal dashboard, PD LMS, observations she received, focus areas, external PD submissions |
+| **Appraiser** | Aaron Allard | `aaron.allard@k12.nd.us` | `Alexander2026!` | Teachers he supervises (incl. Jil), observation tool, PD review queue, external PD review queue |
+| **Appraiser** | Shannon Faller | `shannon.faller@k12.nd.us` | `Alexander2026!` | Different teacher caseload (use if you need a second appraiser perspective) |
+| **Coach** | Jacki Hansel | `jacki.hansel@k12.nd.us` | `Alexander2026!` | Read-only view of her assigned teachers' published feedback (no scores) + PD review queue |
+| **Superintendent** | Leslie Bieber | `leslie.bieber@k12.nd.us` | `Alexander2026!` | District-wide overview, school rollups, all observations and feedback |
+| **Super Admin** | District Administrator | `admin@alexanderschoolnd.us` | `Alexander2026!` | Everything: user management, framework editor, PD module editor, data tools, settings |
 
-> If a login fails with "must change password," the seed reset was not applied — escalate before continuing.
+> `Alexander2026!` is the district's seeded default password (see `seed/003_alexander_staff.sql`). Users will change it themselves after the platform is officially handed off. If a login lands on a "Change your password" screen first, step through it once and pick any new password — that's the platform's normal forced-first-login flow, not a bug.
 
 ---
 
