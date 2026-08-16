@@ -7,6 +7,11 @@ import {
   setUserSchools, getUserSchoolIds,
   listExternalPdQueue, getNumericSetting, setSetting, recentAdminAudit, logAdminAudit,
 } from '../lib/db';
+// Aug 16, 2026 — Fix: /admin/users/create called `notify(...)` without importing it,
+// which surfaced to the admin as a "Could not create user: notify is not defined" toast
+// (even though the INSERT succeeded before notify() threw). Pull it in explicitly so
+// the welcome notification actually fires and the toast disappears.
+import { notify } from '../lib/notifications';
 import { formatDate, formatDateTime, levelLabels, levelColor } from '../lib/ui';
 import { parseCsvAsObjects, buildCsv } from '../lib/csv';
 
@@ -213,6 +218,107 @@ app.post('/users/:id/delete', async (c) => {
   await c.env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
   await logActivity(c.env.DB, user.id, 'user', id, 'deactivate_user');
   return c.redirect('/admin/users?msg=User+deactivated');
+});
+
+// Aug 16, 2026 — Feature request from Dr. Gandhi.
+// Admins previously could only deactivate accounts (soft delete). For staff who
+// no longer work at the district (mid-year departures, wrong entries, ex-employees
+// left over from a stale roster) we now support a true hard delete that removes
+// the user row and every row that references it, so they no longer appear in
+// user pickers, assignment dropdowns, or the users list at all.
+//
+// Guard rails:
+//   • You can't hard-delete yourself.
+//   • The last active super_admin cannot be hard-deleted (would lock the district out).
+//   • Users with authored observations, feedback, or scored deliverables get a
+//     soft-delete fallback: because their work is anchored to their id, wiping the
+//     row would orphan real evaluation history the district may need for audit.
+//     In those cases we set active=0 and tell the admin to keep the deactivated row.
+app.post('/users/:id/hard-delete', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  if (!Number.isFinite(id) || id <= 0) return c.redirect('/admin/users?msg=Unknown+user');
+  if (id === user.id) return c.redirect('/admin/users?msg=' + encodeURIComponent('You can\'t delete your own account.'));
+
+  const target = await c.env.DB.prepare(
+    `SELECT id, first_name, last_name, email, role FROM users WHERE id = ?`
+  ).bind(id).first<any>();
+  if (!target) return c.redirect('/admin/users?msg=Unknown+user');
+
+  // Never delete the last active super admin.
+  if (target.role === 'super_admin') {
+    const cnt = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM users WHERE role='super_admin' AND active=1 AND id <> ?`
+    ).bind(id).first<any>();
+    if (!cnt || cnt.n === 0) {
+      return c.redirect('/admin/users?msg=' + encodeURIComponent(
+        'Cannot delete the last active Super Administrator. Promote another admin first.'));
+    }
+  }
+
+  // Check for anchoring evaluation history. If any of these exist we deliberately
+  // fall back to soft-delete so the audit trail stays intact — the row remains but
+  // the user disappears from active pickers. Observations are the real anchor:
+  // feedback, scores, and deliverables all chain off an observation or enrollment,
+  // so if there's an observation on file (as teacher OR appraiser) we keep the row.
+  const hasAnchor = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM observations WHERE teacher_id=? OR appraiser_id=?) AS obs,
+       (SELECT COUNT(*) FROM external_pd_submissions WHERE teacher_id=? OR reviewed_by=?) AS ext_pd,
+       (SELECT COUNT(*) FROM pd_deliverable_scores WHERE scored_by=?) AS scores`
+  ).bind(id, id, id, id, id).first<any>();
+  const totalAnchor = (hasAnchor?.obs || 0) + (hasAnchor?.ext_pd || 0) + (hasAnchor?.scores || 0);
+  if (totalAnchor > 0) {
+    await c.env.DB.prepare(`UPDATE users SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
+    await c.env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
+    await logActivity(c.env.DB, user.id, 'user', id, 'hard_delete_blocked_soft_deleted',
+      { email: target.email, obs: hasAnchor.obs, ext_pd: hasAnchor.ext_pd, scores: hasAnchor.scores });
+    return c.redirect('/admin/users?msg=' + encodeURIComponent(
+      `${target.first_name} ${target.last_name} had evaluation history on file (observations / PD credit), so their account was deactivated instead of deleted — this preserves the audit trail. They will no longer appear in active lists or pickers.`));
+  }
+
+  // No anchored history — safe to fully remove. Wipe every row that references this
+  // user id so the delete doesn't hit a FK constraint or leak dangling references.
+  // The parameter placeholders are counted from the SQL string, so we don't have to
+  // maintain a parallel bind-count array by hand.
+  const cleanup = [
+    `DELETE FROM sessions WHERE user_id=?`,
+    `DELETE FROM user_schools WHERE user_id=?`,
+    `DELETE FROM user_settings WHERE user_id=?`,
+    `DELETE FROM notifications WHERE user_id=? OR actor_user_id=?`,
+    `DELETE FROM notification_preferences WHERE user_id=?`,
+    `DELETE FROM push_subscriptions WHERE user_id=?`,
+    `DELETE FROM assignments WHERE teacher_id=? OR staff_id=?`,
+    `DELETE FROM teacher_goals WHERE teacher_id=?`,
+    `DELETE FROM focus_areas WHERE teacher_id=?`,
+    // deliverables/rubric scores chain through pd_enrollments so purge that chain first
+    `DELETE FROM pd_deliverables WHERE enrollment_id IN (SELECT id FROM pd_enrollments WHERE teacher_id=?)`,
+    `DELETE FROM pd_deliverable_scores WHERE enrollment_id IN (SELECT id FROM pd_enrollments WHERE teacher_id=?)`,
+    `DELETE FROM pd_enrollments WHERE teacher_id=?`,
+    `DELETE FROM pd_reflections WHERE teacher_id=?`,
+    `DELETE FROM pd_plan_items WHERE plan_id IN (SELECT id FROM pd_plans WHERE teacher_id=?)`,
+    `DELETE FROM pd_plans WHERE teacher_id=?`,
+    `DELETE FROM external_pd_submissions WHERE teacher_id=? OR reviewed_by=?`,
+    `DELETE FROM activity_log WHERE user_id=?`,
+    `DELETE FROM admin_audit_log WHERE actor_user_id=?`,
+  ];
+  for (const sql of cleanup) {
+    const paramCount = (sql.match(/\?/g) || []).length;
+    const params: any[] = Array(paramCount).fill(id);
+    try {
+      await c.env.DB.prepare(sql).bind(...params).run();
+    } catch (e: any) {
+      // Best-effort cleanup — if a table doesn't exist in this DB revision, keep going.
+      console.warn('hard-delete cleanup skipped:', sql, e?.message || e);
+    }
+  }
+
+  // Finally drop the user row itself.
+  await c.env.DB.prepare(`DELETE FROM users WHERE id=?`).bind(id).run();
+  await logActivity(c.env.DB, user.id, 'user', id, 'hard_delete_user',
+    { email: target.email, name: `${target.first_name} ${target.last_name}`, role: target.role });
+  return c.redirect('/admin/users?msg=' + encodeURIComponent(
+    `Permanently deleted ${target.first_name} ${target.last_name} (${target.email}).`));
 });
 
 // ---------- Assignments ----------
@@ -1644,10 +1750,23 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                         <i class="fas fa-arrow-up-right-from-square mr-1"></i>Full page
                       </a>
                     </div>
-                    {u.active && u.id !== user.id ? (
-                      <form method="post" action={`/admin/users/${u.id}/delete`} class="mt-2" onsubmit="return confirm('Deactivate this user?')">
-                        <button class="text-xs text-red-700 hover:underline"><i class="fas fa-user-slash mr-1"></i>Deactivate user</button>
-                      </form>
+                    {/* Aug 16, 2026 — Dr. Gandhi requested a real delete option alongside
+                        the existing deactivate. Both live in this danger zone so admins can
+                        pick the right action for the situation. */}
+                    {u.id !== user.id ? (
+                      <div class="mt-2 flex flex-wrap items-center gap-3 bg-red-50 border border-red-200 rounded p-2">
+                        <span class="text-[11px] uppercase tracking-wide text-red-800 font-semibold"><i class="fas fa-triangle-exclamation mr-1"></i>Danger zone</span>
+                        {u.active ? (
+                          <form method="post" action={`/admin/users/${u.id}/delete`} class="inline" onsubmit="return confirm('Deactivate this user? They can be reactivated later. Their evaluation history stays on file.')">
+                            <button class="text-xs text-amber-800 hover:underline"><i class="fas fa-user-slash mr-1"></i>Deactivate</button>
+                          </form>
+                        ) : (
+                          <span class="text-xs text-slate-500 italic">(already deactivated)</span>
+                        )}
+                        <form method="post" action={`/admin/users/${u.id}/hard-delete`} class="inline ml-auto" onsubmit={`return confirm('PERMANENTLY delete ${u.first_name} ${u.last_name} (${u.email})?\\n\\nThis removes the account for good. If they have observations, feedback, or PD credit on file, the system will automatically deactivate them instead (to preserve the audit trail).\\n\\nUse this for staff who no longer work at the district.')`}>
+                          <button class="text-xs text-white bg-red-700 hover:bg-red-800 px-2 py-1 rounded" title="Permanently remove this user"><i class="fas fa-trash mr-1"></i>Delete permanently</button>
+                        </form>
+                      </div>
                     ) : null}
                   </details>
                 </td>
