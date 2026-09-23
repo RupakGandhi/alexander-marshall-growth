@@ -34,6 +34,15 @@ ALTER TABLE coaching_notes ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 -- different payload will not match this digest → the server rejects the
 -- reuse with "content changed" instead of silently sharing stale/empty text.
 ALTER TABLE coaching_notes ADD COLUMN payload_digest TEXT;
+-- Sept 23 second-follow-up (R1): per-request nonce stamped on the row by the
+-- request that most recently wrote/updated it.  Every INSERT and UPDATE now
+-- stamps writer_nonce with a fresh UUID; audit-row INSERTs use
+-- SELECT-in-INSERT gated on `writer_nonce=?` so they land iff *this* request
+-- was the one that wrote the row.  Second-precision timestamps are no longer
+-- used for winner detection.  Two requests using the same client_token in
+-- the same second still get distinct writer_nonces (UUID), so the loser's
+-- audit SELECT matches zero rows.
+ALTER TABLE coaching_notes ADD COLUMN writer_nonce TEXT;
 
 -- Idempotency uniqueness is scoped per author: two different coaches happen
 -- to reuse the same UUID only if the client PRNG collides across accounts,

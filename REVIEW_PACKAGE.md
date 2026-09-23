@@ -18,17 +18,29 @@ Nothing here has been deployed or applied to production. `main` is at commit `64
 | Preview data | Synthetic fixture (12 users, 13 assignments, 2 observations, 2 pd_enrollments) — **NOT a copy of production** |
 | Preview credentials | All test accounts: `TestPass1!`. Emails in `tests/fixture.mjs` (`principal@test`, `pure.coach@test`, `coach1@test`, `coach2@test`, `alice@test`, etc.) |
 | Preview scope | Backed by the synthetic fixture; useful for click-testing without touching production |
-| Total test assertions | **214 pass / 0 fail** (20 Prose + 182 HTTP acceptance + 12 Playwright browser) |
-| Additive migrations pending on prod | `0012`, `0013`, `0014` (in that order — `0014` new this round). None applied yet. |
+| Total test assertions | **247 pass / 0 fail** (20 Prose + 215 HTTP acceptance + 12 Playwright browser) |
+| Additive migrations pending on prod | `0012`, `0013`, `0014` (in that order). None applied yet. |
 | Production D1 restore point | **Take fresh export at deploy time** with `npx wrangler d1 export alexander-marshall-growth-production --remote --output=backups/prod-preapproval-<YYYYMMDD>-<HHMM>.sql` — see §10 |
 
 ---
 
 ## 2. Corrections applied vs the last review
 
-Sept 23 follow-up findings (F1–F5) are ALL resolved. The earlier C1–C7 fixes stand.
+Sept 23 second-follow-up findings (R1, R2) are resolved. Earlier F1–F5 and C1–C7 fixes remain in place; where they were superseded by a stronger fix, the row calls that out.
 
-### 2a. Follow-up round (F1–F5) — Sept 23, second review
+### 2a. Second-follow-up round (R1, R2) — Sept 23, third review
+
+| # | Finding | Where fixed | Proof |
+|---|---|---|---|
+| **R1a** | Timestamp-based `wonInsert` (comparing `created_at` to our `now` stamp) let same-second concurrent requests both satisfy the audit gate. SQLite `created_at` is 1-second precision; two requests inside that second both matched `WHERE created_at=?` and both audit-INSERTs landed. | Amended migration `0013_coaching_note_idempotency.sql` adds `writer_nonce TEXT`. Every INSERT and UPDATE in `src/routes/coach.tsx` stamps a fresh UUID via `requestNonce()`; every audit `SELECT-in-INSERT` filters on `WHERE writer_nonce=?`. Because the nonce is unique per request, only the row this request wrote/updated ever matches. The winner signal for the fresh-insert branch is now the `RETURNING id` result count — atomic mutation-result truth from SQLite itself, not a timestamp roundtrip. | **Case 24(b)** — fires two concurrent same-token POSTs with DIFFERENT content via `Promise.all`. Regardless of who wins the race, invariants hold: exactly ONE row per (author, token), exactly ONE `'create'` audit row, at most ONE `'share'` audit, at most ONE notification, stored content matches exactly ONE of the two payloads (never mixed), and NEITHER response falsely says "Shared" when the stored row is a draft. |
+| **R1b** | The fresh-insert path returned success on an ON CONFLICT loss without revalidating the stored row's teacher/payload/status. | After the atomic batch, if `RETURNING.results.length===0` (loser branch), the handler now SELECTs the stored row and re-checks `teacher_id`, `payload_digest`, and `status`. Teacher mismatch → HTTP 409. Payload mismatch → "content changed / Reopen" friendly redirect. Status mismatch when we requested share (stored is still draft because the concurrent winner saved as draft) → "just saved as a draft by an earlier request — reopen and share" friendly redirect. Never enters the notify path in any of those cases. | **Case 24(a.i)** — seeded prior row for a different teacher → POST returns 409. **Case 24(a.ii)** — seeded blank-draft prior row, POST with different content + share intent → 302 with "content changed / Reopen", stored row is STILL a blank draft, ZERO audit rows added, ZERO notifications fired. Same-content POST would take the normal retry path (existing tests). |
+| **R1c** | Update paths (draft_save / draft_share / shared_save) and the retry-promotion path used the same broken timestamp gates. | All four paths (three update branches + the retry-branch promotion) now use `writer_nonce`. UPDATE stamps `writer_nonce=?`; audit `SELECT-in-INSERT` filters on that nonce. Version-guard winner detection continues to use `batchRes[0].meta.changes` (already correct). | Existing update-path Cases 11 & 12 continue to pass, proving the nonce-based rewrite doesn't regress the version-race semantics. New Case 24(a.ii) covers the promotion-branch revalidation path. |
+| **R1d** | No regression covering the same-second race. | New **Case 24** — both a deterministic direct-seed scenario (guaranteed hit on the retry branch's revalidation) AND a concurrent-batch scenario (Promise.all on two POSTs with different payloads targeting the same token). | Both sub-cases assert the invariants above. |
+| **R2a** | `notify()` + ledger UPDATE were in ONE try block. A notify-success followed by a ledger-UPDATE-throw entered the catch and marked ledger `'failed'` — next retry called `notify()` again → duplicate inbox row. | `deliverShareNotification` and `retryShareNotification` in `src/routes/coach.tsx` now use **phased writes**: Phase A (`notify()`) is in its own try block; Phase B (ledger UPDATE to `'delivered'` / `'suppressed'` / `'failed'`) uses a `tryLedgerUpdate()` helper that logs and returns on failure, NEVER marking ledger `'failed'` after a successful notify. Additionally, new `coachNoteAlreadyDelivered()` runs as a preflight on BOTH the initial deliver and every retry: if the notifications table already has a matching row, we short-circuit to `already_delivered` and repair the ledger opportunistically. This makes retry idempotent at the transport layer, not the ledger layer. | **Case 25 (R2b)** + **Case 26 (R2c)** below. |
+| **R2b** | Force notify() to throw. | Install a `BEFORE INSERT` trigger on `notifications` that RAISEs when `user_id=IDS.dan AND kind='coach_note'`. Perform a share POST. | **Case 25** — share POST returns 302 despite trigger; note IS committed; audit trail has `[create,share]`; redirect says "Notification did NOT deliver"; ledger records `'failed'` with the RAISE detail; zero notifications exist. Drop the trigger and retry: exactly ONE notification lands; ledger flips to `'delivered'`. The exception handler is actually executed, not simulated by seeded state. |
+| **R2c** | Force ledger-UPDATE to fail after successful notify(). SQLite happily accepts our ledger writes so a direct code-path throw is impractical; instead, we simulate the observable outcome. | Share a note (natural post-share state = 1 notification, ledger `'delivered'`). Then set ledger `'failed'` while leaving the notifications row intact — the EXACT state the buggy path would have produced. Call notify-retry. | **Case 26** — preflight `coachNoteAlreadyDelivered` sees the existing notification row and returns `already_delivered` WITHOUT calling `notify()`; still exactly ONE notification (no duplicate); ledger is repaired to `'delivered'`. Response says "already delivered". If the R2 fix regressed, the notification count would become 2 — this case locks that down. |
+
+### 2b. First-follow-up round (F1–F5) — Sept 23, second review
 
 | # | Finding | Where fixed | Proof |
 |---|---|---|---|
@@ -44,7 +56,7 @@ Sept 23 follow-up findings (F1–F5) are ALL resolved. The earlier C1–C7 fixes
 | **F5b** | "Force a real notification exception" was previously simulated by deleting the delivered inbox row. That's not the failure path; it's a post-success cleanup. | **Case 14 rewritten** — writes `status='failed'` into the delivery ledger AND clears the inbox (the exact state a real `notify()` throw would have left). Then exercises notify-retry against the failed state; asserts it wins, calls `notify()`, ends at `'delivered'`. | Verified end-to-end; second retry is a no-op via ledger check. |
 | **F5c** | PD review-revise-verify-credit and principal-publish → teacher-acknowledge round-trips weren't exercised by the automated suite. | Two new cases run the REAL POSTs. | **Case 22** — principal publishes a fresh observation for Dan (POST `/appraiser/observations/:id/publish` with a signature); asserts observation flips to `published`, teacher gets the `observation_published` notification. Teacher acknowledges (POST `/teacher/observations/:id/acknowledge` with signature + response); asserts observation flips to `acknowledged` with signature + timestamp, principal gets the `observation_acknowledged` notification. **Case 23** — principal requests revision on PD 200 (POST `/pd/review/200/verify` with `action=revise`); teacher notified of revision. Teacher resubmits. Principal verifies WITH credit hours (`action=verify` + `credit_hours=2.5`); asserts enrollment flips to `verified` AND `hours_credited=2.5` AND teacher gets the `pd_deliverable_verified` notification. |
 
-### 2b. Prior round (C1–C7) still holds
+### 2c. Prior round (C1–C7) still holds
 
 | # | Correction | Where fixed | Proof |
 |---|---|---|---|
@@ -62,18 +74,14 @@ Sept 23 follow-up findings (F1–F5) are ALL resolved. The earlier C1–C7 fixes
 
 | File | Change |
 |---|---|
-| `src/routes/coach.tsx` | **Rewritten write path**: atomic `db.batch()` for note+audit on create and every update branch (F1); new `deliverShareNotification()` / `retryShareNotification()` helpers backed by the `coaching_note_share_delivery` ledger (F2); `payloadDigest()` + `serverToken()` helpers (F3); reused-token retry now verifies teacher_id match AND payload digest before promoting; `logActivity()` calls wrapped in try/catch so optional logging never surfaces as a failed save; coach view queries `delivery_status` from the ledger, renders three distinct badges (failed/never, suppressed, attempting); truthful `firstShareMsg()` / `retryMsg()` copy. |
-| `src/lib/ui.ts` | `formatDate()` short-circuits on `YYYY-MM-DD` shape (unchanged this round). |
-| `migrations/0012_coaching_capability.sql` | Rollback runbook (unchanged this round). |
-| `migrations/0013_coaching_note_idempotency.sql` | **Amended**: adds `payload_digest TEXT` column (F3). |
-| `migrations/0014_coach_share_delivery.sql` | **NEW**: `coaching_note_share_delivery` table with `UNIQUE(note_id)` for atomic dedupe (F2). |
-| `tests/fixture.mjs` | Adds `coaching_note_share_delivery` to the wipe list (must precede `coaching_notes` for FK-safe teardown). |
-| `tests/acceptance.mjs` | **Cases 14 rewritten; Cases 18, 19, 20, 21, 22, 23 added**. Case 10 uses fixture-baseline constants (F5a). |
-| `tests/browser.mjs` | Cases 1 & 2 date assertions now DOM-scoped to the specific test entry, so incidental dates from other test cases don't false-fail. |
-| `CASELOAD_PREVIEW.md` | `§2a/2b/2c/2d` restructured: 14 confirmed retain, 5 named candidate removals **held pending**, 8 unresolved. `§3a` = 13 confirmed adds only; `§3b` = 2 pending held. `§7b`, `§7c-pending` are commented-only blocks with DO NOT EXECUTE banners. Idempotent SQL verified 3× against isolated SQLite (32/0/0 writes). |
-| `REVIEW_PACKAGE.md` | This doc, updated for F1–F5. |
+| `src/routes/coach.tsx` | **R1 rewrite**: `requestNonce()` helper generates a fresh UUID per request. Every INSERT + UPDATE stamps `writer_nonce=?`. Every audit `SELECT-in-INSERT` filters on `WHERE writer_nonce=?`. The fresh-insert branch uses `INSERT ... RETURNING id, teacher_id, status, payload_digest` and reads `results.length` as the authoritative winner signal (no timestamp comparison). Loser branch (R1b) revalidates teacher_id + payload_digest + status before returning success or firing notification; teacher mismatch → 409, payload mismatch → "content changed", status mismatch (asked-share/stored-draft) → "reopen and share". **R2 rewrite**: `deliverShareNotification` / `retryShareNotification` split `notify()` and ledger UPDATE into separate try blocks. New `coachNoteAlreadyDelivered()` preflight consults the notifications table as source of truth before EVER calling `notify()`; existing notification row → `already_delivered` + opportunistic ledger repair. New `tryLedgerUpdate()` helper: logs and returns on failure, never marks ledger `'failed'` after a successful notify. |
+| `migrations/0013_coaching_note_idempotency.sql` | **Amended**: adds `writer_nonce TEXT` column (R1). Also has `payload_digest TEXT` from the previous round. |
+| `migrations/0014_coach_share_delivery.sql` | Unchanged this round (still the F2 delivery ledger). |
+| `tests/acceptance.mjs` | **Cases 24 (R1), 25 (R2b), 26 (R2c) added.** Case 24 has (a) direct-seed teacher-mismatch + payload-mismatch scenarios and (b) concurrent-batch invariant checks. Case 25 uses a `BEFORE INSERT` trigger to force a real `notify()` throw. Case 26 simulates the notify-success/ledger-fail scenario and verifies preflight prevents duplicate delivery. |
+| `CASELOAD_PREVIEW.md` | Unchanged this round — still matches your stated proposal: Michelle 27, Miranda 13, Tristae 17, 32 affected rows total. |
+| `REVIEW_PACKAGE.md` | This doc, updated for R1/R2. |
 
-Build: `dist/_worker.js` = 659.12 kB, clean.
+Build: `dist/_worker.js` = 661.59 kB, clean.
 
 ---
 
@@ -130,11 +138,11 @@ All three migrations run in one command in order. Local wrangler confirms exactl
 
 ## 5. Test results — completed vs untested, called out separately
 
-### 5a. COMPLETED — automated coverage (214 pass / 0 fail)
+### 5a. COMPLETED — automated coverage (247 pass / 0 fail)
 
 **Prose renderer (20 assertions):** lone pipe rows, valid tables, blank-separated rows, bullets, numbered lists, CRLF, 40 KB pasted feedback, literal markup safety, 2,048 separator-only rows (29 ms — linear-time confirmed), empty/null, table cell inline bold.
 
-**HTTP acceptance (182 assertions across 23 cases):**
+**HTTP acceptance (215 assertions across 26 cases):**
 
 | Case | What it proves |
 |---|---|
@@ -163,6 +171,9 @@ All three migrations run in one command in order. Local wrangler confirms exactl
 | **21** | **F3a + F3b**: same-token retry with different payload rejected with "Reopen" message and stored draft's original content preserved; same token targeting a different teacher returns HTTP 409 |
 | **22** | **F5c**: principal publish + teacher acknowledge round-trip via the real POST endpoints; both notifications fire; obs status flips through `draft → published → acknowledged` with signature |
 | **23** | **F5c**: PD review request-revision + resubmit + verify-with-credit round-trip via real POSTs; enrollment moves `submitted → needs_revision → submitted → verified`; `hours_credited` = 2.5; three notifications fire |
+| **24** | **R1**: (a.i) reused token targeting different teacher → HTTP 409; (a.ii) reused token with different payload → 302 "content changed", stored draft unchanged, zero audit rows added, zero notifications fired; (b) two concurrent POSTs with same token + different content via `Promise.all` — exactly 1 row per (author, token), exactly 1 `'create'` audit, at most 1 `'share'` audit, at most 1 notification, stored content matches ONE payload not a mixture, no response falsely claims "Shared" when stored is draft |
+| **25** | **R2b**: `BEFORE INSERT` trigger on `notifications` forces `notify()` to throw during share — share POST returns 302, note IS committed, audit has `[create,share]`, redirect truthfully says "Notification did NOT deliver", ledger records `'failed'` with the RAISE detail, zero notifications exist; drop trigger + retry → exactly 1 notification, ledger `'delivered'` |
+| **26** | **R2c**: ledger stuck `'failed'` after `notify()` succeeded (the crash-between-notify-and-ledger scenario) — preflight `coachNoteAlreadyDelivered` sees the existing inbox row, short-circuits to `already_delivered` WITHOUT calling `notify()`; still exactly 1 notification (zero duplicate); ledger repaired to `'delivered'` |
 
 **Playwright browser (12 assertions):**
 
