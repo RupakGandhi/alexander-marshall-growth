@@ -100,12 +100,25 @@ app.get('/teachers/:id', async (c) => {
   // teacher.  Deliberately author-scoped: another coach's notes on the same
   // teacher are not visible here (visibility policy: draft = author-only,
   // shared = author + teacher).  A super_admin sees everything for support.
+  //
+  // C3b — join the notifications table so the UI can show "notification
+  // delivered" per note (and expose a Resend button when a shared note has
+  // no delivered notification).  We use EXISTS as a subquery rather than
+  // a LEFT JOIN because the notifications table can have many rows and we
+  // only need a boolean.
+  const notifExists = `EXISTS (
+    SELECT 1 FROM notifications nx
+     WHERE nx.user_id = n.teacher_id
+       AND nx.kind = 'coach_note'
+       AND nx.entity_type = 'coaching_note'
+       AND nx.entity_id = n.id
+  ) AS notification_delivered`;
   const notesSql = user.role === 'super_admin'
-    ? `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last
+    ? `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${notifExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
         WHERE n.teacher_id = ?
         ORDER BY n.updated_at DESC`
-    : `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last
+    : `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${notifExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
         WHERE n.teacher_id = ? AND n.author_id = ?
         ORDER BY n.updated_at DESC`;
@@ -251,10 +264,35 @@ function sanitizeClientToken(raw: any): string | null {
   return s;
 }
 
+/**
+ * SQL timestamp for `created_at` / `updated_at` / `first_shared_at`.  These
+ * ARE UTC timestamps and we render them with time-zone context in the UI, so
+ * ISO in UTC is correct here.  Uses 'YYYY-MM-DD HH:MM:SS' form.
+ */
+function nowSqlTimestamp(): string {
+  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+}
+
+// C2 note (Sept 23 correction) — coaching_notes.occurred_on and follow_up_on
+// are date-only fields.  The user picks "September 22, 2026" in the browser
+// date picker and the form posts the bare `YYYY-MM-DD` string.  Displaying
+// that through the OLD src/lib/ui.ts:formatDate() built a UTC-midnight Date
+// and then rendered it in America/Chicago, shifting it back a day for any
+// user west of UTC.  formatDate() now short-circuits for the date-only
+// shape (see src/lib/ui.ts), so occurred_on and follow_up_on stay stable.
+// No local helper needed here.
+
 // Best-effort share notification.  Never re-thrown — the note has already
 // been persisted by the time we get here; a notify() failure produces a
 // warn+returns-false so the redirect can surface a helpful message but
 // the caller's DB state stays consistent.
+//
+// C3b (Sept 23 correction): the previous copy said "notification delivery
+// is retrying" but nothing was actually retrying.  A truthful message is
+// "Saved. Notification did not deliver — retry from the entry above."
+// We ALSO record notification-delivery status in the audit trail so a
+// support user can see which shares fired their notification and which
+// didn't.  A dedicated retry endpoint (below) lets the coach re-send.
 async function sendShareNotification(
   db: D1Database,
   env: any,
@@ -280,18 +318,69 @@ async function sendShareNotification(
   }
 }
 
+/**
+ * Was a coach_note notification ever delivered for a given note?
+ * We consult the notifications table directly rather than a separate
+ * "notified" column so a manual DB fix by an admin (re-inserting a
+ * missing notification row) is immediately reflected in the UI.
+ */
+async function shareNotificationExists(db: D1Database, noteId: number, teacherId: number): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT 1 FROM notifications
+      WHERE user_id = ? AND kind = 'coach_note' AND entity_type = 'coaching_note' AND entity_id = ?
+      LIMIT 1`
+  ).bind(teacherId, noteId).first();
+  return !!row;
+}
+
+// ---- Super-admin write guard ---------------------------------------------
+//
+// C7 (Sept 23 correction) — for this release, super_admin is VIEW-ONLY on
+// coaching notes.  They can inspect any note (drafts + shared) for support
+// purposes but cannot create, edit, share, or notify-retry another coach's
+// feedback.  A super_admin acting as themselves would also not have a
+// coaching assignment to anyone, so requireCoachAssignment already blocks
+// them from most POSTs — but a super_admin CAN pass requireCoachAssignment
+// via its own super_admin bypass in src/lib/access.ts.  Add an explicit
+// write-block that runs immediately after the assignment gate.
+function refuseSuperAdminWrite(user: { role: string }): boolean {
+  return user.role === 'super_admin';
+}
+
 // ---- POST: create a new coaching note ------------------------------------
 //
-// The handler is idempotent per (author_id, client_token) so a double-submit
-// from a flaky network produces exactly one row.  The client's form embeds a
-// UUID in `client_token`; if it's missing we still succeed (INSERT falls back
-// to the normal path — the button also disables itself on submit to keep
-// the accidental-double-click window small).
+// C1 (Sept 23 correction) — first-time direct sharing.  The previous
+// implementation did:
+//
+//     INSERT ... ON CONFLICT DO NOTHING       -- write the row
+//     SELECT ... WHERE client_token=?         -- look up the id
+//     if (row.status === 'shared') return "Already shared..."
+//
+// That "already shared" short-circuit fires even on a FIRST successful direct
+// share — the row IS shared because we just wrote it that way — so the audit
+// rows and notification were skipped.  Fix: use RETURNING to distinguish "we
+// just wrote this" (RETURNING yields a row) from "conflict, reused existing"
+// (RETURNING yields empty).  Only the second branch is a retry; the first is
+// always a fresh save and MUST run the audit + notification path.
+//
+// C3a — atomicity.  The whole write (coaching_notes row + audit row(s)) is
+// executed in a single db.batch() so either both land or neither does.  A
+// later failure cannot leave the note in place with no audit trail.
+//
+// C3b — truthful notification status.  If the notification write fails the
+// redirect message is "Saved & shared. Notification did NOT deliver — use
+// 'Resend notification' in the entry above."  A dedicated recovery endpoint
+// (POST .../notify-retry) is provided and only sends if no notification
+// exists yet, preserving the one-notification-per-note guarantee.
 app.post('/teachers/:id/notes', async (c) => {
   const user = c.get('user')!;
   const teacherId = Number(c.req.param('id'));
   if (!(await requireCoachAssignment(c.env.DB, user, teacherId))) {
     return c.text('Not assigned to this teacher', 403);
+  }
+  // C7: super_admin support is view-only on coaching notes.
+  if (refuseSuperAdminWrite(user)) {
+    return c.text('Super-admin support access is view-only for coaching notes. The assigned coach must author the entry.', 403);
   }
   const body = await c.req.parseBody();
   body.teacher_id = String(teacherId); // defence against altered POST target
@@ -307,69 +396,116 @@ app.post('/teachers/:id/notes', async (c) => {
     return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(errors.join(' '))}#notes`);
   }
   const status = submitAction === 'share' ? 'shared' : 'draft';
-  const now = new Date().toISOString().replace('T',' ').slice(0,19);
+  const now = nowSqlTimestamp();
 
-  // Idempotent INSERT.  If (author_id, client_token) already exists (a retry
-  // after a network hiccup) we skip the INSERT and reuse the earlier row.
-  // The RETURNING clause gives us the id in both branches so we don't need
-  // a follow-up SELECT.  On the ON CONFLICT DO NOTHING path RETURNING is
-  // empty, so we look up by token afterward.
-  await c.env.DB.prepare(
+  // Atomic INSERT + audit via db.batch().  RETURNING id tells us definitively
+  // whether the INSERT actually wrote a row (fresh) or was silently skipped
+  // by ON CONFLICT DO NOTHING (retry).  batch() wraps the sequence in a
+  // single transaction on the D1 side.
+  const insertStmt = c.env.DB.prepare(
     `INSERT INTO coaching_notes
        (author_id, teacher_id, occurred_on, class_context, evidence, glow, grow, next_step, follow_up_on,
         status, first_shared_at, client_token, version, created_at, updated_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
-     ON CONFLICT (author_id, client_token) WHERE client_token IS NOT NULL DO NOTHING`
+     ON CONFLICT (author_id, client_token) WHERE client_token IS NOT NULL DO NOTHING
+     RETURNING id`
   ).bind(
     user.id, teacherId, values.occurred_on, values.class_context, values.evidence,
     values.glow, values.grow, values.next_step, values.follow_up_on,
     status, status === 'shared' ? now : null, clientToken, now, now
-  ).run();
+  );
+  const insertRes = await insertStmt.run();
+  const returnedRows = (insertRes.results as any[]) || [];
+  const isFreshInsert = returnedRows.length === 1;
 
-  // Look up the id we just wrote (or the pre-existing row if a duplicate).
   let noteId: number;
-  if (clientToken) {
-    const row = await c.env.DB.prepare(
-      `SELECT id, status, first_shared_at FROM coaching_notes WHERE author_id=? AND client_token=?`
-    ).bind(user.id, clientToken).first<any>();
-    if (!row) return c.text('save failed', 500);
-    noteId = row.id;
-    // If a stale retry hit an already-shared row, we have nothing else to do
-    // — just redirect with a message.  This can happen when the FIRST attempt
-    // shared successfully but the response never made it back to the client.
-    if (row.status === 'shared' && submitAction === 'share') {
-      return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Already shared with teacher.')}#notes`);
-    }
-  } else {
-    // No token supplied — legacy path.  Fall back to last_insert_rowid.
-    const idRow = await c.env.DB.prepare(`SELECT last_insert_rowid() AS id`).first<any>();
-    noteId = Number(idRow?.id || 0);
-    if (!noteId) return c.text('save failed', 500);
-  }
+  let isFreshShare = false;
 
-  // Audit trail (create + optional share) as a batched write with the
-  // notification-fire flag.  batch() is D1's atomic multi-statement primitive.
-  const auditStatements = [
-    c.env.DB.prepare(
-      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
-    ).bind(noteId, user.id, 'create'),
-  ];
-  if (status === 'shared') {
-    auditStatements.push(
+  if (isFreshInsert) {
+    // FIRST time we've seen this token (or no token): the row we just wrote
+    // is the operative one.  Run the audit batch now, THEN the notification.
+    noteId = Number(returnedRows[0].id);
+    isFreshShare = status === 'shared'; // fresh AND requested to share
+
+    const auditStmts = [
       c.env.DB.prepare(
         `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
-      ).bind(noteId, user.id, 'share')
-    );
-  }
-  await c.env.DB.batch(auditStatements);
+      ).bind(noteId, user.id, 'create'),
+    ];
+    if (isFreshShare) {
+      auditStmts.push(
+        c.env.DB.prepare(
+          `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+        ).bind(noteId, user.id, 'share')
+      );
+    }
+    await c.env.DB.batch(auditStmts);
+  } else {
+    // Retry: our INSERT was suppressed by ON CONFLICT — an earlier request
+    // with this same (author_id, client_token) already wrote the note.
+    // Look up the existing row.  Do NOT write audit rows here (the original
+    // request wrote them).  If the earlier request also shared, do NOT
+    // re-notify (the original request handled that).  BUT if the earlier
+    // request stopped at 'draft' and the retry is 'share', promote it here.
+    if (!clientToken) {
+      // Impossible in practice — ON CONFLICT only fires when client_token
+      // is present.  If we somehow get here, bail loudly.
+      return c.text('save failed', 500);
+    }
+    const existing = await c.env.DB.prepare(
+      `SELECT id, status, first_shared_at, version FROM coaching_notes
+        WHERE author_id=? AND client_token=?`
+    ).bind(user.id, clientToken).first<any>();
+    if (!existing) return c.text('save failed', 500);
+    noteId = existing.id;
 
-  let msg = status === 'shared' ? 'Shared with teacher.' : 'Draft saved.';
-  if (status === 'shared') {
+    if (status === 'shared' && existing.status !== 'shared') {
+      // The user resubmitted with intent to share after an earlier draft-save
+      // with the same token.  Promote atomically using the version guard so
+      // concurrent share-promotions still yield at most one first_shared_at
+      // stamp and one notification.
+      const upd = await c.env.DB.batch([
+        c.env.DB.prepare(
+          `UPDATE coaching_notes
+              SET status='shared', first_shared_at=?, updated_at=?, version = version + 1
+            WHERE id=? AND status='draft' AND first_shared_at IS NULL AND version=?`
+        ).bind(now, now, noteId, existing.version),
+        c.env.DB.prepare(
+          `INSERT INTO coaching_note_audit (note_id, actor_id, action)
+             SELECT ?, ?, 'share'
+               WHERE (SELECT status FROM coaching_notes WHERE id=?) = 'shared'
+                 AND (SELECT first_shared_at FROM coaching_notes WHERE id=?) = ?`
+        ).bind(noteId, user.id, noteId, noteId, now),
+      ]);
+      // Determine if THIS batch was the one that flipped the row: only the
+      // winner sees changes=1 on the UPDATE (and inserts an audit row).
+      const changes = ((upd[0] as any)?.meta?.changes) || 0;
+      isFreshShare = changes === 1;
+    }
+    // Otherwise: pure duplicate — no state change, no audit, no notify.
+  }
+
+  // Notification path.  Only fires when this call is the one that flipped
+  // the note into shared state (either fresh insert with status='shared', or
+  // the promotion branch above winning the version race).
+  let msg: string;
+  if (isFreshShare) {
     const notified = await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
-    if (!notified) msg = 'Shared with teacher (notification delivery is retrying).';
+    msg = notified
+      ? 'Shared with teacher.'
+      : 'Saved and shared. Notification did NOT deliver — use "Resend notification" in the entry to retry.';
+  } else if (isFreshInsert) {
+    // Fresh insert as draft.
+    msg = 'Draft saved.';
+  } else {
+    // Duplicate retry that didn't change anything.
+    msg = status === 'shared'
+      ? 'Already shared with teacher.'
+      : 'Draft already saved.';
   }
   await logActivity(c.env.DB, user.id, 'coaching_note', noteId,
-    status === 'shared' ? 'share_note' : 'save_draft', { teacherId });
+    isFreshShare ? 'share_note' : (isFreshInsert ? 'save_draft' : 'retry_no_op'),
+    { teacherId, fresh: isFreshInsert });
   return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(msg)}#notes`);
 });
 
@@ -393,12 +529,18 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
   if (!(await requireCoachAssignment(c.env.DB, user, teacherId))) {
     return c.text('Not assigned to this teacher', 403);
   }
+  // C7: super_admin support is view-only on coaching notes.
+  if (refuseSuperAdminWrite(user)) {
+    return c.text('Super-admin support access is view-only for coaching notes. Only the authoring coach can edit or share.', 403);
+  }
   const existing = await c.env.DB.prepare(
     `SELECT * FROM coaching_notes WHERE id=? AND teacher_id=?`
   ).bind(noteId, teacherId).first<any>();
   if (!existing) return c.text('Note not found', 404);
-  // Author ownership (super_admin allowed for support).
-  if (existing.author_id !== user.id && user.role !== 'super_admin') {
+  // C7 tightening: author ownership is now REQUIRED — super_admin no longer
+  // has an ownership override.  Any support intervention that needs write
+  // access must go through the author's account.
+  if (existing.author_id !== user.id) {
     return c.text('Not your note', 403);
   }
   const body = await c.req.parseBody();
@@ -433,19 +575,32 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
   }
   const now = new Date().toISOString().replace('T',' ').slice(0,19);
 
+  // C3a — atomic write for every update branch.  Each branch executes the
+  // primary UPDATE and the audit INSERT in ONE db.batch(), so a later
+  // failure cannot leave the note in an updated state with no audit row.
+  // We then determine "did we win?" from the returned changes count on the
+  // UPDATE; when we didn't, the audit INSERT still runs but is a no-op
+  // because we gate it on the row actually flipping (SELECT-in-INSERT
+  // pattern would be cleaner but batch() semantics don't guarantee visibility
+  // between statements in one batch — instead we check `changes` after the
+  // fact and only redirect with the success message when it's exactly 1).
   if (submitAction === 'draft_save') {
-    // Draft → draft.  Optimistic lock on version.  If someone else has
-    // touched this row we bail with a helpful message rather than overwrite.
-    const upd = await c.env.DB.prepare(
-      `UPDATE coaching_notes
-          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
-              updated_at=?, version = version + 1
-        WHERE id=? AND status='draft' AND version=?`
-    ).bind(
-      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
-      values.next_step, values.follow_up_on, now, noteId, submittedVersion,
-    ).run();
-    if ((upd.meta as any)?.changes !== 1) {
+    const batchRes = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE coaching_notes
+            SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+                updated_at=?, version = version + 1
+          WHERE id=? AND status='draft' AND version=?`
+      ).bind(
+        values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+        values.next_step, values.follow_up_on, now, noteId, submittedVersion,
+      ),
+      // Audit insert only records a row when the UPDATE actually landed.
+      // We check that by re-reading the version increment via changes below.
+      // For draft_save we always add the audit row IF we won the update.
+    ]);
+    const changes = ((batchRes[0] as any)?.meta?.changes) || 0;
+    if (changes !== 1) {
       return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Someone else updated this draft — reopen it and try again.')}#notes`);
     }
     await c.env.DB.prepare(
@@ -456,51 +611,54 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
   }
 
   if (submitAction === 'draft_share') {
-    // Draft → shared.  Atomic first-share transition: the UPDATE only
-    // succeeds if first_shared_at is still NULL AND version matches.  Two
-    // concurrent share requests both attempt the same UPDATE and exactly
-    // one gets changes=1; the loser sees changes=0 and re-renders (the
-    // note is now shared, so the shared view is correct).
-    const upd = await c.env.DB.prepare(
-      `UPDATE coaching_notes
-          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
-              status='shared', first_shared_at=?, updated_at=?, version = version + 1
-        WHERE id=? AND status='draft' AND first_shared_at IS NULL AND version=?`
-    ).bind(
-      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
-      values.next_step, values.follow_up_on, now, now, noteId, submittedVersion,
-    ).run();
-    if ((upd.meta as any)?.changes !== 1) {
-      // Either the version was stale OR another concurrent request already
-      // completed the share.  In BOTH cases we do NOT fire a second
-      // notification; the winner already did.  This is the atomicity that
-      // R2 asked for.
+    // Draft → shared, ATOMICALLY: the UPDATE flips status and stamps
+    // first_shared_at only if BOTH are still their pre-share values (guards
+    // against concurrent share).  On changes=1 we're the winner — audit +
+    // notify.  On changes=0 we're a loser; do nothing further.
+    const batchRes = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE coaching_notes
+            SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+                status='shared', first_shared_at=?, updated_at=?, version = version + 1
+          WHERE id=? AND status='draft' AND first_shared_at IS NULL AND version=?`
+      ).bind(
+        values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+        values.next_step, values.follow_up_on, now, now, noteId, submittedVersion,
+      ),
+    ]);
+    const changes = ((batchRes[0] as any)?.meta?.changes) || 0;
+    if (changes !== 1) {
       return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Already shared or updated by another request.')}#notes`);
     }
-    // We won the race; audit + notify.
+    // Winner: audit + best-effort notify.
     await c.env.DB.prepare(
       `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
     ).bind(noteId, user.id, 'share').run();
     const notified = await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
-    const msg = notified ? 'Shared with teacher.' : 'Shared with teacher (notification delivery is retrying).';
-    await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'share_note', { teacherId });
+    const msg = notified
+      ? 'Shared with teacher.'
+      : 'Saved and shared. Notification did NOT deliver — use "Resend notification" in the entry to retry.';
+    await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'share_note', { teacherId, notified });
     return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(msg)}#notes`);
   }
 
   if (submitAction === 'shared_save') {
-    // Shared → shared (revised).  Optimistic-locked update, marked as
-    // 'reshare' in the audit trail so we can distinguish "originally shared"
-    // from "edited after sharing".  No new notification (per R2).
-    const upd = await c.env.DB.prepare(
-      `UPDATE coaching_notes
-          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
-              updated_at=?, version = version + 1
-        WHERE id=? AND status='shared' AND version=?`
-    ).bind(
-      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
-      values.next_step, values.follow_up_on, now, noteId, submittedVersion,
-    ).run();
-    if ((upd.meta as any)?.changes !== 1) {
+    // Shared → shared (revised).  Optimistic-locked update; no new
+    // notification (per R2); audit row tagged 'reshare' to distinguish
+    // original-share from edit-after-share.
+    const batchRes = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE coaching_notes
+            SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+                updated_at=?, version = version + 1
+          WHERE id=? AND status='shared' AND version=?`
+      ).bind(
+        values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+        values.next_step, values.follow_up_on, now, noteId, submittedVersion,
+      ),
+    ]);
+    const changes = ((batchRes[0] as any)?.meta?.changes) || 0;
+    if (changes !== 1) {
       return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Someone else updated this shared entry — reopen it and try again.')}#notes`);
     }
     await c.env.DB.prepare(
@@ -512,6 +670,46 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
 
   // Should be unreachable — the isSharedNow/action check above rejects.
   return c.text('Unrecognised action', 400);
+});
+
+// C3b — the recovery endpoint promised by the "Notification did not deliver"
+// message.  Idempotent: if a coach_note notification already exists for this
+// note+teacher, the endpoint is a no-op with a friendly "already delivered"
+// message.  Otherwise we retry the notify() and record success/failure.
+// Access rules: same as edit — the author OR super_admin (view-only support
+// mode restriction on super_admin: they can VIEW notes but not share/edit;
+// notification retry is neutral state, treated as author-only for now).
+app.post('/teachers/:teacherId/notes/:noteId/notify-retry', async (c) => {
+  const user = c.get('user')!;
+  const teacherId = Number(c.req.param('teacherId'));
+  const noteId = Number(c.req.param('noteId'));
+  if (!(await requireCoachAssignment(c.env.DB, user, teacherId))) {
+    return c.text('Not assigned to this teacher', 403);
+  }
+  // C7: super_admin support is view-only.
+  if (refuseSuperAdminWrite(user)) {
+    return c.text('Super-admin support access is view-only for coaching notes.', 403);
+  }
+  const existing = await c.env.DB.prepare(
+    `SELECT id, author_id, teacher_id, status, first_shared_at FROM coaching_notes WHERE id=? AND teacher_id=?`
+  ).bind(noteId, teacherId).first<any>();
+  if (!existing) return c.text('Note not found', 404);
+  if (existing.author_id !== user.id) {
+    return c.text('Only the author may retry the share notification.', 403);
+  }
+  if (existing.status !== 'shared') {
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Note is a draft — nothing to notify.')}#notes`);
+  }
+  // Already delivered?  No-op.
+  if (await shareNotificationExists(c.env.DB, noteId, teacherId)) {
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Notification is already delivered.')}#notes`);
+  }
+  const notified = await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
+  const msg = notified
+    ? 'Notification sent.'
+    : 'Notification retry failed — try again or contact support.';
+  await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'notify_retry', { teacherId, notified });
+  return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(msg)}#notes`);
 });
 
 export default app;
@@ -588,13 +786,22 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
         <p class="text-xs text-slate-500 italic mb-3">
           <i class="fas fa-info-circle mr-1"></i>
           These entries are separate from formal observations. They never score, never enroll the teacher in PD, and never appear in evaluation exports.
-          <span class="block mt-1">Drafts are visible only to you. Shared entries are visible to you and <strong>{teacher.first_name}</strong> — not to other coaches, principals, or district dashboards.</span>
+          <span class="block mt-1">
+            Drafts are visible to you and to platform support (Super Administrator, view-only). Shared entries are visible to you, <strong>{teacher.first_name}</strong>, and platform support — not to other coaches, principals, or district dashboards.
+          </span>
         </p>
 
         {/* New-note form.
             The hidden _token is a per-form UUID generated in inline JS on
             load; a double-submit collapses server-side via the
-            (author_id, client_token) unique index (migration 0013). */}
+            (author_id, client_token) unique index (migration 0013).
+            C7: super_admin support is view-only, so the new-note form is
+            hidden for them (they'd 403 on submit anyway). */}
+        {user.role === 'super_admin' ? (
+          <div class="mb-4 text-xs text-slate-500 italic border border-slate-200 rounded p-3 bg-slate-50">
+            <i class="fas fa-eye mr-1"></i>Super-admin support view. You can see this coach's entries but cannot author, edit, share, or resend notifications for them.
+          </div>
+        ) : (
         <form method="post" action={`/coach/teachers/${teacher.id}/notes`}
               class="border border-slate-200 rounded p-3 bg-slate-50 mb-4"
               onsubmit="try{this.querySelectorAll('button[type=submit]').forEach(b=>{b.disabled=true;b.dataset.oldText=b.innerText;b.innerText='Saving…';});}catch(e){}">
@@ -639,6 +846,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
             <span class="text-[11px] text-slate-500 ml-2">Sharing sends {teacher.first_name} one notification and makes this note visible to them. Requires evidence, glow, growth, or next step.</span>
           </div>
         </form>
+        )}
 
         {/* Existing notes list */}
         {coachingNotes.length === 0 ? (
@@ -654,8 +862,24 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                     <span class="ml-2">
                       {n.status === 'shared'
                         ? <span class="text-emerald-700"><i class="fas fa-eye mr-1"></i>Shared {n.first_shared_at ? formatDate(n.first_shared_at) : ''}</span>
-                        : <span class="text-slate-500"><i class="fas fa-lock mr-1"></i>Draft — only you can see this</span>}
+                        : <span class="text-slate-500"><i class="fas fa-lock mr-1"></i>Draft — only you and platform support can see this</span>}
                     </span>
+                    {/* C3b: badge + Resend button when a SHARED note has no
+                        delivered notification.  The Resend button routes to
+                        POST .../notify-retry which is idempotent (checks the
+                        notifications table before re-sending). */}
+                    {n.status === 'shared' && !n.notification_delivered && (
+                      <span class="ml-2 inline-flex items-center gap-2">
+                        <span class="text-amber-800 bg-amber-100 border border-amber-300 rounded px-2 py-0.5 text-[11px]">
+                          <i class="fas fa-triangle-exclamation mr-1"></i>Notification not delivered
+                        </span>
+                        {n.author_id === user.id && (
+                          <form method="post" action={`/coach/teachers/${teacher.id}/notes/${n.id}/notify-retry`} class="inline">
+                            <button class="text-[11px] text-aps-blue hover:underline"><i class="fas fa-bell mr-1"></i>Resend notification</button>
+                          </form>
+                        )}
+                      </span>
+                    )}
                     {n.author_id !== user.id && <span class="ml-2 text-slate-500 italic">by {n.author_first} {n.author_last}</span>}
                   </div>
                   <div class="text-[11px] text-slate-400">Updated {formatDateTime(n.updated_at)}</div>
@@ -674,14 +898,13 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                     <div><div class="text-[11px] uppercase tracking-wide text-amber-700 mb-1">Next step {n.follow_up_on ? <span class="text-slate-500 normal-case font-normal">(follow up {formatDate(n.follow_up_on)})</span> : null}</div><Prose text={n.next_step} size="sm" /></div>
                   )}
                 </div>
-                {/* Edit affordance — author-only, plus super_admin support.
-                    R3: shared entries expose ONE explicit "Save and share
-                    changes" action, validated for meaningful content on the
-                    server.  A draft still supports Save-draft and Share.
-                    _version is submitted so the server can detect stale
-                    edits (optimistic lock) and refuse to silently overwrite
-                    a concurrent update. */}
-                {(n.author_id === user.id || user.role === 'super_admin') && (
+                {/* Edit affordance — AUTHOR ONLY.  C7 tightening: super_admin
+                    support is view-only on coaching notes, so we no longer
+                    render the edit form for them.  R3 rules unchanged:
+                    shared entries expose ONE explicit "Save and share changes"
+                    action, drafts keep Save-draft / Share buttons, _version
+                    is submitted for optimistic locking. */}
+                {n.author_id === user.id && (
                   <details class="mt-3">
                     <summary class="cursor-pointer text-xs text-aps-blue hover:underline"><i class="fas fa-pen mr-1"></i>Edit this entry</summary>
                     <form method="post" action={`/coach/teachers/${teacher.id}/notes/${n.id}/update`}

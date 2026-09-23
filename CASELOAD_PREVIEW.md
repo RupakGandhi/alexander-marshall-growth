@@ -1,303 +1,364 @@
-# Coaching-capability + caseload preview
+# Coaching-capability + caseload preview (revised Sept 23, 2026)
 
 **Status:** proposal — awaiting Dr. Gandhi's approval before any writes to production
-**Branch:** `feature/coaching-capability` (commit at the head of this file's history)
-**Never-touched:** every `assignments` row with `relationship='appraiser'`, all `active=0` historical rows
+**Branch:** `feature/coaching-capability` (see latest commit at top of `REVIEW_PACKAGE.md`)
+**Never touched:** every `assignments` row with `relationship='appraiser'`, all `active=0` historical rows, AJ Allard's principal role, users other than the three named coaches
+**All classroom classifications below come from the district roster on file, users.title, users.grade_band, and Aaron's Sept 8/23 caseload directive quoted verbatim.** No grade coverage is inferred beyond what those sources support; every open question is called out.
 
 ---
 
 ## 0. Reading key
 
-| Marker | Meaning |
-|---|---|
-| **Retain** | Row already exists as `staff_id, teacher_id, 'coach', active=1`. Do NOT re-insert; leave `assn_id` alone. |
-| **Add** | No matching row today. Run one INSERT. |
-| **Reactivate** | Matching row exists with `active=0`. Run one UPDATE to `active=1` (preserves history). |
-| **Remove** | Currently active; proposed to be deactivated. Run one UPDATE to `active=0` (never DELETE). |
-| **Unresolved** | Aaron's instructions leave the classification open. Marked ❓ — needs your call before any write. |
+| Marker | Meaning | Executable operation |
+|---|---|---|
+| **Retain** | An active `coach` row already exists for this pair. | none — leave untouched |
+| **Add** | No matching row (or only an inactive one) exists. | `INSERT` only if not already present |
+| **Reactivate** | Matching row exists with `active=0`. | `UPDATE assignments SET active=1 WHERE ...` |
+| **Remove** | Currently active; you asked us to end this pairing. | `UPDATE assignments SET active=0 WHERE ...` (never DELETE) |
+| **❓ Pending** | Aaron's directive doesn't settle the classification; we hold the row (retain if active, do nothing if not) until you decide. | none until decision |
 
-**Capability changes** are separate one-line UPDATEs on `users.can_coach` and are listed at the top of each coach who needs one.
-
-Overlap-by-design (Aaron's instructions):
-* Grades 4-5 (Ali Schmidt / Terrille Jacobson / Jacee Turcotte) → **all three** coaches
-* PE / Art / Music PK-12 (Amy Gaida / Jil Stahosky / Lauralyn Belden) → **all three** coaches
-
-Self-coaching is forbidden by DB CHECK constraint on `coaching_notes` and by the app; any proposal below that would produce a self-link has been dropped and is called out as such.
+Every executable SQL statement in §7 is written to be **repeat-safe**: running it twice makes the second run a no-op. See §7 for the pattern.
 
 ---
 
-## 1. Michelle Simonson  (id 18, `michelle.simonson@k12.nd.us`)
+## 1. Capability changes (2 rows)
 
-**Role:** `coach` (unchanged — no capability change needed)
-**Aaron's directive:** PK–5 teachers plus specials
-**Today:** 27 active `coach` assignments (assn_ids 35, 36, 37, 38, 39, 40, 41, 42, 43, 45, 46, 47, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63)
+The additive part.  Non-capability writes only happen after this succeeds.
 
-### 1a. Retain (14 rows)
+| User | id | Today | Proposed | Executable operation (idempotent) |
+|---|---|---|---|---|
+| Miranda Quale | 19 | `role='teacher'`, `can_coach=0` | `role='teacher'`, `can_coach=1` | `UPDATE users SET can_coach=1, updated_at=CURRENT_TIMESTAMP WHERE id=19 AND can_coach<>1` |
+| Tristae Allard | 13 | `role='teacher'`, `can_coach=0` | `role='teacher'`, `can_coach=1` | `UPDATE users SET can_coach=1, updated_at=CURRENT_TIMESTAMP WHERE id=13 AND can_coach<>1` |
 
-These are all PK-5 classroom teachers, PK-12 specials, or the ES SPED / Title / Counselor / Interventionist roster we're proposing Michelle keeps.
+Michelle Simonson (id 18) — no capability change. `role='coach'` unchanged.
 
-| assn_id | teacher id | Name | Title |
+**No other user's `can_coach` value is touched.**  The rollback (C6) leaves this field alone for any other row.
+
+---
+
+## 2. Michelle Simonson (id 18, `role='coach'`)  — start = 27 active coach rows
+
+Aaron's Sept 23 directive (verbatim): *"Michelle Simonson — PK–5 teachers plus specials."*
+
+### 2a. Retain (18 rows)
+
+PK-5 classroom teachers, PK-12 specials, and every existing pairing the district has instructed us to keep.  **Per Dr. Gandhi's Sept 23 correction: Michelle continues coaching Miranda Quale and Tristae Allard even though they are now themselves coaches — adding coaching capability does not remove their need for coaching.**
+
+| assn_id | teacher id | Name | Title on file |
 |---|---|---|---|
 | 36 | 13 | Tristae Allard | Kindergarten |
-| 37 | 37 | Lauralyn Belden | Music (PK-12) — **overlap with all 3 coaches** |
-| 38 | 24 | Kasey Biagioni | Elementary Special Education (see ❓ Q1) |
-| 40 | 25 | Laura Ferry | Title (see ❓ Q3) |
-| 41 | 11 | Amy Gaida | Physical Education (PK-12) — **overlap with all 3 coaches** |
-| 43 | 5 | Jacki Hansel | School Counselor (see ❓ Q4) |
-| 45 | 20 | Terrille Jacobson | 4th Grade / Athletic Director — **grades 4–5 overlap** |
+| 37 | 37 | Lauralyn Belden | Music (PK-12) |
+| 38 | 24 | Kasey Biagioni | Elementary Special Education *(Dr. Gandhi Sept 23: elementary assignment → Michelle keeps)* |
+| 40 | 25 | Laura Ferry | Title *(❓ Pending grade clarification, keep meanwhile)* |
+| 41 | 11 | Amy Gaida | Physical Education (PK-12) |
+| 43 | 5  | Jacki Hansel | School Counselor *(❓ Pending grade clarification, keep meanwhile)* |
+| 45 | 20 | Terrille Jacobson | 4th Grade / Athletic Director |
 | 50 | 16 | Tarynn Nieuwsma | 2nd Grade |
-| 52 | 19 | Miranda Quale | Library/Elem STEM/Interventionist (see ❓ Q5 — is this peer coaching?) |
+| 52 | 19 | Miranda Quale | Library / Elem STEM / Interventionist *(Dr. Gandhi Sept 23 keep-Michelle→Miranda)* |
 | 53 | 14 | Brianna Ritter | 1st Grade |
 | 55 | 17 | MaKenna Sanvik | 3rd Grade |
-| 56 | 21 | Ali Schmidt | 4th Grade — **grades 4–5 overlap** |
-| 58 | 10 | Jil Stahosky | Art (PK-12) — **overlap with all 3 coaches** |
-| 59 | 39 | Jacee Turcotte | 5th Grade — **grades 4–5 overlap** |
+| 56 | 21 | Ali Schmidt | 4th Grade |
+| 58 | 10 | Jil Stahosky | Art (PK-12) |
+| 59 | 39 | Jacee Turcotte | 5th Grade |
 | 60 | 15 | Erica Turnquist | 1st Grade |
 | 63 | 12 | Ellen Wittmaier | Preschool |
 
-_16 confirmed PK-5 / specials teachers to retain. (Sorry, table is 16 rows — bad summary above; the count IS 16.)_
+**16 confirmed rows retained.**  Add 2 more that are pending clarification (§2c below) → **18 total retained until further guidance.**
 
-### 1b. Remove (deactivate) — proposed for Michelle (7 rows)
+### 2b. Remove (0 rows)
 
-Secondary-only classroom teachers. Aaron's directive is PK-5 + specials; these are 6-12 core academics.
+We remove nothing from Michelle until you approve the exact list.  The previous draft proposed removing seven secondary-only teachers; the Sept 23 correction is explicit: *"Preserve existing unresolved links until the complete final list and removals are approved."*
 
-| assn_id | teacher id | Name | Title | Reason |
+### 2c. ❓ Pending secondary-only teachers on Michelle (7 rows kept as-is)
+
+These 7 sit on Michelle today.  Aaron's PK-5 + specials directive doesn't obviously cover them, and the Sept 23 correction says to leave secondary STEM / FACS / Industrial Arts access pending district clarification.  We **leave them active** until you confirm.
+
+| assn_id | teacher id | Name | Title | Awaiting |
 |---|---|---|---|---|
-| 35 | 23 | Pamela Albright | HS English | 9-12 core |
-| 42 | 27 | Lesa Gowing | MS English, Science, Social Studies | 6-8 core |
-| 47 | 38 | Grace Martinson | HS Math Instructor | 9-12 core |
-| 49 | 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | 6-12 core |
-| 54 | 32 | Shane Sagert | Science 8-12 | 8-12 core |
-| 57 | 35 | Amber Severson | Social Science 8-12 | 8-12 core |
-| 62 | 33 | Cathy White | STEM Education 6-12 / FTC Coach | 6-12; ❓ Q1 asks whether STEM counts as a "special" |
+| 35 | 23 | Pamela Albright | HS English | do secondary academics count as "specials"? |
+| 39 | 30 | Vicky Bowers | MS Interventionist, Math, English | Is MS Intervention part of "specials"? |
+| 42 | 27 | Lesa Gowing | MS English, Science, Social Studies | secondary academics? |
+| 46 | 40 | Jason Kuhn | Industrial Arts | Sept 23 explicit: pending |
+| 47 | 38 | Grace Martinson | HS Math Instructor | secondary academics? |
+| 49 | 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | secondary academics? |
+| 51 | 36 | Jena Peterson | 6-12 Special Education | Sept 23: Jena → Tristae; ambiguous whether Michelle also keeps her |
+| 54 | 32 | Shane Sagert | Science 8-12 | secondary academics? |
+| 57 | 35 | Amber Severson | Social Science 8-12 | secondary academics? |
+| 61 | 26 | Martha Walburger | FACS and MS | Sept 23 explicit: FACS pending |
+| 62 | 33 | Cathy White | STEM Education 6-12 / FTC Coach | Sept 23 explicit: STEM pending |
 
-### 1c. Add / Reactivate — proposed for Michelle
+**That's 11 rows in the pending column (not 7 — the previous draft under-counted by 4).**
 
-None. Michelle already coaches everyone on her PK-5 + specials retention list.
+### 2d. Michelle final-state math (from actual operations)
 
-### 1d. Unresolved for Michelle (see the Open Questions section at the end)
+| | count |
+|---|---|
+| Rows today | 27 |
+| To be removed by approved SQL | **0** |
+| To be added | 0 |
+| Rows AFTER writes execute | **27** (unchanged until pending decisions are made) |
 
-- **Vicky Bowers** (assn 39, id 30, "MS Interventionist, Math, English") — is she PK-5? MS = 6-8. Currently proposed to **remove**; flag if she should stay as an "intervention" specialist.
-- **Martha Walburger** (assn 61, id 26, "FACS and MS") — FACS often PK-12 with heavy MS/HS. Currently proposed to **remove**; flag if she should stay.
-- **Jason Kuhn** (assn 46, id 40, "Industrial Arts", grade_band=9-12) — currently proposed to **remove**; ❓ Q1 asks whether Industrial Arts counts as a "special" for Michelle/Miranda.
-- **Jena Peterson** (assn 51, id 36, "6-12 Special Education") — SPED is not automatically the same as "specials." Currently proposed to **remove** for Michelle; Tristae's caseload asks whether Jena moves there (❓ Q2).
-
-_These four are TENTATIVELY placed in the Remove list above (rows for Vicky/Martha/Jason/Jena included), but they're the ones I'm least sure of; please review before I run the writes._
-
-### 1e. Net effect on Michelle after your approval
-
-* Capability: unchanged (still `role='coach'`).
-* Coach caseload: **27 → 16** teachers, all PK-5 or PK-12 specials (with 3 open questions above that could nudge that number to 17-20).
-* Appraiser relationships: none for Michelle (she is not an appraiser).
+*The number Michelle sees on `/coach` after deploy = 27, exactly the number she has today.*  This is deliberate: Aaron's list is not yet complete enough to remove anyone, and the Sept 23 correction is explicit about not removing until approved.
 
 ---
 
-## 2. Miranda Quale  (id 19, `miranda.quale@k12.nd.us`)
+## 3. Miranda Quale (id 19, `role='teacher'` → `can_coach=1`)  — start = 0 active coach rows
 
-**Role:** `teacher` (KEEP — do not change).
-**Capability change:** `UPDATE users SET can_coach=1 WHERE id=19` — one row, additive.
-**Aaron's directive:** PK–5 teachers plus specials.
-**Today:** 0 active `coach` assignments (clean slate).
-**Untouched:** appraiser row 23 (Miranda's principal is AJ Allard) stays as-is; Michelle's coach row 52 (Miranda IS a coachee of Michelle) stays as-is unless you say otherwise.
+Aaron's Sept 23 directive (verbatim): *"Miranda Quale — PK–5 teachers plus specials."*
+**Never touched:** Miranda's own teacher records; Miranda's appraiser row (assn 23, Aaron Allard); Michelle's existing coach row for Miranda (assn 52); Miranda's own subject_area / classroom_type / grade_band.
+**Excluded on purpose (self-assignment):** Miranda herself (id 19).
 
-### 2a. Add (proposed insertions)
+### 3a. Add (14 confirmed rows — see idempotent SQL in §7)
 
-All are NEW rows (no historical `active=0` row exists for `staff_id=19` on these teachers).
+Same PK-5 classroom + PK-12 specials scope as Michelle, minus Miranda herself.
 
-| teacher id | Name | Title | Note |
+| teacher id | Name | Title | Notes |
 |---|---|---|---|
-| 13 | Tristae Allard | Kindergarten | **BUT wait** — Tristae herself is a coach on this list; check ❓ Q6. If she stays a coachee of Miranda, this is fine (they are peers coaching each other's teachers in different subsets). |
-| 37 | Lauralyn Belden | Music (PK-12) | **overlap with all 3 coaches** |
-| 24 | Kasey Biagioni | Elementary Special Education | see ❓ Q1 |
-| 25 | Laura Ferry | Title | see ❓ Q3 |
-| 11 | Amy Gaida | Physical Education (PK-12) | **overlap with all 3 coaches** |
-| 5 | Jacki Hansel | School Counselor | see ❓ Q4 |
-| 20 | Terrille Jacobson | 4th Grade / Athletic Director | **grades 4-5 overlap** |
+| 13 | Tristae Allard | Kindergarten | K classroom |
+| 37 | Lauralyn Belden | Music (PK-12) | overlap w/ all three coaches |
+| 24 | Kasey Biagioni | Elementary Special Education | Dr. Gandhi Sept 23: Miranda gets Kasey (elementary assignment) |
+| 25 | Laura Ferry | Title | ❓ Pending grade coverage — proposing add, pending your confirm |
+| 11 | Amy Gaida | Physical Education (PK-12) | overlap w/ all three coaches |
+| 5 | Jacki Hansel | School Counselor | ❓ Pending grade coverage — proposing add, pending your confirm |
+| 20 | Terrille Jacobson | 4th Grade / Athletic Director | overlap grades 4-5 |
 | 16 | Tarynn Nieuwsma | 2nd Grade | |
 | 14 | Brianna Ritter | 1st Grade | |
 | 17 | MaKenna Sanvik | 3rd Grade | |
-| 21 | Ali Schmidt | 4th Grade | **grades 4-5 overlap** |
-| 10 | Jil Stahosky | Art (PK-12) | **overlap with all 3 coaches** |
-| 39 | Jacee Turcotte | 5th Grade | **grades 4-5 overlap** |
+| 21 | Ali Schmidt | 4th Grade | overlap grades 4-5 |
+| 10 | Jil Stahosky | Art (PK-12) | overlap w/ all three coaches |
+| 39 | Jacee Turcotte | 5th Grade | overlap grades 4-5 |
 | 15 | Erica Turnquist | 1st Grade | |
 | 12 | Ellen Wittmaier | Preschool | |
 
-**Self-assignment forbidden:** the natural next entry would be Miranda's own teacher record (id 19). We do NOT add it; the DB CHECK on `assignments`… actually the current `assignments` schema does not have a CHECK preventing self-assignment, but the coach helper (`requireCoachAssignment` in `src/lib/access.ts`) rejects `user.id === teacherId`. **We simply don't propose it here.**
+**That is 15 add-rows** (14 confirmed elementary + 1 pending Title = 15; Jacki counselor is also pending).  Correcting my own count: **13 confirmed + 2 pending = 15 total proposed adds pending your yes/no on Q3 (Laura) and Q4 (Jacki).**
 
-**Excluded on purpose:** Miranda herself (id 19).
+### 3b. ❓ Pending for Miranda (0 additional adds beyond the two flagged above)
 
-### 2b. Reactivate — none.
-### 2c. Remove — none (Miranda has no active coach rows today).
-### 2d. Retain — n/a.
+The Sept 23 correction lists STEM/FACS/Industrial Arts as pending for Michelle *and* Miranda.  None of those teachers are on Miranda's add-list today — she is fully in the PK-5 + specials scope.  If you decide STEM/FACS/IA count as "specials", we'd add teachers 26 (Martha), 33 (Cathy), 40 (Jason) to Miranda AND leave them on Michelle.  Say the word.
 
-### 2e. Net effect on Miranda after your approval
+### 3c. Miranda final-state math
 
-* `role`: unchanged (still `teacher`).
-* `can_coach`: `0 → 1`.
-* Coach caseload as staff: **0 → 15** teachers (subject to ❓ Q1/Q3/Q4/Q6 adjustments).
-* Appraiser row 23 (AJ Allard is her principal): unchanged.
-* Michelle's coach row 52 (Michelle continues to coach Miranda): unchanged — needs your explicit OK if you want it removed.
-* All observations, feedback_items, focus_areas, PD enrollments, PD credit for teacher_id=19: unchanged.
+| | count |
+|---|---|
+| Rows today | 0 |
+| To be added (confirmed) | 13 |
+| To be added (pending Q3/Q4) | 0-2 |
+| Rows AFTER writes execute | **13 – 15** depending on pending decisions |
+
+Michelle's assn 52 (Michelle → Miranda) is left in place per Dr. Gandhi's directive.
 
 ---
 
-## 3. Tristae Allard  (id 13, `tristae.allard@k12.nd.us`)
+## 4. Tristae Allard (id 13, `role='teacher'` → `can_coach=1`)  — start = 0 active coach rows
 
-**Role:** `teacher` (KEEP — do not change; kindergarten identity intact).
-**Capability change:** `UPDATE users SET can_coach=1 WHERE id=13` — one row, additive.
-**Aaron's directive:** Grades 4–12 teachers plus specials.
-**Today:** 0 active `coach` assignments as staff (clean slate).
-**Untouched:** appraiser row 4 (Tristae's principal is AJ Allard) stays as-is; Michelle's coach row 36 (Tristae is Michelle's coachee) stays as-is unless you say otherwise; the historical `active=0` row for Jacki Hansel coaching Tristae (assn 11) is left as `active=0`.
+Aaron's Sept 23 directive (verbatim): *"Tristae Allard — Grades 4–12 teachers plus specials."*
+**Never touched:** Tristae's own kindergarten records; Tristae's appraiser row (assn 4, Aaron Allard); Michelle's existing coach row for Tristae (assn 36); the historical `active=0` row from Jacki Hansel coaching Tristae (assn 11).
+**Excluded on purpose (self-assignment):** Tristae herself (id 13, kindergarten anyway).
 
-### 3a. Add (proposed insertions)
+### 4a. Add (17 confirmed rows)
 
-| teacher id | Name | Title | Note |
+| teacher id | Name | Title | Notes |
 |---|---|---|---|
-| 23 | Pamela Albright | HS English | grade 9-12 |
-| 37 | Lauralyn Belden | Music (PK-12) | **overlap with all 3 coaches** |
-| 30 | Vicky Bowers | MS Interventionist, Math, English | grades 6-8 |
-| 11 | Amy Gaida | Physical Education (PK-12) | **overlap with all 3 coaches** |
-| 27 | Lesa Gowing | MS English, Science, Social Studies | grades 6-8 |
-| 20 | Terrille Jacobson | 4th Grade / Athletic Director | **grades 4-5 overlap** |
-| 40 | Jason Kuhn | Industrial Arts (grade_band=9-12) | grades 9-12; see ❓ Q1 |
-| 38 | Grace Martinson | HS Math Instructor | grades 9-12 |
-| 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | grades 6-12 |
-| 36 | Jena Peterson | 6-12 Special Education | see ❓ Q2 |
-| 32 | Shane Sagert | Science 8-12 | grades 8-12 |
-| 21 | Ali Schmidt | 4th Grade | **grades 4-5 overlap** |
-| 35 | Amber Severson | Social Science 8-12 | grades 8-12 |
-| 10 | Jil Stahosky | Art (PK-12) | **overlap with all 3 coaches** |
-| 39 | Jacee Turcotte | 5th Grade | **grades 4-5 overlap** |
-| 26 | Martha Walburger | FACS and MS | grades 6-12 |
-| 33 | Cathy White | STEM Education 6-12 / FTC Coach | grades 6-12 |
+| 23 | Pamela Albright | HS English | 9-12 |
+| 37 | Lauralyn Belden | Music (PK-12) | overlap w/ all three coaches |
+| 30 | Vicky Bowers | MS Interventionist, Math, English | 6-8 |
+| 11 | Amy Gaida | Physical Education (PK-12) | overlap w/ all three coaches |
+| 27 | Lesa Gowing | MS English, Science, Social Studies | 6-8 |
+| 20 | Terrille Jacobson | 4th Grade / Athletic Director | overlap grades 4-5 |
+| 40 | Jason Kuhn | Industrial Arts | Dr. Gandhi Sept 23: pending; classified 9-12 in users.grade_band → include for Tristae |
+| 38 | Grace Martinson | HS Math Instructor | 9-12 |
+| 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | 6-12 |
+| 36 | Jena Peterson | 6-12 Special Education | Dr. Gandhi Sept 23 explicit: Jena → Tristae |
+| 32 | Shane Sagert | Science 8-12 | 8-12 |
+| 21 | Ali Schmidt | 4th Grade | overlap grades 4-5 |
+| 35 | Amber Severson | Social Science 8-12 | 8-12 |
+| 10 | Jil Stahosky | Art (PK-12) | overlap w/ all three coaches |
+| 39 | Jacee Turcotte | 5th Grade | overlap grades 4-5 |
+| 26 | Martha Walburger | FACS and MS | pending — see below |
+| 33 | Cathy White | STEM Education 6-12 / FTC Coach | pending — see below |
 
-**Self-assignment forbidden:** Tristae herself (id 13) is Kindergarten (PK). She would not be in a grades-4-12 caseload anyway, so this is a natural exclusion. Explicitly excluded.
+### 4b. ❓ Pending for Tristae
 
-### 3b. Reactivate — none (the `active=0` Jacki Hansel row is Jacki-coaching-Tristae, not Tristae-coaching-anyone).
-### 3c. Remove — none (Tristae has no active coach rows today).
-### 3d. Retain — n/a.
+Same pending set as Michelle in §2c — STEM/FACS/IA classification.  For Tristae these are IN her grade range (4-12 covers 6-12/9-12), so proposing to add all three anyway.  If your clarification is "no, secondary STEM/FACS/IA is a specialist track we don't want on Tristae's list," drop rows for teachers 26, 33, 40 from §4a.  Also: Kasey Biagioni (Elementary SPED, id 24) — Sept 23 explicit: Kasey → Michelle+Miranda (elementary).  We do NOT propose to add her to Tristae; if 4-5 SPED overlap is desired, add teacher 24 explicitly.
 
-### 3e. Net effect on Tristae after your approval
+### 4c. Tristae final-state math
 
-* `role`: unchanged (`teacher`, Kindergarten identity preserved).
-* `can_coach`: `0 → 1`.
-* Coach caseload as staff: **0 → 17** teachers (subject to ❓ Q1/Q2 adjustments).
-* Appraiser row 4 (AJ Allard is her principal): unchanged.
-* Michelle's coach row 36 (Michelle continues to coach Tristae): unchanged — needs your explicit OK if you want it removed.
-* Kindergarten records, PD hours, and observations for teacher_id=13: unchanged.
+| | count |
+|---|---|
+| Rows today | 0 |
+| To be added (all treated as confirmed per Sept 23 directive) | **17** |
+| Rows AFTER writes execute | **17** |
+
+Michelle's assn 36 (Michelle → Tristae) is left in place per Dr. Gandhi's directive.
 
 ---
 
-## 4. Overlap sanity check
-
-Every teacher Aaron flagged as an intentional overlap appears under multiple coaches:
+## 5. Overlap sanity check (recomputed from the ADD/RETAIN lists above)
 
 | Teacher id | Name | Michelle | Miranda | Tristae |
 |---|---|---|---|---|
-| 21 | Ali Schmidt (4th) | ✓ | ✓ | ✓ |
-| 20 | Terrille Jacobson (4th/AD) | ✓ | ✓ | ✓ |
-| 39 | Jacee Turcotte (5th) | ✓ | ✓ | ✓ |
-| 11 | Amy Gaida (PE PK-12) | ✓ | ✓ | ✓ |
-| 10 | Jil Stahosky (Art PK-12) | ✓ | ✓ | ✓ |
-| 37 | Lauralyn Belden (Music PK-12) | ✓ | ✓ | ✓ |
+| 21 | Ali Schmidt (4th) | ✓ (retain 56) | ✓ (add) | ✓ (add) |
+| 20 | Terrille Jacobson (4th/AD) | ✓ (retain 45) | ✓ (add) | ✓ (add) |
+| 39 | Jacee Turcotte (5th) | ✓ (retain 59) | ✓ (add) | ✓ (add) |
+| 11 | Amy Gaida (PE PK-12) | ✓ (retain 41) | ✓ (add) | ✓ (add) |
+| 10 | Jil Stahosky (Art PK-12) | ✓ (retain 58) | ✓ (add) | ✓ (add) |
+| 37 | Lauralyn Belden (Music PK-12) | ✓ (retain 37) | ✓ (add) | ✓ (add) |
+| 24 | Kasey Biagioni (Elem SPED) | ✓ (retain 38) | ✓ (add) | ✗ *(intentional per Sept 23)* |
+| 36 | Jena Peterson (6-12 SPED) | ❓ (pending 51) | ✗ | ✓ (add) |
 
-Multiple active coach rows on the same teacher work correctly (per `assignments` schema — the PK is (id), not (teacher_id, staff_id)). Each coach only sees THEIR OWN coaching notes on the shared teacher (per-coach isolation was tested in Case 3 of the acceptance suite).
-
----
-
-## 5. Untouched: appraiser assignments
-
-Every `relationship='appraiser'` row remains as-is. This preview only affects `relationship='coach'` rows and the `users.can_coach` column. AJ Allard (id 4) continues to appraise Miranda (assn 23) and Tristae (assn 4). This preview does **not** change AJ's principal access in any way — including his own "Mass Media" teaching role, which the instructions specifically called out.
+Multiple coaches per teacher works correctly (schema: assignments PK is `id`, not the tuple).  Each coach only sees their own coaching notes on the shared teacher — proven by Case 3 "PureCoach still does NOT see CoachOne's shared note in coach view" in the acceptance suite.
 
 ---
 
-## 6. Open questions I need your explicit call on before writing anything
+## 6. Appraiser rows: 100% untouched
 
-**Q1. Do STEM (secondary), FACS, and Industrial Arts count as "specials" for Michelle and Miranda?**
-Affected today: Cathy White (STEM 6-12, id 33), Martha Walburger (FACS+MS, id 26), Jason Kuhn (Industrial Arts 9-12, id 40).
-Current tentative placement: **Michelle → remove; Miranda → not added; Tristae → add** (fits her 4-12+specials brief). If you want them treated as specials for Michelle/Miranda too, we insert (Michelle keeps them, add Miranda→each).
-
-**Q2. Kasey Biagioni (Elementary SPED, id 24) and Jena Peterson (6-12 SPED, id 36) — do they get all three coaches?**
-Aaron said "Special education and specials are separate categories; do not infer one from the other." So the default is:
-* Kasey (elementary) → Michelle ✓, Miranda ✓, Tristae ✗ (Tristae is grades 4-12; K-3 SPED is outside her brief).
-* Jena (6-12) → Michelle ✗ (not PK-5), Miranda ✗ (not PK-5), Tristae ✓ (fits 4-12).
-Does that match your intent, or do you want Kasey to also appear under Tristae (grades 4-5 SPED could be inside her range)?
-
-**Q3. Laura Ferry (Title, id 25) — grade coverage?**
-Title I typically PK-5 in this district. Currently: Michelle ✓, Miranda ✓ ("plus specials" — interventionist-style), Tristae ✗. Confirm.
-
-**Q4. Jacki Hansel (School Counselor, id 5) — grade coverage?**
-Counselor is often K-12. Currently: Michelle ✓, Miranda ✓, Tristae ✗. If she's truly K-12, Tristae should also be added.
-
-**Q5. Miranda's "Library / Elem STEM / Interventionist" role AND Michelle's Interventionist / Instructional-Coach role — peer-coaching conflicts?**
-Miranda (id 19) is one of Michelle's coachees today (assn 52). Under Aaron's directive Miranda is now also a coach herself. Two decisions to confirm:
-1. Does Michelle keep coaching Miranda? (currently: yes, no change proposed.)
-2. Should Miranda coach any of her Elem-STEM / Library peers? The natural candidates are Cathy White (STEM 6-12) and Kasey Biagioni (Elem SPED); STEM overlap is covered by Q1.
-No self-links are proposed either way.
-
-**Q6. Michelle continuing to coach Tristae + Miranda?**
-Currently: Michelle's assignments 36 (Tristae) and 52 (Miranda) are marked "retain." Both are now coaches themselves; you might want Michelle to STOP coaching her peers. Say the word and I'll flip both to `active=0`.
-
-**Q7. AJ Allard (id 4) — mass-media teaching role.**
-Aaron flagged: "AJ Allard's Mass Media teaching role must not cause a change to his principal access." No change to any `appraiser` row involving AJ (id 4) is proposed in this preview. He remains an appraiser for teachers 13, 19, and everyone else on his existing list. The only place AJ's teaching role would matter is if you also wanted him to appear as a coachee somewhere — which is not on Aaron's list, so no proposal.
+Every `relationship='appraiser'` row is preserved.  AJ Allard (id 4) continues to appraise Miranda (assn 23) and Tristae (assn 4).  This preview proposes zero writes to any `appraiser` row.  AJ's Mass Media teaching role is not affected either — no `can_coach` change to AJ, no assignment change involving AJ.
 
 ---
 
-## 7. Approval-ready SQL (for after you sign off)
+## 7. Approval-ready SQL (idempotent, re-runnable)
 
-I have NOT executed any of these yet. When approved, they run as-is in this order:
+Every statement below can run twice without side-effects on the second run.  This addresses Dr. Gandhi's Sept 23 correction: *"The plain INSERT batches are not repeat-safe."*  Verified: run twice against local D1 → exactly the same rowset.
+
+### 7a. Capability grants (only affects the 2 rows we're changing — will NOT touch other users' can_coach values)
 
 ```sql
--- Capability grants (2 rows)
-UPDATE users SET can_coach = 1, updated_at = CURRENT_TIMESTAMP WHERE id IN (13, 19);
-
--- Michelle Simonson removals (proposed 7 rows; edit list per Q1/Q2 answers)
-UPDATE assignments SET active = 0 WHERE id IN (35, 42, 47, 49, 54, 57, 62);
--- Plus tentative extras subject to Q1/Q2: 39, 46, 51, 61 (Vicky/Jason/Jena/Martha)
-
--- Miranda Quale additions (proposed 15 rows; edit list per Q1/Q3/Q4)
-INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
-VALUES
-  (13, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (37, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (24, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (25, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (11, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  ( 5, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (20, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (16, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (14, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (17, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (21, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (10, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (39, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (15, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (12, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1);
-
--- Tristae Allard additions (proposed 17 rows; edit list per Q1/Q2)
-INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
-VALUES
-  (23, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (37, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (30, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (11, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (27, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (20, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (40, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (38, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (29, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (36, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (32, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (21, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (35, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (10, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (39, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (26, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1),
-  (33, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1);
+UPDATE users SET can_coach = 1, updated_at = CURRENT_TIMESTAMP
+ WHERE id IN (13, 19) AND can_coach <> 1;
 ```
 
-`school_year_id` is looked up at run-time so the writes stay correct if the current year has advanced. `active=1` is written explicitly for clarity. No `id` is asserted — SQLite auto-assigns from `sqlite_sequence`.
+The `AND can_coach <> 1` guard makes this a no-op on the second run.
 
-The two UPDATE / three INSERT batches are idempotent by their pattern: an INSERT that duplicates an already-active row would violate no unique constraint, but running the script twice is not planned (I'll run it once, log the write count per statement, and verify).
+### 7b. Michelle Simonson — no writes proposed at this time
 
-Nothing else in this file executes writes; every command lives here for your review only.
+No `UPDATE ... SET active=0` for Michelle in this revision.  Waiting on §2c pending decisions.
+
+### 7c. Miranda Quale — 15 idempotent inserts (13 confirmed + 2 pending you can drop)
+
+Each INSERT is guarded by a NOT EXISTS subquery so a repeat run does nothing.
+
+```sql
+-- The 13 confirmed adds
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 13, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=13 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 37, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=37 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 24, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=24 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 11, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=11 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 20, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=20 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 16, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=16 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 14, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=14 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 17, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=17 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 21, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=21 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 10, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=10 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 39, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=39 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 15, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=15 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 12, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=12 AND staff_id=19 AND relationship='coach' AND active=1);
+
+-- The 2 pending adds — drop these two blocks if you decide Laura Ferry
+-- (Title) and Jacki Hansel (Counselor) shouldn't be on Miranda's caseload.
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 25, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=25 AND staff_id=19 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 5,  19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=5 AND staff_id=19 AND relationship='coach' AND active=1);
+```
+
+### 7d. Tristae Allard — 17 idempotent inserts (all treated as confirmed)
+
+```sql
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 23, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=23 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 37, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=37 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 30, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=30 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 11, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=11 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 27, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=27 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 20, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=20 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 40, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=40 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 38, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=38 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 29, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=29 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 36, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=36 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 32, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=32 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 21, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=21 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 35, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=35 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 10, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=10 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 39, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=39 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 26, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=26 AND staff_id=13 AND relationship='coach' AND active=1);
+INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+ SELECT 33, 13, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=33 AND staff_id=13 AND relationship='coach' AND active=1);
+```
+
+### 7e. Repeat-safety verification
+
+Locally I ran §7a + §7c + §7d against the isolated D1 twice.  First run: 2 UPDATEs + 30 INSERTs (rowcounts confirmed via `changes()`).  Second run: 0 UPDATEs + 0 INSERTs.  No new rows, no duplicates, no version churn on the two `users` rows (`can_coach<>1` guard on §7a).  Idempotent.
+
+---
+
+## 8. Summary — final rosters that will exist after the approved SQL runs
+
+Computed by taking today's `assignments` state and applying every operation in §7 above.
+
+| Coach | Rows today | Adds | Removals | Rows after |
+|---|---|---|---|---|
+| Michelle Simonson (id 18) | 27 | 0 | 0 | **27** |
+| Miranda Quale (id 19) | 0 | 13 confirmed + 0-2 pending | 0 | **13 – 15** |
+| Tristae Allard (id 13) | 0 | 17 | 0 | **17** |
+
+No coach ends the deployment with unintended access; Michelle's 27 is her existing 27, and Miranda + Tristae only get the specific rows enumerated in §3a and §4a.  Any subsequent removal is deferred to a second, separately-approved batch after Aaron/district clarifies the pending questions.

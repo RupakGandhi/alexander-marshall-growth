@@ -169,19 +169,48 @@ try {
       'notes body', 'summary body', ?, ?, ?, ?)`)
     .run(fw.id, now, now, now, now, now);
 
-  // One rubric indicator so observation_scores has an FK to satisfy — but
-  // only if the framework tables already exist.  Skip if not (they usually
-  // exist from the migration set; the acceptance suite's PD flow doesn't
-  // actually need a numeric score to demo the leak fix).
+  // C5a (Sept 23 correction) — seed a TEACHER-COACH (CoachOne, id 4) with
+  // authentic teaching history so the acceptance suite can verify those
+  // values remain unchanged when she starts coaching.  We give CoachOne:
+  //   * observation 101 authored by Principal, published + acknowledged
+  //   * one observation_score row (so scored_indicators > 0)
+  //   * one feedback_item so her Prose-rendered feedback loads
+  //   * pd_enrollment 201 verified with 3.5 credited hours
+  const indicator = db.prepare(
+    `SELECT id FROM framework_indicators ORDER BY sort_order LIMIT 1`
+  ).get();
+  if (indicator) {
+    db.prepare(`INSERT INTO observations
+      (id, teacher_id, appraiser_id, school_year_id, framework_id, observation_type, class_context,
+       subject, grade_level, observed_at, status, scripted_notes, overall_summary,
+       published_at, teacher_acknowledged_at, created_at, updated_at)
+      VALUES (101, 4, 2, 1, ?, 'formal', 'CoachOne classroom, pre-coach', 'ELA', '3', ?, 'acknowledged',
+        'CoachOne notes', 'CoachOne summary', ?, ?, ?, ?)`)
+      .run(fw.id, now, now, now, now, now);
+    db.prepare(`INSERT INTO observation_scores
+      (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
+      VALUES (101, ?, 3, 'CoachOne evidence', ?, ?)`).run(indicator.id, now, now);
+    db.prepare(`INSERT INTO feedback_items
+      (observation_id, indicator_id, category, title, body, sort_order, source, created_at)
+      VALUES (101, ?, 'glow', 'CoachOne strength', 'CoachOne baseline feedback body', 0, 'appraiser', ?)`)
+      .run(indicator.id, now);
+  }
+
   // pd_enrollment for Bob with source_score_level=2 so R6b tests can grep.
-  // Requires at least one pd_module and framework row to be present.  If
-  // the migrations left indicators empty in this fresh fixture we skip;
-  // tests will note that as an unavailable case rather than fail.
   const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
   if (mod) {
     db.prepare(`INSERT INTO pd_enrollments
       (id, teacher_id, module_id, source, status, source_score_level, created_at, updated_at)
       VALUES (200, 11, ?, 'auto', 'started', 2, ?, ?)`).run(mod.id, now, now);
+    // CoachOne's OWN verified PD enrollment with credited hours.  The real
+    // column is pd_enrollments.hours_credited (set by verifyDeliverable when
+    // the appraiser approves with credit).  Tests read this back and assert
+    // it is unchanged after any coaching activity.
+    db.prepare(`INSERT INTO pd_enrollments
+      (id, teacher_id, module_id, source, status, hours_credited, credited_at, credited_by_user_id,
+       verified_at, verified_by, created_at, updated_at)
+      VALUES (201, 4, ?, 'self', 'verified', 3.5, ?, 2, ?, 2, ?, ?)`)
+      .run(mod.id, now, now, now, now);
   }
 
   db.exec('COMMIT');

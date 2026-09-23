@@ -480,11 +480,11 @@ suite('Case 5 — Coaching feedback creates ZERO observations/scores/PD credit')
 }
 
 // ==========================================================================
-suite('Case 6 — Notifications: recipient link works; teacher-coach receives PD-review pings');
+suite('Case 6 — Notifications: recipient link works AND lands on an authorized page');
 
 {
   // Verify the coach_note notification for Alice points at /teacher#coaching-feedback
-  // and that Alice can actually load that URL (not a 404).
+  // and that Alice can actually load that URL (not a 404, not a 403).
   const notif = db.prepare(
     `SELECT url FROM notifications WHERE user_id=? AND kind='coach_note' ORDER BY id DESC LIMIT 1`
   ).get(IDS.alice);
@@ -492,42 +492,72 @@ suite('Case 6 — Notifications: recipient link works; teacher-coach receives PD
   // Follow the link as the recipient (strip the fragment since fetch ignores it).
   const url = (notif?.url || '').split('#')[0];
   const r = await alice.get(url);
-  ok(`notification link ${url} loads for the recipient (HTTP ${r.status})`, r.status === 200, `HTTP ${r.status}`);
+  ok(`notification link ${url} loads for the recipient with HTTP 200 (not 404 or 403)`,
+     r.status === 200, `HTTP ${r.status}`);
+  // C5b tightening: require the response to show the entry — the /teacher
+  // page must actually contain the previously-shared feedback content.
+  ok(`recipient's landing page shows the shared feedback content`,
+     r.text.includes('Facilitator moves were consistent'),
+     'landing page did not surface the shared feedback');
 }
 {
-  // Teacher-coach eligibility: submitting a PD deliverable by their coachee
-  // should notify the teacher-coach.  We simulate the notify path directly
-  // by inserting a submitted deliverable for Bob (coached by CoachTwo).
-  // The submitDeliverable() DB path is exercised via HTTP, but here we
-  // simply confirm the SELECT the app uses would return CoachTwo:
-  const recips = db.prepare(
-    `SELECT DISTINCT a.staff_id AS uid, u.role
-       FROM assignments a JOIN users u ON u.id = a.staff_id
-      WHERE a.teacher_id = ?
-        AND a.active = 1
-        AND u.active = 1
-        AND (
-             (u.role IN ('appraiser','coach'))
-          OR (u.role = 'teacher' AND u.can_coach = 1 AND a.relationship = 'coach')
-        )`
-  ).all(IDS.bob);
-  const ids = recips.map(r => r.uid).sort();
-  ok(`Bob's PD-submit recipients include Principal, PureCoach, CoachTwo (got [${ids.join(',')}])`,
-     ids.includes(IDS.principal) && ids.includes(IDS.pureCoach) && ids.includes(IDS.coachTwo),
-     `got [${ids.join(',')}]`);
+  // Teacher-coach eligibility for PD-submit notifications: exercise the REAL
+  // /teacher/pd/:id/submit path.  Bob (coachee of Principal, PureCoach,
+  // CoachTwo) submits a deliverable for enrollment 200 (seeded).  All three
+  // supervisors should receive a pd_deliverable_submitted notification.
+  const beforeCount = (uid) => db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='pd_deliverable_submitted' AND entity_id=200`
+  ).get(uid).n;
+  const before = {
+    [IDS.principal]: beforeCount(IDS.principal),
+    [IDS.pureCoach]: beforeCount(IDS.pureCoach),
+    [IDS.coachTwo]: beforeCount(IDS.coachTwo),
+  };
+  const form = new URLSearchParams({ title: 'PD deliverable test', body: 'deliverable body' });
+  const r = await bob.post(`/teacher/pd/200/submit`, form);
+  ok('Bob POST /teacher/pd/200/submit returns 302', r.status === 302, `HTTP ${r.status}`);
+  // Confirm each recipient got exactly one new notification and the URL is
+  // /pd/review/200 (NOT /appraiser/pd/review/200).
+  const after = {
+    [IDS.principal]: beforeCount(IDS.principal),
+    [IDS.pureCoach]: beforeCount(IDS.pureCoach),
+    [IDS.coachTwo]: beforeCount(IDS.coachTwo),
+  };
+  ok(`Principal notified (${before[IDS.principal]} → ${after[IDS.principal]})`,
+     after[IDS.principal] === before[IDS.principal] + 1);
+  ok(`PureCoach notified (${before[IDS.pureCoach]} → ${after[IDS.pureCoach]})`,
+     after[IDS.pureCoach] === before[IDS.pureCoach] + 1);
+  ok(`CoachTwo (teacher-coach) notified (${before[IDS.coachTwo]} → ${after[IDS.coachTwo]})`,
+     after[IDS.coachTwo] === before[IDS.coachTwo] + 1);
+  const notifUrl = db.prepare(
+    `SELECT url FROM notifications WHERE user_id=? AND kind='pd_deliverable_submitted' AND entity_id=200 ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachTwo).url;
+  ok(`PD-submit notification URL is /pd/review/200 (got "${notifUrl}")`,
+     notifUrl === '/pd/review/200', `got "${notifUrl}"`);
+}
+{
+  // Every recipient must be able to reach /pd/review/200 with HTTP 200 (not
+  // 404 — that was the OLD test's weakness).  PureCoach + CoachTwo both
+  // qualify via relationship='coach'.  Principal qualifies via 'appraiser'.
+  const principal = await new Client('principal@test','Principal').login();
+  for (const [label, cli] of [['Principal', principal], ['PureCoach', pureCoach], ['CoachTwo', coachTwo]]) {
+    const r = await cli.get('/pd/review/200');
+    ok(`${label} can access /pd/review/200 with HTTP 200`,
+       r.status === 200, `HTTP ${r.status}`);
+  }
+  // But CoachThree (has no assignments) MUST get 403 — never 200 or 404.
+  const r = await coachThree.get('/pd/review/200');
+  ok('CoachThree gets 403 on /pd/review/200 (not 404 or 200)',
+     r.status === 403, `HTTP ${r.status}`);
 }
 {
   // Regression: the PD-submitted notification url must be /pd/review/:id, not
-  // /appraiser/pd/review/:id.  Bundle check + role-authorization check.
+  // /appraiser/pd/review/:id.  Bundle text check as a belt on the runtime
+  // check above.
   const { readFileSync } = await import('node:fs');
   const bundle = readFileSync('dist/_worker.js', 'utf8');
   ok('bundle does NOT contain broken /appraiser/pd/review/ URL',
      !bundle.includes('/appraiser/pd/review/'));
-  // And a coach can actually access /pd/review/:id (or 404 if the id doesn't
-  // exist, but never 403 for one of their own coachees).  Use the seeded
-  // enrollment (id 200, teacher = Bob, coached by PureCoach).
-  const r = await pureCoach.get(`/pd/review/200`);
-  ok('PureCoach can access /pd/review/200 (Bob is her coachee)', r.status === 200 || r.status === 404, `HTTP ${r.status}`);
 }
 
 // ==========================================================================
@@ -621,7 +651,7 @@ suite('Case 9 — Hard-delete guard preserves coaching history');
 }
 
 // ==========================================================================
-suite('Case 10 — Preserved teacher records/hours for a teacher-coach');
+suite('Case 10 — Preserved teacher records/hours/observations/acknowledgment for a teacher-coach');
 
 // Case 9's hard-delete-soft-fallback deleted CoachOne's sessions row, which
 // invalidates her cookie.  We're testing behavior here, not session
@@ -629,23 +659,54 @@ suite('Case 10 — Preserved teacher records/hours for a teacher-coach');
 // user in this state would just log back in on their next click.
 await coachOne.login();
 
+// C5a: capture CoachOne's teacher-side state BEFORE any coach activity of
+// hers touched the system.  These values must still equal the fixture's
+// seeded values after the acceptance suite runs (drafts + shares +
+// notifications for other teachers all happened above).
+const preCoachOneObs = db.prepare(
+  `SELECT status, teacher_acknowledged_at IS NOT NULL AS acked FROM observations WHERE id=101`
+).get();
+const preCoachOneEnr = db.prepare(
+  `SELECT status, hours_credited FROM pd_enrollments WHERE id=201`
+).get();
+const preCoachOneScore = db.prepare(
+  `SELECT level FROM observation_scores WHERE observation_id=101 LIMIT 1`
+).get();
+
 {
-  // CoachOne's teacher hours snapshot from HTML.  The route returns a page
-  // that includes "PD Hours This Year" and the numeric total.  We can't
-  // easily parse a live number, but we can assert the panel renders and
-  // that the query path doesn't 403.
   const r = await coachOne.get('/teacher');
   ok('CoachOne /teacher after coaching activity still 200', r.status === 200);
   ok('CoachOne\'s teacher home shows PD Hours pill', r.text.includes('PD Hours This Year'));
-  // And her /reports/pd path (as a teacher-coach) shows her own PD + her
-  // coachee's PD (union).  Bob (11) has enrollment 200; CoachOne (4) has
-  // none of her own, so we just verify Bob's enrollment id appears via the
-  // 'Open' link in the HTML.
+  // C5a: her personal seeded values are still exactly what we seeded.
+  const nowObs = db.prepare(
+    `SELECT status, teacher_acknowledged_at IS NOT NULL AS acked FROM observations WHERE id=101`
+  ).get();
+  ok(`CoachOne's own observation 101 status unchanged (${preCoachOneObs.status} → ${nowObs.status})`,
+     nowObs.status === preCoachOneObs.status);
+  ok(`CoachOne's own observation acknowledgement preserved (${preCoachOneObs.acked} → ${nowObs.acked})`,
+     nowObs.acked === preCoachOneObs.acked);
+  const nowEnr = db.prepare(`SELECT status, hours_credited FROM pd_enrollments WHERE id=201`).get();
+  ok(`CoachOne's PD enrollment 201 status unchanged (${preCoachOneEnr.status} → ${nowEnr.status})`,
+     nowEnr.status === preCoachOneEnr.status);
+  ok(`CoachOne's credited hours preserved (${preCoachOneEnr.hours_credited} → ${nowEnr.hours_credited})`,
+     nowEnr.hours_credited === preCoachOneEnr.hours_credited);
+  const nowScore = db.prepare(`SELECT level FROM observation_scores WHERE observation_id=101 LIMIT 1`).get();
+  ok(`CoachOne's own observation score unchanged (${preCoachOneScore.level} → ${nowScore.level})`,
+     nowScore.level === preCoachOneScore.level);
+  // Her /reports/pd (teacher-coach) shows own PD + coachee PD (union).
   const pd = await coachOne.get('/reports/pd');
+  ok('CoachOne\'s /reports/pd includes her OWN enrollment 201',
+     pd.text.includes('/reports/pd/201'), '201 missing');
   ok('CoachOne\'s /reports/pd includes Bob\'s enrollment 200', pd.text.includes('/reports/pd/200'));
-  // ...but source_score_level for Bob must still be scrubbed on her view.
+  // ...but source_score_level for Bob (someone else's row) must be scrubbed.
   ok('CoachOne\'s /reports/pd does NOT show "Auto (L2)" for Bob',
      !pd.text.includes('Auto (L2)'), 'teacher-coach still leaks other-teacher source score');
+  // Her own observation-scope CSV must still contain her seeded score.
+  const csv = await coachOne.get('/reports/csv?mode=scores');
+  ok('CoachOne can pull her own scores CSV (HTTP 200)', csv.status === 200);
+  // The seeded evidence_note is 'CoachOne evidence' — must appear in the CSV.
+  ok('CoachOne\'s own scores CSV contains her seeded evidence note',
+     csv.text.includes('CoachOne evidence'), 'own scores missing from own report');
 }
 
 // ==========================================================================
@@ -693,6 +754,253 @@ suite('Case 12 — R3: shared entries require meaningful content on save');
   const row = db.prepare(`SELECT evidence FROM coaching_notes WHERE id=?`).get(draftId);
   ok('shared entry evidence not overwritten by rejected save',
      row.evidence?.includes('fishbowl protocol'));
+}
+
+// ==========================================================================
+suite('Case 13 — C1 direct-share fix: fresh POST /notes with _action=share creates row+audit+notification');
+{
+  // The bug you saw in preview: coach clicks "Share with teacher" on a NEW
+  // note and the response says "Already shared with teacher" without any
+  // row / audit / notification being written on the FIRST attempt.
+  // With the RETURNING-based fresh/duplicate distinction, this MUST work.
+  const notifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.alice).n;
+  const notesBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.alice).n;
+  const form = new URLSearchParams({
+    _token: 'c1-fresh-' + Date.now(),
+    occurred_on: '2026-09-22', // C2: this MUST render as Sep 22 in views
+    class_context: 'Direct-share fixture',
+    glow: 'C1 fresh strength-only entry — must land on first click',
+    _action: 'share',
+  });
+  const r = await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, form);
+  ok('fresh direct-share returns 302', r.status === 302, `HTTP ${r.status}`);
+  ok('fresh direct-share redirect says "Shared with teacher" (NOT "Already shared")',
+     locHas(r.location, 'Shared with teacher') && !locHas(r.location, 'Already shared'),
+     `loc=${r.location}`);
+  const notesAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.alice).n;
+  ok(`fresh direct-share created exactly one note row (${notesBefore} → ${notesAfter})`,
+     notesAfter === notesBefore + 1);
+  // The new row must have create+share audit rows AND be status='shared'.
+  const newest = db.prepare(
+    `SELECT id, status, first_shared_at FROM coaching_notes
+      WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachOne, IDS.alice);
+  ok('new row is status=shared with first_shared_at set',
+     newest.status === 'shared' && !!newest.first_shared_at,
+     `status=${newest.status} first_shared_at=${newest.first_shared_at}`);
+  const audits = db.prepare(
+    `SELECT action FROM coaching_note_audit WHERE note_id=? ORDER BY id`
+  ).all(newest.id).map(r => r.action);
+  ok(`audit trail has create + share (got [${audits.join(',')}])`,
+     audits.includes('create') && audits.includes('share'),
+     `audits=[${audits.join(',')}]`);
+  const notifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.alice).n;
+  ok(`fresh direct-share fired exactly one notification (${notifBefore} → ${notifAfter})`,
+     notifAfter === notifBefore + 1);
+  // Retrying the SAME token must NOT create a second row or a second notification.
+  const r2 = await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, form);
+  ok('retry with same token returns 302', r2.status === 302);
+  ok('retry redirect says "Already shared" (not a fresh success)',
+     locHas(r2.location, 'Already shared'), `loc=${r2.location}`);
+  const notesFinal = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.alice).n;
+  ok(`retry did NOT create a second row (${notesAfter} → ${notesFinal})`, notesFinal === notesAfter);
+  const notifFinal = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.alice).n;
+  ok(`retry did NOT fire a second notification (${notifAfter} → ${notifFinal})`, notifFinal === notifAfter);
+
+  // C2 date rendering: the shared entry, viewed by BOTH coach and teacher,
+  // must display "Sep 22, 2026" (not "Sep 21").
+  const teacherView = await alice.get('/teacher');
+  ok('Alice teacher view renders occurred_on as "Sep 22, 2026"',
+     teacherView.text.includes('Sep 22, 2026'),
+     'date shifted in teacher view');
+  const coachView = await coachOne.get(`/coach/teachers/${IDS.alice}`);
+  ok('CoachOne coach view renders occurred_on as "Sep 22, 2026"',
+     coachView.text.includes('Sep 22, 2026'),
+     'date shifted in coach view');
+}
+
+// ==========================================================================
+suite('Case 14 — C3b notify-retry endpoint is idempotent and view-only for super_admin');
+{
+  // Set up: create a shared note, then DELETE the notification row so the
+  // note is "delivered notification lost" state (simulating a real notify()
+  // failure).  The GET view must show the badge, and POST notify-retry
+  // must send exactly one notification.
+  const form = new URLSearchParams({
+    _token: 'c3b-notify-' + Date.now(),
+    occurred_on: '2026-09-23',
+    glow: 'C3b notify-retry test entry',
+    _action: 'share',
+  });
+  await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, form);
+  const noteId = db.prepare(
+    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachOne, IDS.alice).id;
+  // Force "notification lost": delete the row that was just created.
+  const delRes = db.prepare(
+    `DELETE FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).run(IDS.alice, noteId);
+  ok(`forced delete of the notification row (deleted ${delRes.changes})`, delRes.changes === 1);
+  // Coach view must show the "Notification not delivered" badge for THIS note.
+  const view = await coachOne.get(`/coach/teachers/${IDS.alice}`);
+  ok('coach view shows "Notification not delivered" badge for the lost note',
+     view.text.includes('Notification not delivered'),
+     'badge missing');
+  // Trigger notify-retry.
+  const retry = await coachOne.post(`/coach/teachers/${IDS.alice}/notes/${noteId}/notify-retry`, new URLSearchParams({}));
+  ok('notify-retry returns 302', retry.status === 302, `HTTP ${retry.status}`);
+  ok('notify-retry redirect says "Notification sent"',
+     locHas(retry.location, 'Notification sent'), `loc=${retry.location}`);
+  const nowN = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).get(IDS.alice, noteId).n;
+  ok(`notify-retry re-created exactly one notification (${nowN})`, nowN === 1);
+  // Second retry must be a no-op ("Notification is already delivered").
+  const retry2 = await coachOne.post(`/coach/teachers/${IDS.alice}/notes/${noteId}/notify-retry`, new URLSearchParams({}));
+  ok('second notify-retry says already delivered',
+     locHas(retry2.location, 'already delivered'), `loc=${retry2.location}`);
+  const finalN = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).get(IDS.alice, noteId).n;
+  ok(`second retry did NOT duplicate (${nowN} → ${finalN})`, finalN === nowN);
+}
+
+// ==========================================================================
+suite('Case 15 — C7 super_admin is view-only on coaching notes');
+{
+  // Admin can VIEW Alice's coach page (super_admin bypass in requireCoachAssignment).
+  const viewRes = await admin.get(`/coach/teachers/${IDS.alice}`);
+  ok('admin can VIEW Alice\'s coach page (view-only support access)',
+     viewRes.status === 200, `HTTP ${viewRes.status}`);
+  // The new-note form is HIDDEN and the "view-only" banner shows.
+  ok('admin\'s view of coach page HIDES the new-note form',
+     !viewRes.text.includes('name="_token"'),
+     'new-note form leaked to super_admin');
+  ok('admin\'s view of coach page shows the view-only support banner',
+     viewRes.text.includes('view-only'), 'view-only banner missing');
+
+  // Admin POST create must be blocked with 403.
+  const createForm = new URLSearchParams({
+    _token: 'admin-write-' + Date.now(),
+    occurred_on: '2026-09-23',
+    glow: 'admin should not be able to write this',
+    _action: 'share',
+  });
+  const cRes = await admin.post(`/coach/teachers/${IDS.alice}/notes`, createForm);
+  ok('admin POST /notes → 403 (view-only)', cRes.status === 403, `HTTP ${cRes.status}`);
+  // Admin POST update must be blocked with 403 as well.  Grab an existing
+  // note id (any of CoachOne's on Alice).
+  const anyNote = db.prepare(
+    `SELECT id, version FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachOne, IDS.alice);
+  const uForm = new URLSearchParams({
+    _version: String(anyNote.version), occurred_on: '2026-09-23',
+    glow: 'admin should not edit', _action: 'shared_save',
+  });
+  const uRes = await admin.post(`/coach/teachers/${IDS.alice}/notes/${anyNote.id}/update`, uForm);
+  ok('admin POST /update → 403 (view-only)', uRes.status === 403, `HTTP ${uRes.status}`);
+  // Admin notify-retry must be blocked with 403.
+  const nRes = await admin.post(`/coach/teachers/${IDS.alice}/notes/${anyNote.id}/notify-retry`, new URLSearchParams({}));
+  ok('admin POST /notify-retry → 403 (view-only)', nRes.status === 403, `HTTP ${nRes.status}`);
+  // Confirm nothing was written by any of those attempts.
+  const noteVersion = db.prepare(`SELECT version FROM coaching_notes WHERE id=?`).get(anyNote.id).version;
+  ok(`note version unchanged after admin write attempts (${anyNote.version} → ${noteVersion})`,
+     noteVersion === anyNote.version);
+}
+
+// ==========================================================================
+suite('Case 16 — notification-preference merging and revocation across two account types');
+{
+  // A teacher-coach (CoachOne) sees BOTH teacher-side and coach-side kinds
+  // in her /profile.  A pure teacher (Alice) sees only teacher-side kinds.
+  const pC = await coachOne.get('/profile');
+  ok('CoachOne /profile 200', pC.status === 200);
+  ok('CoachOne /profile shows a teacher-side kind (observation_published)',
+     pC.text.includes('observation_published'));
+  ok('CoachOne /profile shows a coach-side kind (pd_deliverable_submitted)',
+     pC.text.includes('pd_deliverable_submitted'));
+  const pA = await alice.get('/profile');
+  ok('Alice /profile 200', pA.status === 200);
+  ok('Alice /profile shows the teacher coach_note kind (she is a recipient)',
+     pA.text.includes('coach_note'));
+  ok('Alice /profile does NOT show pd_deliverable_submitted (not a coach)',
+     !pA.text.includes('pd_deliverable_submitted'),
+     'coach-side kind leaked to pure teacher');
+}
+{
+  // Revocation: remove CoachOne's coach assignment to Alice.  Her /coach
+  // page still works (she has Bob), but /coach/teachers/10 must 403.
+  // Her authored notes on Alice STAY in the DB; Alice keeps seeing them.
+  const notesBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.alice).n;
+  const aliceSeesBefore = (await alice.get('/teacher')).text.includes('C1 fresh strength-only entry');
+  ok('Alice sees the C1 shared entry before revocation', aliceSeesBefore);
+  db.prepare(
+    `UPDATE assignments SET active=0 WHERE staff_id=? AND teacher_id=? AND relationship='coach'`
+  ).run(IDS.coachOne, IDS.alice);
+  const gone = await coachOne.get(`/coach/teachers/${IDS.alice}`);
+  ok('CoachOne no longer authorized on /coach/teachers/10 after assignment revoked',
+     gone.status === 403, `HTTP ${gone.status}`);
+  const notesAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.alice).n;
+  ok(`CoachOne's authored notes on Alice preserved through revocation (${notesBefore} → ${notesAfter})`,
+     notesAfter === notesBefore);
+  const aliceSeesAfter = (await alice.get('/teacher')).text.includes('C1 fresh strength-only entry');
+  ok('Alice STILL sees her previously-shared feedback after coach\'s assignment was revoked',
+     aliceSeesAfter);
+  // Restore for downstream tests.
+  db.prepare(
+    `UPDATE assignments SET active=1 WHERE staff_id=? AND teacher_id=? AND relationship='coach'`
+  ).run(IDS.coachOne, IDS.alice);
+}
+
+// ==========================================================================
+suite('Case 17 — hard-delete behavior for accounts with/without coaching history');
+{
+  // Alice IS a coaching-note recipient (many rows point to her via teacher_id).
+  // Hard-deleting her should soft-fall-back and preserve every note.
+  const aliceNotesBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE teacher_id=?`
+  ).get(IDS.alice).n;
+  ok(`Alice has ${aliceNotesBefore} coaching notes as recipient`, aliceNotesBefore > 0);
+  const rA = await admin.post(`/admin/users/${IDS.alice}/hard-delete`, new URLSearchParams({}));
+  ok('admin hard-delete Alice returns 302', rA.status === 302, `HTTP ${rA.status}`);
+  ok('Alice hard-delete → soft-fallback message mentions coaching or evaluation',
+     locHas(rA.location, 'coaching') || locHas(rA.location, 'evaluation'),
+     `loc=${rA.location}`);
+  const aliceRow = db.prepare(`SELECT active FROM users WHERE id=?`).get(IDS.alice);
+  ok('Alice row still exists (soft-deleted)', aliceRow && aliceRow.active === 0);
+  const aliceNotesAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE teacher_id=?`
+  ).get(IDS.alice).n;
+  ok(`Alice's inbound coaching notes preserved (${aliceNotesBefore} → ${aliceNotesAfter})`,
+     aliceNotesAfter === aliceNotesBefore);
+  // Restore.
+  db.prepare(`UPDATE users SET active=1 WHERE id=?`).run(IDS.alice);
+}
+{
+  // PlainTeacher (id 14) has NO coaching history, NO observations, NO PD.
+  // Hard-delete for her should ACTUALLY DELETE the row (not soft-fallback).
+  const before = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE id=?`).get(IDS.plain).n;
+  ok('PlainTeacher exists before delete', before === 1);
+  const r = await admin.post(`/admin/users/${IDS.plain}/hard-delete`, new URLSearchParams({}));
+  ok('admin hard-delete PlainTeacher returns 302', r.status === 302, `HTTP ${r.status}`);
+  const after = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE id=?`).get(IDS.plain).n;
+  ok(`PlainTeacher row is actually gone (${before} → ${after})`, after === 0);
 }
 
 // ==========================================================================

@@ -39,6 +39,19 @@ function toUtcDate(d: string): Date {
 
 export function formatDate(d: string | null | undefined): string {
   if (!d) return '—';
+  // Sept 23, 2026 (C2 correction): date-only values (YYYY-MM-DD, as posted
+  // from <input type="date">) must render as calendar dates without any
+  // time-zone conversion.  The old code called new Date('2026-09-22'),
+  // which is parsed as UTC midnight, then toLocaleDateString in Central
+  // Time shifted it back to Sept 21.  Detect the date-only shape and
+  // build the display string from its integer parts.
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.exec(String(d).trim());
+  if (dateOnly) {
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const [y, mo, day] = dateOnly[0].split('-').map(Number);
+    return `${monthNames[mo - 1]} ${day}, ${y}`;
+  }
+  // Otherwise it's a timestamp; keep the existing UTC → Central conversion.
   try {
     return toUtcDate(d).toLocaleDateString('en-US', {
       year: 'numeric', month: 'short', day: 'numeric', timeZone: APS_TZ,

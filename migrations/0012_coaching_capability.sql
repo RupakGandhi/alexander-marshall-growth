@@ -15,31 +15,52 @@
 -- assignments, observations, feedback_items, focus_areas, PD tables, or any
 -- credited hours.
 --
--- Rollback policy (NON-DESTRUCTIVE).  Coaching notes authored after launch
--- are real teacher-visible feedback that MUST NOT be lost by a code rollback.
--- If we ever need to revert this change:
+-- Rollback policy (NON-DESTRUCTIVE, no DROP).  Coaching notes authored after
+-- launch are real teacher-visible feedback that MUST be preserved through
+-- any rollback.  The runbook is:
 --
---   1. Revert the APPLICATION code to a commit that predates coach.tsx's
---      coaching-note UI.  The old code stops reading/writing coaching_notes
---      and stops treating can_coach as meaningful.  Teacher-coaches lose
---      the "My Coaching" nav, /coach access, and PD Review access — but
---      their teacher workspace, records, and hours are unchanged.
---   2. LEAVE the new tables and the users.can_coach column in place.
---      SQLite ALTER TABLE cannot drop a column without a full table rebuild
---      that would rewrite every row of users, and DROPping coaching_notes
---      would delete real feedback rows the teacher relied on.
---   3. If a future re-launch is planned, the same data becomes visible
---      again the moment the coaching UI comes back — no re-migration
---      needed.  If the rollback is permanent, an admin can hide the
---      capability with a one-line UPDATE (see below) without dropping data.
+--   Step 1.  Deploy a PATCH release (a commit on the same branch, or an
+--            explicit revert on `main` that PRESERVES the delete guard in
+--            src/routes/admin.tsx that references coaching_notes) — but
+--            NEVER a plain revert of the initial feature commit, because
+--            that revert would remove the guard and let a hard-delete of
+--            a user with authored/received coaching notes fail on a
+--            foreign-key error partway through the cascade cleanup, or
+--            (worse) succeed and cascade-delete real notes.
 --
--- Reference commands for the rollback runbook (DO NOT RUN as part of the
--- migration itself; documented here for the operator's reference only):
---   -- disable ALL coaching-capability grants without losing history:
---   UPDATE users SET can_coach=0;
---   -- to truly purge coaching content (LAST RESORT; loses teacher-visible
---   -- feedback and audit trail; requires an explicit backup first):
---   -- DROP TABLE coaching_note_audit; DROP TABLE coaching_notes;
+--            Approved rollback artifact must include a guard that either:
+--              (a) keeps the coaching_notes anchor check in the hard-delete
+--                  handler, so accounts with retained history follow the
+--                  soft-delete path exactly as they do now, OR
+--              (b) if the delete-guard code cannot be kept, temporarily
+--                  disables the hard-delete endpoint entirely.  Users
+--                  who have to be removed during the rollback window
+--                  are deactivated (active=0) instead of hard-deleted.
+--
+--   Step 2.  Only reset can_coach for the users we actually changed here.
+--            NEVER run `UPDATE users SET can_coach=0` unconditionally —
+--            that clobbers rows that were never part of this deployment.
+--            The correct disable command is:
+--
+--                UPDATE users SET can_coach = 0
+--                 WHERE id IN (13, 19);       -- the two users touched by the launch
+--
+--            (or the id list from the applied caseload change set, whichever
+--            is broader.)  Any other user's can_coach stays at whatever the
+--            operator or a separate change set left it at.
+--
+--   Step 3.  LEAVE the tables coaching_notes and coaching_note_audit and
+--            the column users.can_coach in place.  The rolled-back
+--            application code will not read from them, but the historical
+--            rows are preserved so any future re-launch can display them
+--            immediately without a data-recovery step.
+--
+-- We deliberately DO NOT include DROP TABLE or DROP COLUMN statements in
+-- this file or in the rollback runbook.  Any operator who genuinely needs
+-- to purge coaching content (which is data loss) must explicitly take a
+-- separate backup and execute the drops as a distinct, approved change —
+-- and even then the correct sequence is backup → export → drops, not the
+-- reverse.
 --
 -- The forward-only nature of this rollback plan is why the migration is
 -- kept strictly additive.
