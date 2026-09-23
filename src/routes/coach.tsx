@@ -101,28 +101,67 @@ app.get('/teachers/:id', async (c) => {
   // teacher are not visible here (visibility policy: draft = author-only,
   // shared = author + teacher).  A super_admin sees everything for support.
   //
-  // F2 (Sept 23 follow-up) — the per-note "delivery status" now comes from
-  // coaching_note_share_delivery, NOT the notifications inbox.  An admin
-  // deleting the inbox row will not re-arm the "Notification not delivered"
-  // badge; the share_delivery.status is the authoritative record of whether
-  // a first-share alert was ever sent, suppressed by preferences, or failed.
-  // COALESCE gives us the string 'never' for shared notes with no delivery
-  // record yet (should only happen for pre-migration rows).
+  // F2 + T1 (Sept 23 third follow-up) — the per-note "delivery status" is
+  // computed FROM BOTH the ledger and the notifications inbox so a coach's
+  // view of a note always reflects the actual transport-layer truth.
+  //
+  //   * raw ledger status stays authoritative for the terminal-safe cases
+  //     ('delivered', 'suppressed').  Those never get re-armed by a stale
+  //     inbox delete, and they never get "downgraded" here.
+  //   * for the intermediate/failed cases ('attempting', 'failed', 'never')
+  //     we consult the notifications table.  If an inbox row exists we
+  //     REPORT the note as delivered (delivery_status_effective='delivered')
+  //     so the UI shows the correct state immediately and does NOT hang on
+  //     "Delivery in progress" or falsely warn "Notification not delivered".
+  //     A subsequent notify-retry from THIS coach's screen will hit the
+  //     endpoint's preflight (coachNoteAlreadyDelivered) and idempotently
+  //     repair the ledger on the server — the effective state is truthful
+  //     from the very first page load, whether or not the coach clicks.
+  //
+  // This closes the T1 gap where a successful notify() followed by a
+  // ledger-UPDATE failure left the ledger stuck at 'attempting' and the
+  // coach page said "Delivery in progress" indefinitely with no way out.
   const deliveryStatus = `COALESCE((
     SELECT sd.status FROM coaching_note_share_delivery sd WHERE sd.note_id = n.id
-  ), 'never') AS delivery_status`;
+  ), 'never') AS delivery_status_raw`;
+  // Inbox-exists check for THIS specific note.  When true, the notification
+  // is provably in the recipient's inbox regardless of what the ledger says.
+  const inboxExists = `EXISTS (
+    SELECT 1 FROM notifications nx
+     WHERE nx.user_id = n.teacher_id
+       AND nx.kind = 'coach_note'
+       AND nx.entity_type = 'coaching_note'
+       AND nx.entity_id = n.id
+  ) AS inbox_delivered`;
   const notesSql = user.role === 'super_admin'
-    ? `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}
+    ? `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}, ${inboxExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
         WHERE n.teacher_id = ?
         ORDER BY n.updated_at DESC`
-    : `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}
+    : `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}, ${inboxExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
         WHERE n.teacher_id = ? AND n.author_id = ?
         ORDER BY n.updated_at DESC`;
   const notesRes = user.role === 'super_admin'
     ? await c.env.DB.prepare(notesSql).bind(teacherId).all()
     : await c.env.DB.prepare(notesSql).bind(teacherId, user.id).all();
+
+  // T1 reconciliation: derive delivery_status by combining ledger + inbox.
+  // The rules:
+  //   1. Ledger 'delivered'   → 'delivered'         (never downgrade)
+  //   2. Ledger 'suppressed'  → 'suppressed'        (terminal — recipient prefs)
+  //   3. Otherwise, IF inbox row exists → 'delivered'  (transport-truth wins)
+  //   4. Otherwise → ledger status verbatim (attempting / failed / never)
+  // This is a READ-ONLY view derivation.  Actual ledger repair still
+  // happens on the notify-retry endpoint and inside the delivery helpers'
+  // preflight — this SELECT does not write.
+  const notes = ((notesRes.results as any[]) || []).map((n) => {
+    let effective: string = n.delivery_status_raw;
+    if (effective !== 'delivered' && effective !== 'suppressed' && n.inbox_delivered) {
+      effective = 'delivered';
+    }
+    return { ...n, delivery_status: effective };
+  });
 
   const msg = c.req.query('msg');
   return c.html(<CoachTeacher
@@ -131,7 +170,7 @@ app.get('/teachers/:id', async (c) => {
     observations={obsWithFeedback}
     focusAreas={focus.results || []}
     modules={(modulesRes.results as any[]) || []}
-    coachingNotes={(notesRes.results as any[]) || []}
+    coachingNotes={notes}
     msg={msg}
   />);
 });

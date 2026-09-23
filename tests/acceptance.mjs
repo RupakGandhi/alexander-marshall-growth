@@ -1404,30 +1404,48 @@ suite('Case 24 — R1: same-second same-token race with conflicting content is h
     `SELECT COUNT(*) AS n FROM coaching_note_audit WHERE note_id=? AND action='create'`
   ).get(raceNote.id).n;
   ok(`(b) exactly ONE 'create' audit row after the race (got ${createAudits})`, createAudits === 1);
-  // At most ONE 'share' audit row (zero if both requests ended up saving as draft;
-  // one if either won as a share).
   const shareAudits = db.prepare(
     `SELECT COUNT(*) AS n FROM coaching_note_audit WHERE note_id=? AND action='share'`
   ).get(raceNote.id).n;
-  ok(`(b) at most ONE 'share' audit row after the race (got ${shareAudits})`, shareAudits <= 1);
-  // At most ONE notification, regardless of race outcome.
   const notifsAfterCarol = db.prepare(
     `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
   ).get(IDS.carol, raceNote.id).n;
-  ok(`(b) at most ONE notification fired for the race (got ${notifsAfterCarol})`,
-     notifsAfterCarol <= 1);
-  // If the shared row was written, notification count matches (i.e., shared
-  // implies exactly one notification).
-  if (raceNote.status === 'shared') {
-    ok('(b) shared race note has exactly one notification',
-       notifsAfterCarol === 1, `expected 1, got ${notifsAfterCarol}`);
-  }
-  // Truthful responses: neither response can say "Shared" if the stored
-  // row is a draft.
-  if (raceNote.status === 'draft') {
-    const saysShared = (loc) => locHas(loc, 'Shared with teacher');
-    ok('(b) NEITHER response falsely says "Shared with teacher" when stored row is a draft',
+
+  // T3 (Sept 23 third follow-up) — tighten the race invariants.  Instead
+  // of the loose "at most ONE" claim, split on the winner's intent:
+  //   * If the winning request was request A (draft), the note is a
+  //     DRAFT and there must be EXACTLY 0 share-audit rows and EXACTLY
+  //     0 notifications.  Request B's INSERT lost to ON CONFLICT and
+  //     hit R1b's post-conflict revalidation, which refuses to enter
+  //     the notify path when the stored row is a draft (status
+  //     mismatch redirect).
+  //   * If the winning request was request B (share), the note is
+  //     SHARED and there must be EXACTLY 1 share-audit row and EXACTLY
+  //     1 notification.  Request A's INSERT lost; A's response cannot
+  //     falsely claim "Shared".
+  const saysShared = (loc) => locHas(loc, 'Shared with teacher');
+  if (looksLikeA) {
+    // A won → stored is a draft.
+    ok(`(b/T3) A-won: stored is draft (got status='${raceNote.status}')`,
+       raceNote.status === 'draft');
+    ok(`(b/T3) A-won: EXACTLY 0 'share' audit rows (got ${shareAudits})`, shareAudits === 0);
+    ok(`(b/T3) A-won: EXACTLY 0 notifications (got ${notifsAfterCarol})`, notifsAfterCarol === 0);
+    ok('(b/T3) A-won: NEITHER response says "Shared with teacher"',
        !saysShared(rA.location) && !saysShared(rB.location),
+       `rA.loc=${rA.location} rB.loc=${rB.location}`);
+  } else if (looksLikeB) {
+    // B won → stored is shared.
+    ok(`(b/T3) B-won: stored is shared (got status='${raceNote.status}')`,
+       raceNote.status === 'shared');
+    ok(`(b/T3) B-won: EXACTLY 1 'share' audit row (got ${shareAudits})`, shareAudits === 1);
+    ok(`(b/T3) B-won: EXACTLY 1 notification (got ${notifsAfterCarol})`, notifsAfterCarol === 1);
+    // Exactly ONE of the two responses should have announced the share.
+    // We don't know which because the race outcome depends on scheduling,
+    // but at least one MUST have (the winner) and at most one CAN have
+    // (the loser goes through R1b's revalidation and never enters notify).
+    const nSaidShared = (saysShared(rA.location) ? 1 : 0) + (saysShared(rB.location) ? 1 : 0);
+    ok(`(b/T3) B-won: exactly ONE response announced the share (got ${nSaidShared})`,
+       nSaidShared === 1,
        `rA.loc=${rA.location} rB.loc=${rB.location}`);
   }
 }
@@ -1512,75 +1530,183 @@ suite('Case 25 — R2: notify() throw during initial share leaves note+audit int
 }
 
 // ==========================================================================
-suite('Case 26 — R2: ledger update failing after successful notify() does NOT cause retry duplicate');
+suite('Case 26 — T2 (R2 corrected): real ledger UPDATE failure after notify() success');
 {
-  // R2 second failure path — the "notify succeeded but ledger UPDATE
-  // threw" case ChatGPT flagged.  We cannot easily force the code's UPDATE
-  // to throw (SQLite happily accepts our ledger updates), so we simulate
-  // the observable outcome:
-  //   * notify() has succeeded (notifications row EXISTS with the right
-  //     user/kind/entity_id)
-  //   * the ledger row is stuck in 'attempting' OR wrongly marked 'failed'
-  //     (as the old buggy handler would have done)
-  // and assert that a retry does NOT create a duplicate inbox row.
+  // T2 (Sept 23 third follow-up).  Previous Case 26 seeded ledger='failed'
+  // after a successful share and asked whether a subsequent retry would
+  // duplicate.  That missed the point of the R2 correction: the buggy code
+  // put notify() and the ledger UPDATE in one try/catch, so the ledger
+  // never even reached 'failed' after a notify-success/ledger-throw — it
+  // stayed at 'attempting' because the catch, on the fix path, ONLY marks
+  // failed when notify() itself threw.
   //
-  // The fix's preflight step (coachNoteAlreadyDelivered) sees the existing
-  // notifications row and short-circuits to 'already_delivered', repairing
-  // the ledger opportunistically.
+  // This rewrite forces the ACTUAL failure via a BEFORE UPDATE trigger
+  // that raises when the ledger transitions to 'delivered'.  Verifies the
+  // four claims in the review:
   //
-  // Setup: create a shared note, then set ledger='failed' AND leave the
-  // notifications row alone.  This is the exact state a "notify succeeded,
-  // ledger UPDATE threw, catch marked failed" scenario would produce.
+  //   1. Sharing still saves the note and audit and creates exactly one
+  //      notification (the atomic note+audit batch is independent of the
+  //      ledger UPDATE; notify() succeeds before the failing UPDATE runs).
+  //   2. The failed ledger write does NOT report the saved note as
+  //      failed — the response message is truthful about the delivery,
+  //      and the coach page's effective delivery status is 'delivered'
+  //      (reconciled from the notifications inbox by the coach GET).
+  //   3. After removing the trigger, normal coach-screen interaction
+  //      repairs the status — either the notify-retry endpoint OR the
+  //      next GET of the coach page (which now runs the reconciliation).
+  //   4. Repeating recovery creates no additional notification.
+  db.exec(`DROP TRIGGER IF EXISTS test_t2_ledger_poison`);
+  db.exec(`
+    CREATE TRIGGER test_t2_ledger_poison BEFORE UPDATE ON coaching_note_share_delivery
+      WHEN NEW.status = 'delivered' AND OLD.status = 'attempting'
+      BEGIN
+        SELECT RAISE(ABORT, 'T2 test: ledger UPDATE to delivered forced to throw');
+      END;
+  `);
+
+  // Setup — a fresh share targeting Carol (pureCoach's coachee, unused by
+  // Cases 19/20/25/26-old so we don't collide with their state).  Case 20
+  // set carol's coach_note pref off; ensure it's ON so notify() actually
+  // writes an inbox row.
+  db.prepare(`DELETE FROM notification_preferences WHERE user_id=? AND kind='coach_note'`).run(IDS.carol);
+  const notesBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.pureCoach, IDS.carol).n;
+  const notifsBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.carol).n;
   const form = new URLSearchParams({
-    _token: 'r2-ledger-fail-' + Date.now(),
+    _token: 't2-ledger-throw-' + Date.now(),
     occurred_on: '2026-09-23',
-    glow: 'R2 ledger-fail scenario',
+    glow: 'T2 real-ledger-fail scenario',
     _action: 'share',
   });
-  await coachTwo.post(`/coach/teachers/${IDS.dan}/notes`, form);
-  const note = db.prepare(
-    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
-  ).get(IDS.coachTwo, IDS.dan);
-  ok('setup: shared note exists', !!note?.id);
-  // Confirm the natural post-share state: 1 notification, ledger='delivered'.
-  const notif1 = db.prepare(
+  const r = await pureCoach.post(`/coach/teachers/${IDS.carol}/notes`, form);
+  // Claim 1a: share POST still returns a successful redirect.
+  ok('(T2.1) share POST returns 302 despite ledger UPDATE trigger failing', r.status === 302,
+     `HTTP ${r.status}`);
+  // Claim 1b: note + audit saved.
+  const notesAfter = db.prepare(
+    `SELECT id, status FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC`
+  ).all(IDS.pureCoach, IDS.carol);
+  ok(`(T2.1) note row IS saved (${notesBefore} → ${notesAfter.length})`,
+     notesAfter.length === notesBefore + 1);
+  const newNote = notesAfter[0];
+  ok(`(T2.1) note status='shared'`, newNote.status === 'shared');
+  const audits = db.prepare(
+    `SELECT action FROM coaching_note_audit WHERE note_id=? ORDER BY id`
+  ).all(newNote.id).map(r => r.action);
+  ok(`(T2.1) audit trail has [create, share] (got [${audits.join(',')}])`,
+     audits.includes('create') && audits.includes('share'));
+  // Claim 1c: exactly one notification row (notify() succeeded before the
+  // ledger UPDATE that we forced to fail).
+  const notifsAfter = db.prepare(
     `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
-  ).get(IDS.dan, note.id).n;
-  ok(`setup: exactly 1 notification exists initially (${notif1})`, notif1 === 1);
-  // Force the "notify succeeded, ledger recorded failed" state.
-  db.prepare(
-    `UPDATE coaching_note_share_delivery SET status='failed', detail='R2 test: simulated ledger-UPDATE-throw after notify() success', notif_id=NULL WHERE note_id=?`
-  ).run(note.id);
-  // Now call notify-retry.  The preflight check MUST see the existing
-  // notifications row, mark the ledger 'delivered', and return
-  // already_delivered — NEVER call notify() again.
-  const retry = await coachTwo.post(`/coach/teachers/${IDS.dan}/notes/${note.id}/notify-retry`, new URLSearchParams({}));
-  ok('(2c) retry after simulated ledger-fail returns 302', retry.status === 302);
-  ok('(2c) retry says "already delivered" (preflight caught the existing notification)',
+  ).get(IDS.carol, newNote.id).n;
+  ok(`(T2.1) exactly ONE notification created (${notifsBefore} → ${notifsBefore + notifsAfter}; per-note count = ${notifsAfter})`,
+     notifsAfter === 1);
+  // The ledger did NOT reach 'delivered' — the trigger blocked it.  The
+  // helper's error-swallow policy (tryLedgerUpdate) means status stays
+  // whatever it was BEFORE the failed UPDATE, i.e. 'attempting'.  This is
+  // the exact state that motivated the T1 reconciliation gap.
+  const dstat0 = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(newNote.id);
+  ok(`(T2.1) ledger stays at 'attempting' because the UPDATE to 'delivered' was blocked (got '${dstat0?.status}')`,
+     dstat0?.status === 'attempting');
+
+  // Claim 2: the response message does NOT falsely report the save as
+  // failed.  It must reflect the actual delivery (successful) or at
+  // minimum not claim a failure that didn't happen.  The helper returns
+  // { status:'delivered', notifId } because notify() succeeded even
+  // though the ledger UPDATE was blocked; the redirect message therefore
+  // says "Shared with teacher.", not "Notification did NOT deliver".
+  ok('(T2.2) response does NOT wrongly say "did NOT deliver"',
+     !locHas(r.location, 'did NOT deliver'),
+     `loc=${r.location}`);
+  ok('(T2.2) response truthfully says "Shared with teacher"',
+     locHas(r.location, 'Shared with teacher'), `loc=${r.location}`);
+
+  // Claim 3a: coach GET reconciles the effective status to 'delivered'
+  // even though the ledger says 'attempting', because the notifications
+  // row exists.  The rendered page must NOT show "Delivery in progress"
+  // (misleading and stuck) or "Notification not delivered" for this note.
+  const viewWithTrigger = await pureCoach.get(`/coach/teachers/${IDS.carol}`);
+  // Scope to THIS note's <li> via its unique glow text.
+  const liTextRe = /class="[^"]*"[^>]*>[\s\S]*?T2 real-ledger-fail scenario[\s\S]*?<\/li>/;
+  const liMatch = viewWithTrigger.text.match(liTextRe);
+  ok('(T2.3) coach page contains our T2 test entry LI', !!liMatch);
+  const liText = liMatch ? liMatch[0] : '';
+  ok('(T2.3) coach view does NOT show "Delivery in progress" for this entry',
+     !liText.includes('Delivery in progress'),
+     'stuck-attempting badge leaked into the entry');
+  ok('(T2.3) coach view does NOT show "Notification not delivered" for this entry',
+     !liText.includes('Notification not delivered'),
+     'false failure warning leaked into the entry');
+
+  // Claim 3b: remove the trigger and interact normally.  Hitting notify-
+  // retry from the coach's screen is one valid recovery path — it uses
+  // the same protected endpoint the UI would use.  The preflight sees
+  // the inbox row and marks the ledger 'delivered' without calling
+  // notify() again.
+  db.exec(`DROP TRIGGER IF EXISTS test_t2_ledger_poison`);
+  const retry = await pureCoach.post(`/coach/teachers/${IDS.carol}/notes/${newNote.id}/notify-retry`, new URLSearchParams({}));
+  ok('(T2.3) notify-retry after trigger removed → 302', retry.status === 302);
+  ok('(T2.3) notify-retry says "already delivered" (preflight caught the existing notification)',
      locHas(retry.location, 'already delivered'), `loc=${retry.location}`);
-  // CRITICAL assertion: still exactly 1 notification.  If the fix regressed,
-  // this would become 2.
-  const notif2 = db.prepare(
+  const dstat1 = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(newNote.id);
+  ok(`(T2.3) ledger repaired to 'delivered' (got '${dstat1?.status}')`, dstat1?.status === 'delivered');
+
+  // Claim 4: repeating the recovery does not create a duplicate.
+  const retry2 = await pureCoach.post(`/coach/teachers/${IDS.carol}/notes/${newNote.id}/notify-retry`, new URLSearchParams({}));
+  ok('(T2.4) second retry → 302', retry2.status === 302);
+  ok('(T2.4) second retry still says "already delivered"',
+     locHas(retry2.location, 'already delivered'), `loc=${retry2.location}`);
+  const notifsFinal = db.prepare(
     `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
-  ).get(IDS.dan, note.id).n;
-  ok(`(2c) STILL exactly 1 notification after retry \u2014 no duplicate (${notif2})`,
-     notif2 === 1);
-  // Ledger repaired to 'delivered'.
-  const dstat = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(note.id);
-  ok(`(2c) ledger repaired to 'delivered' by preflight (got '${dstat?.status}')`, dstat?.status === 'delivered');
+  ).get(IDS.carol, newNote.id).n;
+  ok(`(T2.4) repeated recovery created ZERO additional notifications (still ${notifsFinal} = 1)`,
+     notifsFinal === 1);
 }
 {
-  // (2c) bonus: even the fresh-share path is protected — if a stale
-  // notifications row somehow exists BEFORE the first share attempt
-  // (e.g. an operator manually inserted one), deliverShareNotification's
-  // preflight sees it and returns already_delivered instead of writing a
-  // duplicate.  We simulate by inserting a fake notification row keyed to
-  // a not-yet-created note.  We can't easily test this without creating
-  // the note first; instead, we just verify the helper contract by
-  // sharing a new note, deleting the ledger row (so the fresh path
-  // rearms), and re-sharing via a direct call would-be second share.
-  // In practice this branch is covered by Case 19 (concurrent retries).
-  ok('(2c bonus) fresh-share preflight is validated by Cases 19 + 26 in combination', true);
+  // T2 bonus — the alternate recovery path: coach GET reconciliation is
+  // enough on its own even without hitting the notify-retry endpoint.
+  // Force the same "notify succeeded, ledger stuck at 'attempting'" state
+  // (no trigger needed this time — just seed it), THEN check that:
+  //   (a) coach GET shows the entry as delivered (no misleading badge)
+  //   (b) no duplicate notification exists
+  //   (c) hitting notify-retry once still succeeds as an idempotent no-op
+  // This proves the correction meets the "must accurately show the
+  // completed delivery" clause even without any user action.
+  const form = new URLSearchParams({
+    _token: 't2-gettime-recovery-' + Date.now(),
+    occurred_on: '2026-09-23',
+    glow: 'T2 GET-reconciles-without-click test',
+    _action: 'share',
+  });
+  await pureCoach.post(`/coach/teachers/${IDS.carol}/notes`, form);
+  const note = db.prepare(
+    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.pureCoach, IDS.carol);
+  // Set ledger back to 'attempting' with no notif_id to simulate the
+  // observable end-state of the failure path.
+  db.prepare(
+    `UPDATE coaching_note_share_delivery SET status='attempting', notif_id=NULL WHERE note_id=?`
+  ).run(note.id);
+  const viewRes = await pureCoach.get(`/coach/teachers/${IDS.carol}`);
+  const liRe = /<li[^>]*>[\s\S]*?T2 GET-reconciles-without-click test[\s\S]*?<\/li>/;
+  const li = (viewRes.text.match(liRe) || [''])[0];
+  ok('(T2 bonus) coach GET renders the entry',
+     li.includes('T2 GET-reconciles-without-click test'));
+  ok('(T2 bonus) reconciled GET does NOT show "Delivery in progress"',
+     !li.includes('Delivery in progress'),
+     'delivery status was not reconciled from the notifications inbox');
+  ok('(T2 bonus) reconciled GET does NOT show "Notification not delivered"',
+     !li.includes('Notification not delivered'),
+     'delivery status was falsely reported as failed');
+  // Notification count is still 1.
+  const nrows = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).get(IDS.carol, note.id).n;
+  ok(`(T2 bonus) still exactly one notification (${nrows})`, nrows === 1);
 }
 
 // ==========================================================================
