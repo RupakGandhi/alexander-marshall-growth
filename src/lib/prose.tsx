@@ -63,7 +63,24 @@ function parseBlocks(raw: string): Block[] {
   const blocks: Block[] = [];
   let i = 0;
 
+  // Hard safety belt.  If a bug ever leaves `i` un-advanced we would burn
+  // through the Worker CPU budget and hit Cloudflare error 1102 (which is
+  // exactly what happened Aug 16, 2026 on /coach/teachers/23 when a pasted
+  // partial pipe row matched TABLE_ROW_RE but wasn't consumed by any branch).
+  // The invariant is: every trip through the outer loop MUST advance i by
+  // at least 1.  If we detect a no-advance we forcibly consume the line as
+  // a plain paragraph line and log a warning — never spin forever.
+  const HARD_MAX_ITERS = lines.length + 10;
+  let iters = 0;
+
   while (i < lines.length) {
+    iters++;
+    if (iters > HARD_MAX_ITERS) {
+      // Unreachable in normal flow; this is the belt to a suspenders check.
+      console.warn('Prose.parseBlocks: aborting to avoid infinite loop', { at: i, len: lines.length });
+      break;
+    }
+    const startI = i;
     const line = lines[i];
 
     // Skip blank lines between blocks.
@@ -88,7 +105,13 @@ function parseBlocks(raw: string): Block[] {
         i = j;
         continue;
       }
-      // Only one pipe row — fall through, treat as paragraph.
+      // Only one pipe row — NOT a table.  Consume it as a paragraph line
+      // right here so the outer loop can't fall through into the paragraph
+      // branch below, whose guard `!TABLE_ROW_RE.test(lines[i])` would be
+      // false and leave i un-advanced (the original bug).
+      blocks.push({ kind: 'p', lines: [line.trim()] });
+      i++;
+      continue;
     }
 
     // --- BULLETED list
@@ -125,7 +148,14 @@ function parseBlocks(raw: string): Block[] {
       para.push(lines[i].trim());
       i++;
     }
-    if (para.length) blocks.push({ kind: 'p', lines: para });
+    if (para.length) {
+      blocks.push({ kind: 'p', lines: para });
+    } else if (i === startI) {
+      // Suspenders: if none of the branches consumed the line, force-consume
+      // it as a single-line paragraph rather than spin forever.
+      blocks.push({ kind: 'p', lines: [line.trim()] });
+      i++;
+    }
   }
 
   return blocks;
