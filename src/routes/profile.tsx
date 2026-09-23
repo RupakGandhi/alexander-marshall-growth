@@ -9,6 +9,25 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 app.use('*', requireAuth());
 
+// Sept 23, 2026 (R5b): compute the set of notification kinds this user
+// should be able to configure.  A pure teacher sees teacher kinds; a pure
+// coach sees coach kinds; a super_admin sees everything.  A TEACHER-COACH
+// (role='teacher' with can_coach=1) is a real combined account and gets the
+// union — their existing teacher preferences (observation_published,
+// focus_area_*, coach_note as recipient, etc.) are preserved AND the coach-
+// side kinds (pd_deliverable_submitted) show up so they can opt in/out of
+// the coach-inbox pings.  We deliberately do NOT reset any preference row —
+// this only widens the visible set on the profile page.
+function kindsFor(user: { role: string; can_coach?: number }) {
+  return NOTIFICATION_KINDS.filter((k) => {
+    if (user.role === 'super_admin') return true;
+    if (k.appliesToRoles.includes(user.role)) return true;
+    // Teacher-coaches see coach-side kinds as well.
+    if (user.role === 'teacher' && user.can_coach === 1 && k.appliesToRoles.includes('coach')) return true;
+    return false;
+  });
+}
+
 app.get('/', async (c) => {
   const user = c.get('user')!;
   const first = c.req.query('first');
@@ -16,10 +35,7 @@ app.get('/', async (c) => {
   const msg = c.req.query('msg');
   const prefs = await getPreferences(c.env.DB, user.id);
   const settings = await getUserSettings(c.env.DB, user.id);
-  // Only show kinds that apply to this role (or super_admin sees all)
-  const kinds = NOTIFICATION_KINDS.filter((k) =>
-    user.role === 'super_admin' || k.appliesToRoles.includes(user.role)
-  );
+  const kinds = kindsFor(user);
   // Devices (with user agent hint + age) so user can audit & revoke
   const devs = await c.env.DB.prepare(
     `SELECT id, user_agent, created_at, last_used_at FROM push_subscriptions WHERE user_id = ? ORDER BY last_used_at DESC, created_at DESC`
@@ -36,10 +52,8 @@ app.post('/notifications', async (c) => {
   const masterPush  = body.master_push  ? true : false;
   const masterInApp = body.master_in_app ? true : false;
   await setUserSettings(c.env.DB, user.id, masterPush, masterInApp);
-  // Per-kind
-  const kinds = NOTIFICATION_KINDS.filter((k) =>
-    user.role === 'super_admin' || k.appliesToRoles.includes(user.role)
-  );
+  // Per-kind (union for teacher-coaches — see kindsFor helper above).
+  const kinds = kindsFor(user);
   for (const k of kinds) {
     const inApp = body[`in_app_${k.kind}`] ? true : false;
     const push  = body[`push_${k.kind}`]   ? true : false;

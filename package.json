@@ -23,6 +23,7 @@
     "@hono/vite-dev-server": "^0.18.2",
     "@types/bcryptjs": "^2.4.6",
     "vite": "^6.3.5",
-    "wrangler": "^4.4.0"
+    "wrangler": "^4.4.0",
+    "better-sqlite3": "^11.5.0"
   }
 }

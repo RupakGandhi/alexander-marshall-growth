@@ -13,8 +13,36 @@
 --
 -- This migration is ADDITIVE.  It does not touch users.role, existing
 -- assignments, observations, feedback_items, focus_areas, PD tables, or any
--- credited hours.  Rollback would DROP the new tables + one column; no data
--- from the untouched tables is affected either way.
+-- credited hours.
+--
+-- Rollback policy (NON-DESTRUCTIVE).  Coaching notes authored after launch
+-- are real teacher-visible feedback that MUST NOT be lost by a code rollback.
+-- If we ever need to revert this change:
+--
+--   1. Revert the APPLICATION code to a commit that predates coach.tsx's
+--      coaching-note UI.  The old code stops reading/writing coaching_notes
+--      and stops treating can_coach as meaningful.  Teacher-coaches lose
+--      the "My Coaching" nav, /coach access, and PD Review access — but
+--      their teacher workspace, records, and hours are unchanged.
+--   2. LEAVE the new tables and the users.can_coach column in place.
+--      SQLite ALTER TABLE cannot drop a column without a full table rebuild
+--      that would rewrite every row of users, and DROPping coaching_notes
+--      would delete real feedback rows the teacher relied on.
+--   3. If a future re-launch is planned, the same data becomes visible
+--      again the moment the coaching UI comes back — no re-migration
+--      needed.  If the rollback is permanent, an admin can hide the
+--      capability with a one-line UPDATE (see below) without dropping data.
+--
+-- Reference commands for the rollback runbook (DO NOT RUN as part of the
+-- migration itself; documented here for the operator's reference only):
+--   -- disable ALL coaching-capability grants without losing history:
+--   UPDATE users SET can_coach=0;
+--   -- to truly purge coaching content (LAST RESORT; loses teacher-visible
+--   -- feedback and audit trail; requires an explicit backup first):
+--   -- DROP TABLE coaching_note_audit; DROP TABLE coaching_notes;
+--
+-- The forward-only nature of this rollback plan is why the migration is
+-- kept strictly additive.
 
 -- 1) The coaching capability flag itself.  Default 0 so nothing changes for
 --    the 32 existing users until the admin explicitly turns it on.  Existing

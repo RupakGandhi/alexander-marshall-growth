@@ -269,11 +269,21 @@ app.get('/csv', async (c) => {
   let rows: any[][] = [];
   const filename = `observations_${mode}_${new Date().toISOString().slice(0,10)}.csv`;
 
-  // Sept 23, 2026 — coaches (both pure and teacher-coaches) must never see
-  // numeric observation scores in ANY export mode.  A single flag drives the
-  // scrub across summary/full modes below; the dedicated 'scores' mode is
-  // rejected outright.
-  const isCoachExport = user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1);
+  // Sept 23, 2026 (R6a): the score scrub applies to the COACH VIEW of OTHER
+  // teachers' data.  It must NOT suppress a teacher's own scores in their
+  // own teacher-scope report — teachers (including teacher-coaches) always
+  // retain full visibility of their own evaluation data through the teacher
+  // workspace.
+  //
+  //   * user.role='coach'   → always coach-of-others (their scoping helper
+  //                           filters by relationship='coach' assignments,
+  //                           so every row is someone else).
+  //   * user.role='teacher' → scoping is teacher_id=user.id, so every row
+  //                           IS their own data — even if can_coach=1.  We
+  //                           keep the score columns intact for them.
+  //   * A hypothetical future path where a teacher-coach queries someone
+  //     else's scores would go through the coach role, not the teacher role.
+  const isCoachExport = user.role === 'coach';
 
   if (mode === 'summary') {
     headers = ['observation_id','observed_at','type','status','teacher','teacher_email','school','appraiser','subject','grade_level','location','duration_minutes','overall_summary','avg_level','scored_indicators','glow_count','grow_count','focus_area_count','next_step_count','published_at','acknowledged_at'];
@@ -301,15 +311,13 @@ app.get('/csv', async (c) => {
       ]);
     }
   } else if (mode === 'scores') {
-    // Sept 23, 2026 (Section 4 leak fix): pure coaches (role='coach') and
-    // teacher-coaches (role='teacher', can_coach=1) MUST NOT receive numeric
-    // observation scores through any export.  Their scoping to
-    // assignments.relationship='coach' correctly limited WHICH teachers they
-    // see, but this CSV mode then dumped every score anyway.  Teacher-coaches
-    // still see their OWN scores through the teacher workspace (which uses a
-    // different code path).  This block gates by role, not the role+can_coach
-    // combo, because the exporter here is the coach view of others' data.
-    if (user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1)) {
+    // Section 4 leak fix (R6a corrected): coaches acting on OTHER teachers'
+    // data must not receive numeric observation scores.  Teachers (including
+    // teacher-coaches) accessing their OWN data via the teacher scope path
+    // retain full access to their own scores.  The scoping helper filters
+    // teachers by teacher_id=user.id, so if user.role==='teacher' the export
+    // is by definition self-view.
+    if (user.role === 'coach') {
       return c.text('Coaches cannot export observation scores. Ask the principal for an evaluation report.', 403);
     }
     headers = ['observation_id','observed_at','teacher','school','appraiser','domain_code','indicator_code','indicator_name','level','level_label','evidence_note'];
@@ -395,11 +403,12 @@ app.get('/pdf', async (c) => {
   };
   // Teachers never see private notes no matter what.
   if (user.role === 'teacher' || user.role === 'coach') include.notes = false;
-  // Sept 23, 2026 (Section 4 leak fix): coaches (pure and teacher-coaches)
-  // must not receive numeric scores in the printable/PDF report either.
-  // The scoping already limits which teachers they see; this closes the
-  // score-column channel on that same set.
-  const isCoachExport = user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1);
+  // Section 4 leak fix (R6a corrected): coaches (role='coach') must not
+  // receive numeric scores in the printable/PDF report either.  Teachers —
+  // including teacher-coaches — accessing their own report retain full
+  // access to their own scores.  The scoping already restricts the query
+  // to teacher_id=user.id in the teacher path.
+  const isCoachExport = user.role === 'coach';
   if (isCoachExport) include.scores = false;
 
   const f = parseFilters(c);
@@ -627,15 +636,40 @@ function parsePdFilters(c: any): PdFilters {
 
 // Build a WHERE clause that reflects role-scoping + user filters. Returns
 // { sql, binds } that callers can splice into their own SELECT.
+//
+// Sept 23, 2026 (R6b): the assignment gate now honors relationship, not just
+// active=1.  Appraisers see enrollments where they hold the 'appraiser'
+// relationship; pure coaches see 'coach'-relationship teachers; teacher-
+// coaches (role='teacher', can_coach=1) can see PD for teachers they COACH
+// on top of their own personal PD row (union).  Nothing changes for
+// super_admin / superintendent (district-wide).
 async function pdScopeSql(db: D1Database, user: any, f: PdFilters) {
   const where: string[] = ['1=1'];
   const binds: any[] = [];
 
   // Role scoping
-  if (user.role === 'teacher') {
+  if (user.role === 'teacher' && user.can_coach === 1) {
+    // Teacher-coach: own PD + coached teachers' PD.
+    where.push(
+      `(e.teacher_id = ? OR e.teacher_id IN (
+          SELECT teacher_id FROM assignments
+           WHERE staff_id = ? AND active = 1 AND relationship = 'coach'
+        ))`
+    );
+    binds.push(user.id, user.id);
+  } else if (user.role === 'teacher') {
     where.push('e.teacher_id = ?'); binds.push(user.id);
-  } else if (user.role === 'appraiser' || user.role === 'coach') {
-    where.push(`e.teacher_id IN (SELECT teacher_id FROM assignments WHERE staff_id = ? AND active = 1)`);
+  } else if (user.role === 'appraiser') {
+    where.push(
+      `e.teacher_id IN (SELECT teacher_id FROM assignments
+                          WHERE staff_id = ? AND active = 1 AND relationship = 'appraiser')`
+    );
+    binds.push(user.id);
+  } else if (user.role === 'coach') {
+    where.push(
+      `e.teacher_id IN (SELECT teacher_id FROM assignments
+                          WHERE staff_id = ? AND active = 1 AND relationship = 'coach')`
+    );
     binds.push(user.id);
   }
 
@@ -677,6 +711,32 @@ async function pdScopeSql(db: D1Database, user: any, f: PdFilters) {
   return { where: where.join(' AND '), binds };
 }
 
+/**
+ * R6b — score-visibility helper for the PD report family.
+ *
+ * `source_score_level` is the underlying evaluation rubric level (1-4)
+ * that triggered an auto-enrollment.  It is score data derived from
+ * observation_scores and must NOT be visible to coaches acting on other
+ * teachers' rows.  Note that PD-deliverable rubric ratings (1-4 stored in
+ * pd_deliverable_scores) and PD module target_level are a DIFFERENT
+ * concept (artifact quality vs. evaluation) and remain visible to coaches
+ * — they're part of the PD review process the coach owns.
+ *
+ * Teachers viewing their own PD keep source_score_level (their own data).
+ * Teacher-coaches see it on their own rows but not on their coachees'
+ * rows; the enforcement happens at RENDER time using this predicate
+ * against each row's teacher_id.
+ */
+function coachSuppressScoreLevel(user: { role: string; can_coach?: number }): (rowTeacherId: number) => boolean {
+  if (user.role === 'coach') {
+    return () => true; // pure coaches never see it
+  }
+  if (user.role === 'teacher' && user.can_coach === 1) {
+    return (rowTeacherId: number) => rowTeacherId !== user.id ? true : false;
+  }
+  return () => false; // appraiser / super_admin / superintendent / self-teacher
+}
+
 function pdOrderBy(sort: string): string {
   switch (sort) {
     case 'verified':  return `e.verified_at DESC, e.updated_at DESC`;
@@ -695,6 +755,14 @@ app.get('/pd', async (c) => {
   const f = parsePdFilters(c);
   const { where, binds } = await pdScopeSql(c.env.DB, user, f);
   const order = pdOrderBy(f.sort);
+
+  // R6b: source_score_level exposes the numeric evaluation rubric level
+  // that triggered auto-enrollment.  That's an observation-score derivative
+  // and MUST be scrubbed for coaches (pure and teacher-coaches) acting on
+  // OTHER teachers' rows.  Teachers viewing their OWN PD keep it (they can
+  // see their own scores by definition).  We build a per-row projection
+  // helper below so both the HTML and CSV paths reason about it identically.
+  const hideSourceScoreLevel = coachSuppressScoreLevel(user);
 
   const sql = `
     SELECT
@@ -757,7 +825,14 @@ app.get('/pd', async (c) => {
        ORDER BY d.sort_order, i.sort_order`
   ).all();
 
-  return c.html(<PdReportPage user={user} f={f} rows={rows} totals={totals || {}}
+  // R6b: null out source_score_level per row before the view sees it.
+  // Doing this in the server projection keeps the template simple and
+  // guarantees the value never reaches the client — even in the JSON-ish
+  // HTML markup our SSR renders — for any row this user shouldn't see.
+  const rowsSafe = rows.map((r: any) =>
+    hideSourceScoreLevel(r.teacher_id) ? { ...r, source_score_level: null } : r,
+  );
+  return c.html(<PdReportPage user={user} f={f} rows={rowsSafe} totals={totals || {}}
     teachers={lookups.teachers} schools={lookups.schools}
     domains={(domains.results as any[]) || []} indicators={(indicators.results as any[]) || []} />);
 });
@@ -772,6 +847,7 @@ app.get('/pd.csv', async (c) => {
   const sql = `
     SELECT
       e.id AS enrollment_id, e.status, e.source, e.source_score_level,
+      e.teacher_id,
       e.created_at, e.submitted_at, e.verified_at,
       t.last_name AS t_last, t.first_name AS t_first, t.title AS t_title,
       sc.name AS school_name,
@@ -798,6 +874,11 @@ app.get('/pd.csv', async (c) => {
     : await c.env.DB.prepare(sql).all();
   const rows = (rowsRes.results as any[]) || [];
 
+  // R6b — blank Trigger Score Level for coaches on other teachers' rows.
+  // See coachSuppressScoreLevel().  Module target_level (a per-module
+  // property) is unaffected.
+  const hideSourceScoreLevel = coachSuppressScoreLevel(user);
+
   const header = [
     'Enrollment ID','Teacher','Title','School','Domain','Indicator',
     'Module','Target Level','Est. Minutes','Status','Source','Trigger Score Level',
@@ -816,7 +897,7 @@ app.get('/pd.csv', async (c) => {
     r.est_minutes ?? '',
     r.status || '',
     r.source || '',
-    r.source_score_level ?? '',
+    hideSourceScoreLevel(r.teacher_id) ? '' : (r.source_score_level ?? ''),
     r.created_at || '', r.submitted_at || '', r.verified_at || '',
     (r.verifier_first || r.verifier_last) ? `${r.verifier_first || ''} ${r.verifier_last || ''}`.trim() : '',
     r.verification_note || '',
@@ -861,13 +942,45 @@ app.get('/pd/:id', async (c) => {
   ).bind(id).first<any>();
   if (!row) return c.text('Not found', 404);
 
-  // Scope check
-  if (user.role === 'teacher' && row.teacher_id !== user.id) return c.text('Forbidden', 403);
-  if (user.role === 'appraiser' || user.role === 'coach') {
+  // R6b — scope check with relationship precision.  The old check accepted
+  // ANY active assignment, which meant an appraiser-only staff could see PD
+  // detail for a teacher they only coached (impossible in current data but
+  // possible once teacher-coaches exist), and a coach could see detail via
+  // an appraiser relationship.  Now:
+  //   appraiser        → require relationship='appraiser'
+  //   coach            → require relationship='coach'
+  //   teacher-coach    → require relationship='coach' OR self
+  //   teacher (pure)   → self only
+  //   super_admin/supt → allowed
+  const isSelf = row.teacher_id === user.id;
+  if (user.role === 'teacher' && user.can_coach === 1) {
+    if (!isSelf) {
+      const ok = await c.env.DB.prepare(
+        `SELECT 1 FROM assignments
+          WHERE teacher_id=? AND staff_id=? AND active=1 AND relationship='coach' LIMIT 1`
+      ).bind(row.teacher_id, user.id).first();
+      if (!ok) return c.text('Forbidden', 403);
+    }
+  } else if (user.role === 'teacher') {
+    if (!isSelf) return c.text('Forbidden', 403);
+  } else if (user.role === 'appraiser') {
     const ok = await c.env.DB.prepare(
-      `SELECT 1 FROM assignments WHERE teacher_id=? AND staff_id=? AND active=1 LIMIT 1`
+      `SELECT 1 FROM assignments
+        WHERE teacher_id=? AND staff_id=? AND active=1 AND relationship='appraiser' LIMIT 1`
     ).bind(row.teacher_id, user.id).first();
     if (!ok) return c.text('Forbidden', 403);
+  } else if (user.role === 'coach') {
+    const ok = await c.env.DB.prepare(
+      `SELECT 1 FROM assignments
+        WHERE teacher_id=? AND staff_id=? AND active=1 AND relationship='coach' LIMIT 1`
+    ).bind(row.teacher_id, user.id).first();
+    if (!ok) return c.text('Forbidden', 403);
+  }
+  // super_admin / superintendent → district-wide (no extra gate).
+
+  // R6b — scrub source_score_level for coaches on other teachers' rows.
+  if (coachSuppressScoreLevel(user)(row.teacher_id)) {
+    row.source_score_level = null;
   }
 
   const reflections = await c.env.DB.prepare(

@@ -349,7 +349,18 @@ app.get('/assignments', async (c) => {
      WHERE u.role='teacher' AND u.active=1 ORDER BY u.last_name, u.first_name`
   ).all();
   const appraisers = await c.env.DB.prepare(`SELECT * FROM users WHERE role IN ('appraiser','superintendent') AND active=1 ORDER BY last_name`).all();
-  const coaches = await c.env.DB.prepare(`SELECT * FROM users WHERE role='coach' AND active=1 ORDER BY last_name`).all();
+  // Sept 23, 2026 (R5a): the coaches picker on the Assignments page must
+  // include enabled teacher-coaches (role='teacher' AND can_coach=1) alongside
+  // pure coaches (role='coach') so an admin can build Miranda's or Tristae's
+  // coaching caseload here without having to change their role.  They also
+  // continue to appear in the teachers picker for appraiser assignments —
+  // that block is unchanged.
+  const coaches = await c.env.DB.prepare(
+    `SELECT * FROM users
+      WHERE active=1
+        AND (role='coach' OR (role='teacher' AND can_coach=1))
+      ORDER BY last_name`
+  ).all();
   const assignments = await c.env.DB.prepare(
     `SELECT a.*, t.first_name AS t_first, t.last_name AS t_last,
        st.first_name AS s_first, st.last_name AS s_last, st.role AS s_role
@@ -1881,7 +1892,14 @@ function AssignmentsPage({ user, teachers, appraisers, coaches, assignments, msg
                 {appraisers.map((s: any) => <option value={s.id} data-role={s.role}>{s.last_name}, {s.first_name} ({s.role})</option>)}
               </optgroup>
               <optgroup label="Coaches">
-                {coaches.map((s: any) => <option value={s.id} data-role="coach">{s.last_name}, {s.first_name}</option>)}
+                {coaches.map((s: any) => (
+                  // R5a: distinguish pure coaches from teacher-coaches so the
+                  // admin can see at a glance who's who without opening the
+                  // Users page.  Both are valid targets for a coach relationship.
+                  <option value={s.id} data-role={s.role === 'teacher' ? 'teacher-coach' : 'coach'}>
+                    {s.last_name}, {s.first_name}{s.role === 'teacher' ? ' (teacher-coach)' : ''}
+                  </option>
+                ))}
               </optgroup>
             </select>
             <div class="mt-1 text-xs">

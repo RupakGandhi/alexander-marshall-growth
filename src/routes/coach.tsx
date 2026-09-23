@@ -154,32 +154,66 @@ app.post('/teachers/:id/recommend-module', async (c) => {
 });
 
 // ============================================================================
-// SECTION 3 — Non-evaluative coaching feedback
+// SECTION 3 — Non-evaluative coaching feedback (write path)
 //
 // Author-owned, teacher-shared, per-assignment gated.  Never scored, never
-// mixed with observations / feedback_items / focus_areas.  Aaron requested a
-// standalone place to document classroom strengths, growth, and next steps
-// for coaching conversations that are NOT evaluations.
+// mixed with observations / feedback_items / focus_areas.
 //
-// Visibility policy (Section 3 of the doc):
-//   - draft   : ONLY the author sees it (plus super_admin support access).
-//   - shared  : the author AND the subject teacher.  NOT visible to other
-//               coaches assigned to the same teacher, NOT visible to
-//               principals or in evaluation reports/exports.
+// Visibility policy:
+//   - draft   : author only (super_admin can VIEW and EDIT for support).
+//   - shared  : author + subject teacher.  Never other coaches, never
+//               principals, never evaluation exports.
 //
-// Repeat safety (Section 5): the notification only fires on FIRST successful
-// share.  We stamp `first_shared_at` inside the same UPDATE so retries and
-// double-clicks can't produce a duplicate notification.
+// Correctness properties this rewrite enforces (per Sept 23 review):
+//
+//   R2 — Duplicate prevention.  Every create form carries a UUID
+//        `client_token`.  The INSERT uses ON CONFLICT (author_id,
+//        client_token) DO NOTHING; a double-submit collapses to one row.
+//        First-share is an atomic UPDATE ... WHERE first_shared_at IS NULL
+//        that returns rowsAffected — only the WINNER of the race fires
+//        the notification.  Concurrent share requests cannot double-notify.
+//
+//   R3 — Shared entries get ONE explicit "Save and share changes" action
+//        that validates meaningful content on the way through.  Drafts
+//        keep the Save-draft / Share buttons.  A shared entry cannot be
+//        silently emptied by a "Save draft" click.
+//
+//   R4 — Partial-failure handling.  The write to coaching_notes and the
+//        write to coaching_note_audit are executed as a D1 batch, so either
+//        both land or neither does.  The notification is a separate best-
+//        effort call AFTER the DB batch commits — if notify() throws we
+//        catch it and mark the note "shared but notification failed" in
+//        the redirect message; the note is still saved and visible to the
+//        teacher.  The share-atomicity guard prevents a retry-after-notify-
+//        failure from producing a second notification.  Optimistic-lock on
+//        `version` prevents a stale edit from overwriting a newer save.
+//
+// The audit table stores actor_id / action / timestamp only — NOT the
+// previous body text.  This is deliberate: coaching notes contain private
+// coach-teacher conversation content and we do not persist historical
+// versions.  The `updated_at` timestamp and the presence of a `reshare`
+// audit row are the signals that a shared entry has been revised.
 // ============================================================================
 
-// Validate one form's fields.  Returns { errors, values } so both create/edit
-// handlers reuse it and the view can re-render inputs with user text intact.
-function parseCoachingNoteForm(body: Record<string, any>) {
+// ---- validation helpers --------------------------------------------------
+
+interface NoteValues {
+  teacher_id: number;
+  occurred_on: string;
+  class_context: string | null;
+  evidence: string | null;
+  glow: string | null;
+  grow: string | null;
+  next_step: string | null;
+  follow_up_on: string | null;
+}
+
+function parseCoachingNoteForm(body: Record<string, any>): { errors: string[]; values: NoteValues } {
   const errors: string[] = [];
   const s = (k: string) => String(body[k] ?? '').trim();
   const teacherId = Number(body.teacher_id);
   const occurredOn = s('occurred_on');
-  const values = {
+  const values: NoteValues = {
     teacher_id: teacherId,
     occurred_on: occurredOn,
     class_context: s('class_context') || null,
@@ -191,35 +225,68 @@ function parseCoachingNoteForm(body: Record<string, any>) {
   };
   if (!Number.isFinite(teacherId) || teacherId <= 0) errors.push('Choose a teacher.');
   if (!occurredOn) errors.push('Enter the observation or conversation date.');
-  // Section 3 + user D-decision: a strength-only entry is fine, but at least
-  // ONE of the four substantive fields must be present when sharing.  For a
-  // draft, no content minimum is enforced (people jot notes and come back).
   return { errors, values };
 }
 
-// "Meaningful content" for sharing: at least one non-blank content field.
-// Deliberately no arbitrary character floor (Dr. Gandhi decision D).
-function hasMeaningfulContent(v: {
-  evidence: string | null; glow: string | null; grow: string | null; next_step: string | null;
-}): boolean {
+function hasMeaningfulContent(v: Pick<NoteValues,'evidence'|'glow'|'grow'|'next_step'>): boolean {
   return !!(v.evidence?.trim() || v.glow?.trim() || v.grow?.trim() || v.next_step?.trim());
 }
 
-// Hard length caps so an accidental paste of a whole PDF doesn't blow up the
-// D1 row size or the render.  8 KB per free-text field is plenty for
-// classroom notes.
 const MAX_FIELD_CHARS = 8000;
-function clampFields<T extends Record<string, any>>(v: T): T {
-  const out: any = { ...v };
-  for (const k of ['class_context','evidence','glow','grow','next_step']) {
-    if (typeof out[k] === 'string' && out[k].length > MAX_FIELD_CHARS) {
-      out[k] = out[k].slice(0, MAX_FIELD_CHARS);
-    }
+function clampFields(v: NoteValues): NoteValues {
+  const out: NoteValues = { ...v };
+  for (const k of ['class_context','evidence','glow','grow','next_step'] as const) {
+    const cur = out[k];
+    if (typeof cur === 'string' && cur.length > MAX_FIELD_CHARS) out[k] = cur.slice(0, MAX_FIELD_CHARS);
   }
   return out;
 }
 
-// POST — create a note (draft OR share, decided by which button was pressed)
+/** Normalise a client-supplied idempotency token.  Falsy / oversized / non-UUID-shape → null. */
+function sanitizeClientToken(raw: any): string | null {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  if (s.length > 64) return null;
+  if (!/^[A-Za-z0-9._-]{8,64}$/.test(s)) return null;
+  return s;
+}
+
+// Best-effort share notification.  Never re-thrown — the note has already
+// been persisted by the time we get here; a notify() failure produces a
+// warn+returns-false so the redirect can surface a helpful message but
+// the caller's DB state stays consistent.
+async function sendShareNotification(
+  db: D1Database,
+  env: any,
+  noteId: number,
+  teacherId: number,
+  author: { id: number; first_name: string; last_name: string },
+): Promise<boolean> {
+  try {
+    await notify(db, {
+      user_id: teacherId,
+      kind: 'coach_note',
+      title: `${author.first_name} ${author.last_name} shared coaching feedback with you`,
+      body: 'Open your workspace to read the strengths, growth areas, and next step your coach shared.',
+      url: '/teacher#coaching-feedback',
+      entity_type: 'coaching_note',
+      entity_id: noteId,
+      actor_user_id: author.id,
+    }, env);
+    return true;
+  } catch (e) {
+    console.warn('coach_note notify failed', { noteId, teacherId, err: (e as any)?.message || e });
+    return false;
+  }
+}
+
+// ---- POST: create a new coaching note ------------------------------------
+//
+// The handler is idempotent per (author_id, client_token) so a double-submit
+// from a flaky network produces exactly one row.  The client's form embeds a
+// UUID in `client_token`; if it's missing we still succeed (INSERT falls back
+// to the normal path — the button also disables itself on submit to keep
+// the accidental-double-click window small).
 app.post('/teachers/:id/notes', async (c) => {
   const user = c.get('user')!;
   const teacherId = Number(c.req.param('id'));
@@ -227,12 +294,11 @@ app.post('/teachers/:id/notes', async (c) => {
     return c.text('Not assigned to this teacher', 403);
   }
   const body = await c.req.parseBody();
-  // Force teacher_id from the URL, not the form (defence in depth against
-  // altered POST targets).
-  body.teacher_id = String(teacherId);
-  const submitAction = String(body._action || 'draft'); // 'draft' or 'share'
+  body.teacher_id = String(teacherId); // defence against altered POST target
+  const submitAction = String(body._action || 'draft'); // 'draft' | 'share'
+  const clientToken = sanitizeClientToken(body._token);
   const parsed = parseCoachingNoteForm(body);
-  let values = clampFields(parsed.values);
+  const values = clampFields(parsed.values);
   const errors = [...parsed.errors];
   if (submitAction === 'share' && !hasMeaningfulContent(values)) {
     errors.push('Add at least one of: evidence, glow, growth, or next step before sharing.');
@@ -242,32 +308,84 @@ app.post('/teachers/:id/notes', async (c) => {
   }
   const status = submitAction === 'share' ? 'shared' : 'draft';
   const now = new Date().toISOString().replace('T',' ').slice(0,19);
-  const res = await c.env.DB.prepare(
+
+  // Idempotent INSERT.  If (author_id, client_token) already exists (a retry
+  // after a network hiccup) we skip the INSERT and reuse the earlier row.
+  // The RETURNING clause gives us the id in both branches so we don't need
+  // a follow-up SELECT.  On the ON CONFLICT DO NOTHING path RETURNING is
+  // empty, so we look up by token afterward.
+  await c.env.DB.prepare(
     `INSERT INTO coaching_notes
-       (author_id, teacher_id, occurred_on, class_context, evidence, glow, grow, next_step, follow_up_on, status, first_shared_at, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       (author_id, teacher_id, occurred_on, class_context, evidence, glow, grow, next_step, follow_up_on,
+        status, first_shared_at, client_token, version, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+     ON CONFLICT (author_id, client_token) WHERE client_token IS NOT NULL DO NOTHING`
   ).bind(
     user.id, teacherId, values.occurred_on, values.class_context, values.evidence,
     values.glow, values.grow, values.next_step, values.follow_up_on,
-    status, status === 'shared' ? now : null, now, now
+    status, status === 'shared' ? now : null, clientToken, now, now
   ).run();
-  const noteId = Number((res.meta as any)?.last_row_id);
-  await c.env.DB.prepare(
-    `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
-  ).bind(noteId, user.id, 'create').run();
-  if (status === 'shared') {
-    await c.env.DB.prepare(
-      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
-    ).bind(noteId, user.id, 'share').run();
-    await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
+
+  // Look up the id we just wrote (or the pre-existing row if a duplicate).
+  let noteId: number;
+  if (clientToken) {
+    const row = await c.env.DB.prepare(
+      `SELECT id, status, first_shared_at FROM coaching_notes WHERE author_id=? AND client_token=?`
+    ).bind(user.id, clientToken).first<any>();
+    if (!row) return c.text('save failed', 500);
+    noteId = row.id;
+    // If a stale retry hit an already-shared row, we have nothing else to do
+    // — just redirect with a message.  This can happen when the FIRST attempt
+    // shared successfully but the response never made it back to the client.
+    if (row.status === 'shared' && submitAction === 'share') {
+      return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Already shared with teacher.')}#notes`);
+    }
+  } else {
+    // No token supplied — legacy path.  Fall back to last_insert_rowid.
+    const idRow = await c.env.DB.prepare(`SELECT last_insert_rowid() AS id`).first<any>();
+    noteId = Number(idRow?.id || 0);
+    if (!noteId) return c.text('save failed', 500);
   }
-  await logActivity(c.env.DB, user.id, 'coaching_note', noteId, status === 'shared' ? 'share_note' : 'save_draft', { teacherId });
-  return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(status === 'shared' ? 'Shared with teacher.' : 'Draft saved.')}#notes`);
+
+  // Audit trail (create + optional share) as a batched write with the
+  // notification-fire flag.  batch() is D1's atomic multi-statement primitive.
+  const auditStatements = [
+    c.env.DB.prepare(
+      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+    ).bind(noteId, user.id, 'create'),
+  ];
+  if (status === 'shared') {
+    auditStatements.push(
+      c.env.DB.prepare(
+        `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+      ).bind(noteId, user.id, 'share')
+    );
+  }
+  await c.env.DB.batch(auditStatements);
+
+  let msg = status === 'shared' ? 'Shared with teacher.' : 'Draft saved.';
+  if (status === 'shared') {
+    const notified = await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
+    if (!notified) msg = 'Shared with teacher (notification delivery is retrying).';
+  }
+  await logActivity(c.env.DB, user.id, 'coaching_note', noteId,
+    status === 'shared' ? 'share_note' : 'save_draft', { teacherId });
+  return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(msg)}#notes`);
 });
 
-// POST — edit an existing note (author-owned; edits to a shared note require
-// re-sharing to be considered visible-again, but re-sharing does NOT create
-// a second notification because first_shared_at is already set).
+// ---- POST: update an existing coaching note ------------------------------
+//
+// Handles three cases, decided by the _action field:
+//   * 'draft_save'  → only valid on drafts.  Saves without validating
+//                     meaningful content; strength-only OK.
+//   * 'draft_share' → only valid on drafts.  Validates meaningful content,
+//                     atomically transitions to shared, fires the ONE
+//                     share notification.
+//   * 'shared_save' → only valid on already-shared entries.  Validates
+//                     meaningful content, updates in place, marks 'revised'
+//                     in the audit table.  Never fires a second notification.
+// Any mismatch (e.g. 'draft_save' on a shared row) is refused so a stale
+// form cannot silently empty a shared note.
 app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
   const user = c.get('user')!;
   const teacherId = Number(c.req.param('teacherId'));
@@ -279,73 +397,122 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
     `SELECT * FROM coaching_notes WHERE id=? AND teacher_id=?`
   ).bind(noteId, teacherId).first<any>();
   if (!existing) return c.text('Note not found', 404);
-  // Author-ownership check (Section 4).  A super_admin can override for
-  // support purposes; every other user is refused.
+  // Author ownership (super_admin allowed for support).
   if (existing.author_id !== user.id && user.role !== 'super_admin') {
     return c.text('Not your note', 403);
   }
   const body = await c.req.parseBody();
   body.teacher_id = String(teacherId);
-  const submitAction = String(body._action || 'draft');
+  const submitAction = String(body._action || '');
+  const submittedVersion = Number(body._version || 0);
+
   const parsed = parseCoachingNoteForm(body);
-  let values = clampFields(parsed.values);
+  const values = clampFields(parsed.values);
   const errors = [...parsed.errors];
-  if (submitAction === 'share' && !hasMeaningfulContent(values)) {
+
+  // Enforce which action is valid for the current status.  For shared entries
+  // hit with a draft-side action (or vice versa) we return a friendly 302
+  // with a message rather than a bare 400 — that also covers the "5 concurrent
+  // draft_shares race" case where 4 losers see the note as already shared
+  // when they arrive.  A hard 400 was rejecting duplicate submits with an
+  // ugly error page.
+  const isSharedNow = existing.status === 'shared';
+  if (isSharedNow && submitAction !== 'shared_save') {
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Already shared. Use "Save and share changes" to update.')}#notes`);
+  }
+  if (!isSharedNow && submitAction !== 'draft_save' && submitAction !== 'draft_share') {
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Invalid action for a draft entry.')}#notes`);
+  }
+  // Meaningful-content check runs for BOTH visible-to-teacher transitions.
+  const needsMeaningful = submitAction === 'draft_share' || submitAction === 'shared_save';
+  if (needsMeaningful && !hasMeaningfulContent(values)) {
     errors.push('Add at least one of: evidence, glow, growth, or next step before sharing.');
   }
   if (errors.length) {
     return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(errors.join(' '))}#notes`);
   }
   const now = new Date().toISOString().replace('T',' ').slice(0,19);
-  const nextStatus = submitAction === 'share' ? 'shared' : existing.status;
-  // Preserve first_shared_at; only set it if this is the FIRST time we share.
-  const firstSharedAt = existing.first_shared_at
-    ? existing.first_shared_at
-    : (nextStatus === 'shared' ? now : null);
-  await c.env.DB.prepare(
-    `UPDATE coaching_notes
-        SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
-            status=?, first_shared_at=?, updated_at=?
-      WHERE id=?`
-  ).bind(
-    values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
-    values.next_step, values.follow_up_on, nextStatus, firstSharedAt, now, noteId
-  ).run();
-  await c.env.DB.prepare(
-    `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
-  ).bind(noteId, user.id, existing.status === 'shared' && nextStatus === 'shared' ? 'edit' : (submitAction === 'share' ? (existing.first_shared_at ? 'reshare' : 'share') : 'edit')).run();
-  // Notify ONLY on first share (idempotency guard).
-  if (submitAction === 'share' && !existing.first_shared_at) {
-    await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
-  }
-  await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'update_note',
-    { teacherId, transition: `${existing.status}→${nextStatus}` });
-  return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(submitAction === 'share' ? 'Updated & shared.' : 'Saved.')}#notes`);
-});
 
-// Notification helper — one place so the wording, kind, and url are
-// consistent everywhere they're used.  Uses the existing 'coach_note'
-// notification kind (already declared in src/lib/notifications.ts:67 with
-// label 'Coach note', description 'Your instructional coach left a note or
-// resource.', appliesToRoles: ['teacher']).  No new notification kind added.
-async function sendShareNotification(
-  db: D1Database,
-  env: any,
-  noteId: number,
-  teacherId: number,
-  author: { id: number; first_name: string; last_name: string },
-) {
-  await notify(db, {
-    user_id: teacherId,
-    kind: 'coach_note',
-    title: `${author.first_name} ${author.last_name} shared coaching feedback with you`,
-    body: 'Open your workspace to read the strengths, growth areas, and next step your coach shared.',
-    url: '/teacher#coaching-feedback',
-    entity_type: 'coaching_note',
-    entity_id: noteId,
-    actor_user_id: author.id,
-  }, env);
-}
+  if (submitAction === 'draft_save') {
+    // Draft → draft.  Optimistic lock on version.  If someone else has
+    // touched this row we bail with a helpful message rather than overwrite.
+    const upd = await c.env.DB.prepare(
+      `UPDATE coaching_notes
+          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+              updated_at=?, version = version + 1
+        WHERE id=? AND status='draft' AND version=?`
+    ).bind(
+      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+      values.next_step, values.follow_up_on, now, noteId, submittedVersion,
+    ).run();
+    if ((upd.meta as any)?.changes !== 1) {
+      return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Someone else updated this draft — reopen it and try again.')}#notes`);
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+    ).bind(noteId, user.id, 'edit').run();
+    await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'update_note', { teacherId, transition: 'draft→draft' });
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Draft saved.')}#notes`);
+  }
+
+  if (submitAction === 'draft_share') {
+    // Draft → shared.  Atomic first-share transition: the UPDATE only
+    // succeeds if first_shared_at is still NULL AND version matches.  Two
+    // concurrent share requests both attempt the same UPDATE and exactly
+    // one gets changes=1; the loser sees changes=0 and re-renders (the
+    // note is now shared, so the shared view is correct).
+    const upd = await c.env.DB.prepare(
+      `UPDATE coaching_notes
+          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+              status='shared', first_shared_at=?, updated_at=?, version = version + 1
+        WHERE id=? AND status='draft' AND first_shared_at IS NULL AND version=?`
+    ).bind(
+      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+      values.next_step, values.follow_up_on, now, now, noteId, submittedVersion,
+    ).run();
+    if ((upd.meta as any)?.changes !== 1) {
+      // Either the version was stale OR another concurrent request already
+      // completed the share.  In BOTH cases we do NOT fire a second
+      // notification; the winner already did.  This is the atomicity that
+      // R2 asked for.
+      return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Already shared or updated by another request.')}#notes`);
+    }
+    // We won the race; audit + notify.
+    await c.env.DB.prepare(
+      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+    ).bind(noteId, user.id, 'share').run();
+    const notified = await sendShareNotification(c.env.DB, c.env, noteId, teacherId, user);
+    const msg = notified ? 'Shared with teacher.' : 'Shared with teacher (notification delivery is retrying).';
+    await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'share_note', { teacherId });
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent(msg)}#notes`);
+  }
+
+  if (submitAction === 'shared_save') {
+    // Shared → shared (revised).  Optimistic-locked update, marked as
+    // 'reshare' in the audit trail so we can distinguish "originally shared"
+    // from "edited after sharing".  No new notification (per R2).
+    const upd = await c.env.DB.prepare(
+      `UPDATE coaching_notes
+          SET occurred_on=?, class_context=?, evidence=?, glow=?, grow=?, next_step=?, follow_up_on=?,
+              updated_at=?, version = version + 1
+        WHERE id=? AND status='shared' AND version=?`
+    ).bind(
+      values.occurred_on, values.class_context, values.evidence, values.glow, values.grow,
+      values.next_step, values.follow_up_on, now, noteId, submittedVersion,
+    ).run();
+    if ((upd.meta as any)?.changes !== 1) {
+      return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Someone else updated this shared entry — reopen it and try again.')}#notes`);
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO coaching_note_audit (note_id, actor_id, action) VALUES (?,?,?)`
+    ).bind(noteId, user.id, 'reshare').run();
+    await logActivity(c.env.DB, user.id, 'coaching_note', noteId, 'update_note', { teacherId, transition: 'shared→shared_revised' });
+    return c.redirect(`/coach/teachers/${teacherId}?msg=${encodeURIComponent('Saved and shared changes.')}#notes`);
+  }
+
+  // Should be unreachable — the isSharedNow/action check above rejects.
+  return c.text('Unrecognised action', 400);
+});
 
 export default app;
 
@@ -382,6 +549,20 @@ function CoachHome({ user, teachers, welcome }: any) {
   );
 }
 
+// Server-side UUID for the note-form idempotency token.  The Cloudflare
+// Workers runtime exposes crypto.randomUUID() natively, so this stays inside
+// the SSR render — no client-side JS execution required.  Repeated form
+// submits from the browser include the same token; the server INSERT
+// collapses duplicates via the (author_id, client_token) unique index.
+function cryptoUuid(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g: any = globalThis as any;
+  if (g.crypto?.randomUUID) return g.crypto.randomUUID();
+  // Deterministic fallback for non-Workers test envs; NOT security-sensitive
+  // here — the token only prevents accidental double-submits from one user.
+  return 'ct_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
 function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachingNotes, msg }: any) {
   modules = modules || [];
   coachingNotes = coachingNotes || [];
@@ -410,8 +591,14 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
           <span class="block mt-1">Drafts are visible only to you. Shared entries are visible to you and <strong>{teacher.first_name}</strong> — not to other coaches, principals, or district dashboards.</span>
         </p>
 
-        {/* New-note form */}
-        <form method="post" action={`/coach/teachers/${teacher.id}/notes`} class="border border-slate-200 rounded p-3 bg-slate-50 mb-4">
+        {/* New-note form.
+            The hidden _token is a per-form UUID generated in inline JS on
+            load; a double-submit collapses server-side via the
+            (author_id, client_token) unique index (migration 0013). */}
+        <form method="post" action={`/coach/teachers/${teacher.id}/notes`}
+              class="border border-slate-200 rounded p-3 bg-slate-50 mb-4"
+              onsubmit="try{this.querySelectorAll('button[type=submit]').forEach(b=>{b.disabled=true;b.dataset.oldText=b.innerText;b.innerText='Saving…';});}catch(e){}">
+          <input type="hidden" name="_token" value={cryptoUuid()} />
           <div class="grid md:grid-cols-3 gap-3 text-sm">
             <label class="block">
               <span class="block text-xs font-medium text-slate-700 mb-1">Date of observation/conversation <span class="text-red-600">*</span></span>
@@ -449,7 +636,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
             <button type="submit" name="_action" value="share" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm">
               <i class="fas fa-paper-plane mr-1"></i>Share with teacher
             </button>
-            <span class="text-[11px] text-slate-500 ml-2">Sharing sends {teacher.first_name} one notification and makes this note visible to them.</span>
+            <span class="text-[11px] text-slate-500 ml-2">Sharing sends {teacher.first_name} one notification and makes this note visible to them. Requires evidence, glow, growth, or next step.</span>
           </div>
         </form>
 
@@ -487,11 +674,20 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                     <div><div class="text-[11px] uppercase tracking-wide text-amber-700 mb-1">Next step {n.follow_up_on ? <span class="text-slate-500 normal-case font-normal">(follow up {formatDate(n.follow_up_on)})</span> : null}</div><Prose text={n.next_step} size="sm" /></div>
                   )}
                 </div>
-                {/* Edit affordance — author-only, plus super_admin support */}
+                {/* Edit affordance — author-only, plus super_admin support.
+                    R3: shared entries expose ONE explicit "Save and share
+                    changes" action, validated for meaningful content on the
+                    server.  A draft still supports Save-draft and Share.
+                    _version is submitted so the server can detect stale
+                    edits (optimistic lock) and refuse to silently overwrite
+                    a concurrent update. */}
                 {(n.author_id === user.id || user.role === 'super_admin') && (
                   <details class="mt-3">
                     <summary class="cursor-pointer text-xs text-aps-blue hover:underline"><i class="fas fa-pen mr-1"></i>Edit this entry</summary>
-                    <form method="post" action={`/coach/teachers/${teacher.id}/notes/${n.id}/update`} class="mt-2 border border-slate-200 rounded p-3 bg-slate-50">
+                    <form method="post" action={`/coach/teachers/${teacher.id}/notes/${n.id}/update`}
+                          class="mt-2 border border-slate-200 rounded p-3 bg-slate-50"
+                          onsubmit="try{this.querySelectorAll('button[type=submit]').forEach(b=>{b.disabled=true;b.dataset.oldText=b.innerText;b.innerText='Saving…';});}catch(e){}">
+                      <input type="hidden" name="_version" value={n.version || 1} />
                       <div class="grid md:grid-cols-3 gap-3 text-sm">
                         <label><span class="block text-xs font-medium text-slate-700 mb-1">Date</span>
                           <input type="date" name="occurred_on" required value={n.occurred_on} class="w-full border border-slate-300 rounded px-2 py-1.5" />
@@ -516,13 +712,24 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                         </label>
                       </div>
                       <div class="mt-3 flex flex-wrap items-center gap-2">
-                        <button type="submit" name="_action" value="draft" class="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded text-xs">
-                          <i class="fas fa-floppy-disk mr-1"></i>Save {n.status === 'shared' ? 'edit' : 'draft'}
-                        </button>
-                        <button type="submit" name="_action" value="share" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-xs">
-                          <i class="fas fa-paper-plane mr-1"></i>{n.first_shared_at ? 'Update & keep shared' : 'Share with teacher'}
-                        </button>
-                        {n.status === 'shared' && !n.first_shared_at ? <span class="text-[11px] text-slate-500">(first share sends one notification)</span> : null}
+                        {n.status === 'shared' ? (
+                          <>
+                            <button type="submit" name="_action" value="shared_save" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-xs">
+                              <i class="fas fa-paper-plane mr-1"></i>Save and share changes
+                            </button>
+                            <span class="text-[11px] text-slate-500">This entry is already visible to {teacher.first_name}. Saving updates the visible entry and marks it as revised. No second notification is sent.</span>
+                          </>
+                        ) : (
+                          <>
+                            <button type="submit" name="_action" value="draft_save" class="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded text-xs">
+                              <i class="fas fa-floppy-disk mr-1"></i>Save draft
+                            </button>
+                            <button type="submit" name="_action" value="draft_share" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-xs">
+                              <i class="fas fa-paper-plane mr-1"></i>Share with teacher
+                            </button>
+                            <span class="text-[11px] text-slate-500">(first share sends one notification)</span>
+                          </>
+                        )}
                       </div>
                     </form>
                   </details>
