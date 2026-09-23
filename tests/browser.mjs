@@ -76,8 +76,30 @@ async function main() {
        decodeURIComponent(url).includes('Shared with teacher'));
     ok('desktop: coach page shows the freshly-shared entry',
        bodyText.includes('Browser-driven strength-only entry'));
-    ok('desktop: entry renders occurred_on as "Sep 22, 2026" (NOT Sep 21)',
-       bodyText.includes('Sep 22, 2026') && !bodyText.includes('Sep 21, 2026'));
+    // C2 assertion, SCOPED to our specific entry.  Older acceptance cases
+    // legitimately post 2026-09-20 and 2026-09-21 entries, so a blanket
+    // "!bodyText.includes('Sep 21, 2026')" was matching on those unrelated
+    // rows.  We instead read the DOM node that wraps THIS entry (identified
+    // by our unique glow text) and assert the sibling date span reads
+    // "Sep 22, 2026".  A TZ-shift bug on THIS row would show "Sep 21, 2026"
+    // in that same scoped node.
+    const scopedDate = await page.evaluate(() => {
+      const marker = 'Browser-driven strength-only entry';
+      // Find the <li> ancestor of the DOM text node containing our marker.
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (n.nodeValue && n.nodeValue.includes(marker)) {
+          let el = n.parentElement;
+          while (el && el.tagName !== 'LI') el = el.parentElement;
+          return el ? el.textContent : null;
+        }
+      }
+      return null;
+    });
+    ok('desktop: THIS entry\'s LI renders Sep 22, 2026 (not Sep 21, 2026)',
+       scopedDate && scopedDate.includes('Sep 22, 2026') && !scopedDate.includes('Sep 21, 2026'),
+       scopedDate ? `scopedDate=${scopedDate.slice(0,200)}...` : 'entry LI not found');
     await context.close();
   }
 
@@ -90,8 +112,25 @@ async function main() {
     await page.goto(`${BASE}/teacher`);
     const bodyText = await page.textContent('body');
     ok('teacher: sees the shared entry body', bodyText.includes('Browser-driven strength-only entry'));
-    ok('teacher: renders occurred_on as "Sep 22, 2026" (NOT Sep 21)',
-       bodyText.includes('Sep 22, 2026') && !bodyText.includes('Sep 21, 2026'));
+    // Same scoped assertion as Case 1 — look for the wrapping element of the
+    // marker text on the teacher's view.  Teacher renders coaching feedback
+    // in an <article> or <li>; walk up until we find either.
+    const scopedDate = await page.evaluate(() => {
+      const marker = 'Browser-driven strength-only entry';
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (n.nodeValue && n.nodeValue.includes(marker)) {
+          let el = n.parentElement;
+          while (el && el.tagName !== 'LI' && el.tagName !== 'ARTICLE') el = el.parentElement;
+          return el ? el.textContent : null;
+        }
+      }
+      return null;
+    });
+    ok('teacher: THIS entry\'s wrapper renders Sep 22, 2026 (not Sep 21, 2026)',
+       scopedDate && scopedDate.includes('Sep 22, 2026') && !scopedDate.includes('Sep 21, 2026'),
+       scopedDate ? `scopedDate=${scopedDate.slice(0,200)}...` : 'entry wrapper not found');
     ok('teacher: shows author name (CoachOne Combined)', bodyText.includes('CoachOne Combined'));
     await context.close();
   }

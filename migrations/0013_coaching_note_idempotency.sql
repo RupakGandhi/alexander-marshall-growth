@@ -29,6 +29,11 @@
 
 ALTER TABLE coaching_notes ADD COLUMN client_token TEXT;
 ALTER TABLE coaching_notes ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+-- Sept 23 follow-up (F3): SHA-1 hex of the canonicalised (values) tuple at
+-- insert time.  A retry-post reusing the same client_token but carrying a
+-- different payload will not match this digest → the server rejects the
+-- reuse with "content changed" instead of silently sharing stale/empty text.
+ALTER TABLE coaching_notes ADD COLUMN payload_digest TEXT;
 
 -- Idempotency uniqueness is scoped per author: two different coaches happen
 -- to reuse the same UUID only if the client PRNG collides across accounts,

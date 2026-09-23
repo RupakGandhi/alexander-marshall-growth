@@ -77,6 +77,7 @@ db.pragma('foreign_keys = ON');
 // ---- WIPE only the tables our test touches; leave migration state alone ---
 // Order matters (FK-safe teardown).
 const wipeTables = [
+  'coaching_note_share_delivery',  // migration 0014 — must wipe before coaching_notes (FK dependency)
   'coaching_note_audit', 'coaching_notes',
   'notifications', 'notification_preferences', 'push_subscriptions',
   'pd_deliverable_scores', 'pd_deliverables', 'pd_reflections',

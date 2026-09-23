@@ -659,40 +659,51 @@ suite('Case 10 — Preserved teacher records/hours/observations/acknowledgment f
 // user in this state would just log back in on their next click.
 await coachOne.login();
 
-// C5a: capture CoachOne's teacher-side state BEFORE any coach activity of
-// hers touched the system.  These values must still equal the fixture's
-// seeded values after the acceptance suite runs (drafts + shares +
-// notifications for other teachers all happened above).
-const preCoachOneObs = db.prepare(
-  `SELECT status, teacher_acknowledged_at IS NOT NULL AS acked FROM observations WHERE id=101`
-).get();
-const preCoachOneEnr = db.prepare(
-  `SELECT status, hours_credited FROM pd_enrollments WHERE id=201`
-).get();
-const preCoachOneScore = db.prepare(
-  `SELECT level FROM observation_scores WHERE observation_id=101 LIMIT 1`
-).get();
+// F5a (Sept 23 follow-up): the "before" snapshot for the preservation test
+// must come from BEFORE the first coach mutation — not from a snapshot
+// taken at Case 10 time, which is after Cases 2–9 already exercised coach
+// paths for CoachOne.  We use `fixtureBaseline` captured at the top of the
+// suite (see PRE-CASE-1 block above) instead of reading DB values here.
+// The comparison is: fixture's seeded values (constants) === current DB
+// values.  If any coach activity had spilled into her teacher-side records,
+// this assertion would fail.
+//
+// The seeded constants in tests/fixture.mjs are:
+//   observation 101 : status='acknowledged', acked=1 (teacher_acknowledged_at set)
+//   observation_scores(observation_id=101) : level=3
+//   pd_enrollments(id=201) : status='verified', hours_credited=3.5
+// Any change from those exact values means coach-mode activity leaked.
+const FIXTURE_BASELINE = {
+  obs101_status: 'acknowledged',
+  obs101_acked: 1,
+  obs101_score_level: 3,
+  enr201_status: 'verified',
+  enr201_hours_credited: 3.5,
+};
 
 {
   const r = await coachOne.get('/teacher');
   ok('CoachOne /teacher after coaching activity still 200', r.status === 200);
   ok('CoachOne\'s teacher home shows PD Hours pill', r.text.includes('PD Hours This Year'));
-  // C5a: her personal seeded values are still exactly what we seeded.
+  // F5a: compare current values against the fixture's SEEDED baseline (a
+  // constant captured before any coach activity ran).  This is stronger than
+  // "current === snapshot-taken-at-Case-10" because Cases 2–9 already ran
+  // coach-mode POSTs by the time Case 10 starts.
   const nowObs = db.prepare(
     `SELECT status, teacher_acknowledged_at IS NOT NULL AS acked FROM observations WHERE id=101`
   ).get();
-  ok(`CoachOne's own observation 101 status unchanged (${preCoachOneObs.status} → ${nowObs.status})`,
-     nowObs.status === preCoachOneObs.status);
-  ok(`CoachOne's own observation acknowledgement preserved (${preCoachOneObs.acked} → ${nowObs.acked})`,
-     nowObs.acked === preCoachOneObs.acked);
+  ok(`CoachOne's own observation 101 status unchanged (fixture=${FIXTURE_BASELINE.obs101_status} → now=${nowObs.status})`,
+     nowObs.status === FIXTURE_BASELINE.obs101_status);
+  ok(`CoachOne's own observation acknowledgement preserved (fixture=${FIXTURE_BASELINE.obs101_acked} → now=${nowObs.acked})`,
+     nowObs.acked === FIXTURE_BASELINE.obs101_acked);
   const nowEnr = db.prepare(`SELECT status, hours_credited FROM pd_enrollments WHERE id=201`).get();
-  ok(`CoachOne's PD enrollment 201 status unchanged (${preCoachOneEnr.status} → ${nowEnr.status})`,
-     nowEnr.status === preCoachOneEnr.status);
-  ok(`CoachOne's credited hours preserved (${preCoachOneEnr.hours_credited} → ${nowEnr.hours_credited})`,
-     nowEnr.hours_credited === preCoachOneEnr.hours_credited);
+  ok(`CoachOne's PD enrollment 201 status unchanged (fixture=${FIXTURE_BASELINE.enr201_status} → now=${nowEnr.status})`,
+     nowEnr.status === FIXTURE_BASELINE.enr201_status);
+  ok(`CoachOne's credited hours preserved (fixture=${FIXTURE_BASELINE.enr201_hours_credited} → now=${nowEnr.hours_credited})`,
+     nowEnr.hours_credited === FIXTURE_BASELINE.enr201_hours_credited);
   const nowScore = db.prepare(`SELECT level FROM observation_scores WHERE observation_id=101 LIMIT 1`).get();
-  ok(`CoachOne's own observation score unchanged (${preCoachOneScore.level} → ${nowScore.level})`,
-     nowScore.level === preCoachOneScore.level);
+  ok(`CoachOne's own observation score unchanged (fixture=${FIXTURE_BASELINE.obs101_score_level} → now=${nowScore.level})`,
+     nowScore.level === FIXTURE_BASELINE.obs101_score_level);
   // Her /reports/pd (teacher-coach) shows own PD + coachee PD (union).
   const pd = await coachOne.get('/reports/pd');
   ok('CoachOne\'s /reports/pd includes her OWN enrollment 201',
@@ -832,33 +843,42 @@ suite('Case 13 — C1 direct-share fix: fresh POST /notes with _action=share cre
 }
 
 // ==========================================================================
-suite('Case 14 — C3b notify-retry endpoint is idempotent and view-only for super_admin');
+suite('Case 14 — F2 notify-retry recovers from a real delivery failure and is idempotent');
 {
-  // Set up: create a shared note, then DELETE the notification row so the
-  // note is "delivered notification lost" state (simulating a real notify()
-  // failure).  The GET view must show the badge, and POST notify-retry
-  // must send exactly one notification.
+  // F2 (Sept 23 follow-up): the correct way to simulate a "notification did
+  // not deliver" state is to write a FAILED row into the delivery ledger —
+  // NOT to delete the inbox row (which is now correctly IGNORED as a
+  // source-of-truth signal; see Case 19 for that assertion).
+  //
+  // Setup: create a shared note, then overwrite its delivery ledger row to
+  // status='failed' and clear the inbox row.  That's what a genuine notify()
+  // exception would have produced.  A retry must then succeed and create
+  // exactly one inbox row + flip the ledger to 'delivered'.
   const form = new URLSearchParams({
-    _token: 'c3b-notify-' + Date.now(),
+    _token: 'c14-notify-' + Date.now(),
     occurred_on: '2026-09-23',
-    glow: 'C3b notify-retry test entry',
+    glow: 'C14 notify-retry test entry',
     _action: 'share',
   });
   await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, form);
   const noteId = db.prepare(
     `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
   ).get(IDS.coachOne, IDS.alice).id;
-  // Force "notification lost": delete the row that was just created.
-  const delRes = db.prepare(
-    `DELETE FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
-  ).run(IDS.alice, noteId);
-  ok(`forced delete of the notification row (deleted ${delRes.changes})`, delRes.changes === 1);
+  // Force the "delivery failed" state.  Both writes together are what a
+  // real notify() throw would have left behind (delivery=failed, no inbox).
+  db.prepare(`DELETE FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`)
+    .run(IDS.alice, noteId);
+  const upd = db.prepare(
+    `UPDATE coaching_note_share_delivery SET status='failed', detail='simulated for C14', notif_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE note_id=?`
+  ).run(noteId);
+  ok(`forced delivery ledger to 'failed' (updated ${upd.changes})`, upd.changes === 1);
   // Coach view must show the "Notification not delivered" badge for THIS note.
   const view = await coachOne.get(`/coach/teachers/${IDS.alice}`);
-  ok('coach view shows "Notification not delivered" badge for the lost note',
+  ok('coach view shows "Notification not delivered" badge for the failed-delivery note',
      view.text.includes('Notification not delivered'),
      'badge missing');
-  // Trigger notify-retry.
+  // Trigger notify-retry — should win the atomic UPDATE status='failed' →
+  // 'attempting' flip, call notify(), and land at 'delivered'.
   const retry = await coachOne.post(`/coach/teachers/${IDS.alice}/notes/${noteId}/notify-retry`, new URLSearchParams({}));
   ok('notify-retry returns 302', retry.status === 302, `HTTP ${retry.status}`);
   ok('notify-retry redirect says "Notification sent"',
@@ -867,7 +887,9 @@ suite('Case 14 — C3b notify-retry endpoint is idempotent and view-only for sup
     `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
   ).get(IDS.alice, noteId).n;
   ok(`notify-retry re-created exactly one notification (${nowN})`, nowN === 1);
-  // Second retry must be a no-op ("Notification is already delivered").
+  const dstat = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(noteId).status;
+  ok(`delivery ledger now 'delivered' (got '${dstat}')`, dstat === 'delivered');
+  // Second retry: idempotent no-op via the ledger check.
   const retry2 = await coachOne.post(`/coach/teachers/${IDS.alice}/notes/${noteId}/notify-retry`, new URLSearchParams({}));
   ok('second notify-retry says already delivered',
      locHas(retry2.location, 'already delivered'), `loc=${retry2.location}`);
@@ -1001,6 +1023,376 @@ suite('Case 17 — hard-delete behavior for accounts with/without coaching histo
   ok('admin hard-delete PlainTeacher returns 302', r.status === 302, `HTTP ${r.status}`);
   const after = db.prepare(`SELECT COUNT(*) AS n FROM users WHERE id=?`).get(IDS.plain).n;
   ok(`PlainTeacher row is actually gone (${before} → ${after})`, after === 0);
+}
+
+// ==========================================================================
+suite('Case 18 — F1 atomic write: forced audit failure leaves NO orphan note');
+{
+  // F1 (Sept 23 follow-up) claim: note write + audit write land in ONE
+  // db.batch() transaction — either both persist or neither does.
+  // To test this we install a trigger on coaching_note_audit that RAISEs an
+  // exception on INSERT for a specific poisoned actor_id, force the write
+  // path to run, and confirm the coaching_notes row is ALSO rolled back.
+  db.exec(`
+    DROP TRIGGER IF EXISTS test_poison_audit;
+    CREATE TRIGGER test_poison_audit BEFORE INSERT ON coaching_note_audit
+      WHEN NEW.actor_id = ${IDS.coachOne}
+      BEGIN
+        SELECT RAISE(ABORT, 'poisoned audit insert for F1 test');
+      END;
+  `);
+  const notesBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.bob).n;
+  const auditBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_note_audit
+       WHERE actor_id=?
+         AND note_id IN (SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=?)`
+  ).get(IDS.coachOne, IDS.coachOne, IDS.bob).n;
+  // POST a create.  Server will attempt to run [insert note, insert audit]
+  // as one batch; the audit statement will RAISE ABORT; the batch rolls
+  // back; the client should get a 5xx (the poison trigger surfaces as an
+  // exception in the batch call, which coach.tsx does NOT catch — that's
+  // by design, so the write path fails loudly instead of pretending success).
+  const form = new URLSearchParams({
+    _token: 'f1-poison-' + Date.now(),
+    occurred_on: '2026-09-23',
+    evidence: 'F1 atomic-write test — this INSERT must roll back with the audit',
+    _action: 'draft',
+  });
+  let rStatus = 0;
+  try {
+    const r = await coachOne.post(`/coach/teachers/${IDS.bob}/notes`, form);
+    rStatus = r.status;
+  } catch (e) {
+    rStatus = -1; // network/socket-level failure counts as "not 200/302"
+  }
+  ok('poisoned create returns 5xx (not a successful 302)',
+     rStatus === 500 || rStatus === 400 || rStatus === -1,
+     `HTTP ${rStatus} — expected a failure code because the audit trigger aborts the batch`);
+  const notesAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE author_id=? AND teacher_id=?`
+  ).get(IDS.coachOne, IDS.bob).n;
+  const auditAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_note_audit
+       WHERE actor_id=?
+         AND note_id IN (SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=?)`
+  ).get(IDS.coachOne, IDS.coachOne, IDS.bob).n;
+  ok(`no orphan note row created (${notesBefore} → ${notesAfter})`, notesAfter === notesBefore);
+  ok(`no orphan audit row created (${auditBefore} → ${auditAfter})`, auditAfter === auditBefore);
+  // Clean up the poison trigger so subsequent cases (if any) aren't blocked.
+  db.exec(`DROP TRIGGER IF EXISTS test_poison_audit`);
+}
+
+// ==========================================================================
+suite('Case 19 — F2 concurrent notify-retry dedupes atomically');
+{
+  // F2 claim: two simultaneous notify-retry requests both hit
+  // POST .../notify-retry; exactly ONE wins and sends the alert; the other
+  // returns "in progress" or "already delivered".  Net notifications = 1.
+  //
+  // Setup: create a shared note whose delivery is in 'failed' state (we
+  // simulate the failure by deleting the delivery row + the inbox row and
+  // re-inserting a delivery row with status='failed', which is what a
+  // real earlier notify() throw would have produced).
+  const form = new URLSearchParams({
+    _token: 'f2-concurrent-' + Date.now(),
+    occurred_on: '2026-09-23',
+    glow: 'F2 concurrent-retry test entry',
+    _action: 'share',
+  });
+  await coachTwo.post(`/coach/teachers/${IDS.dan}/notes`, form);
+  const note = db.prepare(
+    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachTwo, IDS.dan);
+  ok('setup: shared note exists', !!note?.id);
+  // Force delivery state to 'failed' + wipe the inbox row so the retry
+  // must actually call notify().  Doing it directly in the DB simulates a
+  // prior deliverShareNotification that threw.
+  db.prepare(`DELETE FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`)
+    .run(IDS.dan, note.id);
+  db.prepare(`DELETE FROM coaching_note_share_delivery WHERE note_id=?`).run(note.id);
+  db.prepare(`INSERT INTO coaching_note_share_delivery (note_id, status, detail) VALUES (?, 'failed', 'simulated prior failure')`)
+    .run(note.id);
+  // Fire two retries concurrently.  Promise.all serializes await but issues
+  // the fetch immediately, so both HTTP requests go on the wire before
+  // either response returns.  D1 serializes the atomic UPDATE inside
+  // retryShareNotification → exactly one wins.
+  const [r1, r2] = await Promise.all([
+    coachTwo.post(`/coach/teachers/${IDS.dan}/notes/${note.id}/notify-retry`, new URLSearchParams({})),
+    coachTwo.post(`/coach/teachers/${IDS.dan}/notes/${note.id}/notify-retry`, new URLSearchParams({})),
+  ]);
+  ok('both retries responded 302', r1.status === 302 && r2.status === 302,
+     `r1=${r1.status} r2=${r2.status}`);
+  // Exactly one notification row should exist (dedupe worked).
+  const nrows = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).get(IDS.dan, note.id).n;
+  ok(`exactly one notification created despite 2 concurrent retries (got ${nrows})`, nrows === 1);
+  // Delivery row is now 'delivered' (terminal).
+  const dstat = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(note.id);
+  ok(`delivery ledger flipped to 'delivered' (got '${dstat?.status}')`, dstat?.status === 'delivered');
+  // One retry redirect should say "Notification sent"; the OTHER should
+  // say "already delivered" (winner) or "in progress" (contended lock).
+  // We accept any of those three friendly outcomes — what matters is the
+  // notification count above.
+  const okFriendly = (loc) =>
+    locHas(loc, 'Notification sent') ||
+    locHas(loc, 'already delivered') ||
+    locHas(loc, 'in progress');
+  ok(`r1 has a friendly outcome message (loc=${r1.location})`, okFriendly(r1.location));
+  ok(`r2 has a friendly outcome message (loc=${r2.location})`, okFriendly(r2.location));
+}
+{
+  // F2 second claim: deleting the inbox row does NOT re-arm a duplicate
+  // first-share.  Consequence: after we deleted notifications for the F2
+  // test above, another notify-retry should NOT create a THIRD alert —
+  // the delivery ledger is 'delivered' and the retry endpoint sees that
+  // and returns "already delivered".
+  const note = db.prepare(
+    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.coachTwo, IDS.dan);
+  // Manually delete the inbox row that the winning retry above just wrote.
+  const del = db.prepare(`DELETE FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`)
+    .run(IDS.dan, note.id);
+  ok(`inbox row deleted for the ledger test (deleted ${del.changes})`, del.changes === 1);
+  // Now retry — the delivery ledger says 'delivered'.  Endpoint should
+  // return "already delivered" WITHOUT re-inserting into notifications.
+  const r = await coachTwo.post(`/coach/teachers/${IDS.dan}/notes/${note.id}/notify-retry`, new URLSearchParams({}));
+  ok('post-delete retry returns 302', r.status === 302);
+  ok('post-delete retry says already delivered (inbox is not the source of truth)',
+     locHas(r.location, 'already delivered'), `loc=${r.location}`);
+  const nrows = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note' AND entity_id=?`
+  ).get(IDS.dan, note.id).n;
+  ok(`no new inbox row after admin-deleted delivered row (${nrows})`, nrows === 0);
+}
+
+// ==========================================================================
+suite('Case 20 — F2 notification prefs suppression is truthfully reported (not a "failure")');
+{
+  // F2 claim: when the recipient's preferences suppress the coach_note kind,
+  // deliverShareNotification returns { status:'suppressed' } — NOT a
+  // failure.  The delivery ledger records 'suppressed'; the UI shows an
+  // informational badge, not the yellow "not delivered" warning.
+  //
+  // Set Carol to opt out of coach_note.
+  db.prepare(`INSERT OR REPLACE INTO notification_preferences
+    (user_id, kind, in_app, push, updated_at) VALUES (?, 'coach_note', 0, 0, CURRENT_TIMESTAMP)`)
+    .run(IDS.carol);
+  const notifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.carol).n;
+  // PureCoach → Carol (PureCoach has Carol as assignee).  Share a fresh note.
+  const form = new URLSearchParams({
+    _token: 'f2-suppress-' + Date.now(),
+    occurred_on: '2026-09-23',
+    glow: 'F2 suppressed-notification test entry',
+    _action: 'share',
+  });
+  const r = await pureCoach.post(`/coach/teachers/${IDS.carol}/notes`, form);
+  ok('suppressed-recipient share returns 302', r.status === 302);
+  ok('suppressed-recipient share redirect mentions preferences/no alert',
+     locHas(r.location, 'turned off') || locHas(r.location, 'no alert'),
+     `loc=${r.location}`);
+  const notifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.carol).n;
+  ok(`preferences-off recipient got ZERO new notifications (${notifBefore} → ${notifAfter})`,
+     notifAfter === notifBefore);
+  const note = db.prepare(
+    `SELECT id FROM coaching_notes WHERE author_id=? AND teacher_id=? ORDER BY id DESC LIMIT 1`
+  ).get(IDS.pureCoach, IDS.carol);
+  const del = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=?`).get(note.id);
+  ok(`delivery ledger records 'suppressed' (got '${del?.status}')`, del?.status === 'suppressed');
+  // Coach view shows the "recipient opted out" info badge, not the failure warning.
+  const view = await pureCoach.get(`/coach/teachers/${IDS.carol}`);
+  ok('coach view shows "Recipient opted out" info badge',
+     view.text.includes('Recipient opted out of alerts'),
+     'suppressed-recipient badge missing');
+  ok('coach view does NOT show "Notification not delivered" for suppressed',
+     !view.text.includes('Notification not delivered'),
+     'suppressed state incorrectly rendered as a failure');
+  // A retry on a suppressed note must NOT fire an alert (preference is
+  // policy, not failure).
+  const retry = await pureCoach.post(`/coach/teachers/${IDS.carol}/notes/${note.id}/notify-retry`, new URLSearchParams({}));
+  ok('retry on suppressed note returns 302', retry.status === 302);
+  ok('retry on suppressed note explains preference (does not claim to have sent)',
+     locHas(retry.location, 'turned off'), `loc=${retry.location}`);
+  const notifFinal = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='coach_note'`
+  ).get(IDS.carol).n;
+  ok(`retry on suppressed did not create a notification (${notifAfter} → ${notifFinal})`,
+     notifFinal === notifAfter);
+  // Cleanup so Case 20's Carol pref doesn't leak into future runs.
+  db.prepare(`DELETE FROM notification_preferences WHERE user_id=? AND kind='coach_note'`).run(IDS.carol);
+}
+
+// ==========================================================================
+suite('Case 21 — F3 reused-token payload change is rejected (does not silently share stale content)');
+{
+  // F3 claim: the same client_token with a DIFFERENT payload must NOT
+  // silently promote the older stored draft.  Server rejects with a
+  // "content changed" redirect and directs the user to reopen the entry.
+  const token = 'f3-changed-payload-' + Date.now();
+  const draftForm = new URLSearchParams({
+    _token: token, occurred_on: '2026-09-23',
+    evidence: 'ORIGINAL draft content',
+    glow: 'original strengths',
+    _action: 'draft',
+  });
+  const r1 = await pureCoach.post(`/coach/teachers/${IDS.alice}/notes`, draftForm);
+  ok('first save (draft) returns 302', r1.status === 302);
+  // Retry SAME token but DIFFERENT payload.
+  const changedForm = new URLSearchParams({
+    _token: token, occurred_on: '2026-09-23',
+    evidence: 'CHANGED content — should NOT be silently accepted',
+    glow: 'changed strengths',
+    _action: 'share',
+  });
+  const r2 = await pureCoach.post(`/coach/teachers/${IDS.alice}/notes`, changedForm);
+  ok('retry with different payload returns 302', r2.status === 302);
+  ok('retry with different payload is rejected with a friendly "content changed" message',
+     locHas(r2.location, 'different content') || locHas(r2.location, 'Reopen'),
+     `loc=${r2.location}`);
+  // The stored row must still be a draft with the ORIGINAL content.
+  const stored = db.prepare(
+    `SELECT status, evidence FROM coaching_notes WHERE author_id=? AND client_token=?`
+  ).get(IDS.pureCoach, token);
+  ok(`stored row is still a draft (got status='${stored?.status}')`, stored?.status === 'draft');
+  ok(`stored evidence is ORIGINAL not CHANGED (got "${stored?.evidence?.slice(0,20)}...")`,
+     stored?.evidence?.includes('ORIGINAL'), 'stale content was silently overwritten');
+}
+{
+  // F3 second claim: teacher_id mismatch on reused token → 409.
+  const token = 'f3-teacher-mismatch-' + Date.now();
+  const draftForm = new URLSearchParams({
+    _token: token, occurred_on: '2026-09-23',
+    evidence: 'draft for Alice', glow: 'glow', _action: 'draft',
+  });
+  await pureCoach.post(`/coach/teachers/${IDS.alice}/notes`, draftForm);
+  // Reuse the token but POST to a DIFFERENT teacher.
+  const bobForm = new URLSearchParams({
+    _token: token, occurred_on: '2026-09-23',
+    evidence: 'draft for Alice', glow: 'glow', _action: 'draft',
+  });
+  const r = await pureCoach.post(`/coach/teachers/${IDS.bob}/notes`, bobForm);
+  ok('reused token on different teacher → 409 (not 302, not 500)',
+     r.status === 409, `HTTP ${r.status}`);
+}
+
+// ==========================================================================
+suite('Case 22 — F5c: principal publish + teacher acknowledge round-trip works and fires the expected notifications');
+{
+  // F5c gap closure: exercise the REAL publish + acknowledge endpoints,
+  // not a DB-only setup.  We publish a fresh observation for Dan (id=13)
+  // authored by Principal (id=2), confirm Dan gets the observation_published
+  // notification, then Dan acknowledges via POST + signature, and we
+  // confirm Principal gets the observation_acknowledged notification and
+  // the observation flips to 'acknowledged' with a signed timestamp.
+  const principal = await new Client('principal@test','Principal').login();
+  const dan = await new Client('dan@test','Dan').login();
+  // Seed a fresh draft observation for Dan.  (Bypassing the appraiser draft
+  // UI because that's not what we're testing — the publish + acknowledge
+  // POSTs are.)
+  const fwId = db.prepare(`SELECT id FROM frameworks WHERE is_active=1 LIMIT 1`).get()?.id || 1;
+  const nowSql = new Date().toISOString().replace('T',' ').slice(0,19);
+  const insId = db.prepare(`INSERT INTO observations
+    (teacher_id, appraiser_id, school_year_id, framework_id, observation_type,
+     class_context, subject, grade_level, observed_at, status, scripted_notes,
+     overall_summary, created_at, updated_at)
+    VALUES (?, 2, 1, ?, 'formal', 'F5c publish/ack test', 'Math', '8', ?, 'draft',
+      'notes', 'summary', ?, ?)`).run(IDS.dan, fwId, nowSql, nowSql, nowSql).lastInsertRowid;
+  const obsId = Number(insId);
+  // A trivial 1-pixel signature keeps the guard happy without depending
+  // on any real canvas library.
+  const sig = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  const notifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='observation_published' AND entity_id=?`
+  ).get(IDS.dan, obsId).n;
+  const pub = await principal.post(`/appraiser/observations/${obsId}/publish`, new URLSearchParams({ signature: sig }));
+  ok('principal publish returns 302', pub.status === 302, `HTTP ${pub.status}`);
+  const row1 = db.prepare(`SELECT status, published_at FROM observations WHERE id=?`).get(obsId);
+  ok('observation flipped to published',
+     row1.status === 'published' && !!row1.published_at, `status=${row1.status}`);
+  const notifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='observation_published' AND entity_id=?`
+  ).get(IDS.dan, obsId).n;
+  ok(`teacher notified of publish (${notifBefore} → ${notifAfter})`, notifAfter === notifBefore + 1);
+  // Now Dan acknowledges.
+  const ackNotifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='observation_acknowledged' AND entity_id=?`
+  ).get(IDS.principal, obsId).n;
+  const ack = await dan.post(`/teacher/observations/${obsId}/acknowledge`,
+    new URLSearchParams({ signature: sig, response: 'F5c ack response' }));
+  ok('teacher acknowledge returns 302', ack.status === 302, `HTTP ${ack.status}`);
+  const row2 = db.prepare(
+    `SELECT status, teacher_acknowledged_at, teacher_signature_data IS NOT NULL AS has_sig
+       FROM observations WHERE id=?`
+  ).get(obsId);
+  ok('observation flipped to acknowledged with a signature',
+     row2.status === 'acknowledged' && !!row2.teacher_acknowledged_at && row2.has_sig === 1,
+     `status=${row2.status} ack=${row2.teacher_acknowledged_at} sig=${row2.has_sig}`);
+  const ackNotifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='observation_acknowledged' AND entity_id=?`
+  ).get(IDS.principal, obsId).n;
+  ok(`principal notified of acknowledge (${ackNotifBefore} → ${ackNotifAfter})`,
+     ackNotifAfter === ackNotifBefore + 1);
+}
+
+// ==========================================================================
+suite('Case 23 — F5c: PD review-revise-verify-credit round-trip works and credits hours');
+{
+  // F5c gap closure: real POSTs against /pd/review/:id/verify with both
+  // action=revise and action=verify + credit_hours.  Uses Bob's PD 200
+  // (already submitted by Case 6).
+  const principal = await new Client('principal@test','Principal').login();
+  // Case 6 left enrollment 200 in status='submitted' (Bob just submitted).
+  const s0 = db.prepare(`SELECT status, hours_credited FROM pd_enrollments WHERE id=200`).get();
+  ok(`pre-revise status is 'submitted' (got '${s0.status}')`, s0.status === 'submitted');
+  // Principal requests a revision.
+  const notifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='pd_deliverable_revision' AND entity_id=?`
+  ).get(IDS.bob, 200).n;
+  const rev = await principal.post(`/pd/review/200/verify`, new URLSearchParams({
+    action: 'revise', note: 'F5c: please expand on section 2 and resubmit.',
+  }));
+  ok('review revise returns 302', rev.status === 302, `HTTP ${rev.status}`);
+  const s1 = db.prepare(`SELECT status FROM pd_enrollments WHERE id=200`).get();
+  ok(`enrollment flipped to revision state after review request (got '${s1.status}')`,
+     s1.status === 'revision' || s1.status === 'needs_revision' || s1.status === 'revision_requested' || s1.status === 'started',
+     `got status='${s1.status}'`);
+  const notifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='pd_deliverable_revision' AND entity_id=?`
+  ).get(IDS.bob, 200).n;
+  ok(`teacher notified of revision request (${notifBefore} → ${notifAfter})`,
+     notifAfter === notifBefore + 1);
+  // Teacher resubmits.
+  const resub = await bob.post(`/teacher/pd/200/submit`, new URLSearchParams({
+    title: 'F5c resubmission', body: 'F5c revised body content',
+  }));
+  ok('teacher resubmit returns 302', resub.status === 302);
+  const s2 = db.prepare(`SELECT status FROM pd_enrollments WHERE id=200`).get();
+  ok(`enrollment back to 'submitted' after resubmit (got '${s2.status}')`, s2.status === 'submitted');
+  // Principal verifies WITH credit hours.
+  const hoursBefore = Number(db.prepare(`SELECT hours_credited FROM pd_enrollments WHERE id=200`).get().hours_credited || 0);
+  const verifNotifBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='pd_deliverable_verified' AND entity_id=?`
+  ).get(IDS.bob, 200).n;
+  const ver = await principal.post(`/pd/review/200/verify`, new URLSearchParams({
+    action: 'verify', credit_hours: '2.5', note: 'F5c approved',
+  }));
+  ok('review verify returns 302', ver.status === 302);
+  const s3 = db.prepare(`SELECT status, hours_credited FROM pd_enrollments WHERE id=200`).get();
+  ok(`enrollment flipped to verified (got '${s3.status}')`, s3.status === 'verified' || s3.status === 'completed',
+     `got status='${s3.status}'`);
+  ok(`credited hours moved from ${hoursBefore} → ${s3.hours_credited} (expected 2.5)`,
+     Number(s3.hours_credited) === 2.5);
+  const verifNotifAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='pd_deliverable_verified' AND entity_id=?`
+  ).get(IDS.bob, 200).n;
+  ok(`teacher notified of verification (${verifNotifBefore} → ${verifNotifAfter})`,
+     verifNotifAfter === verifNotifBefore + 1);
 }
 
 // ==========================================================================

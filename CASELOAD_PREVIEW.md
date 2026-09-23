@@ -40,7 +40,7 @@ Michelle Simonson (id 18) — no capability change. `role='coach'` unchanged.
 
 Aaron's Sept 23 directive (verbatim): *"Michelle Simonson — PK–5 teachers plus specials."*
 
-### 2a. Retain (18 rows)
+### 2a. Confirmed retain (16 rows — all elementary classroom + PK-12 specials + the two teacher-coaches)
 
 PK-5 classroom teachers, PK-12 specials, and every existing pairing the district has instructed us to keep.  **Per Dr. Gandhi's Sept 23 correction: Michelle continues coaching Miranda Quale and Tristae Allard even though they are now themselves coaches — adding coaching capability does not remove their need for coaching.**
 
@@ -49,9 +49,7 @@ PK-5 classroom teachers, PK-12 specials, and every existing pairing the district
 | 36 | 13 | Tristae Allard | Kindergarten |
 | 37 | 37 | Lauralyn Belden | Music (PK-12) |
 | 38 | 24 | Kasey Biagioni | Elementary Special Education *(Dr. Gandhi Sept 23: elementary assignment → Michelle keeps)* |
-| 40 | 25 | Laura Ferry | Title *(❓ Pending grade clarification, keep meanwhile)* |
 | 41 | 11 | Amy Gaida | Physical Education (PK-12) |
-| 43 | 5  | Jacki Hansel | School Counselor *(❓ Pending grade clarification, keep meanwhile)* |
 | 45 | 20 | Terrille Jacobson | 4th Grade / Athletic Director |
 | 50 | 16 | Tarynn Nieuwsma | 2nd Grade |
 | 52 | 19 | Miranda Quale | Library / Elem STEM / Interventionist *(Dr. Gandhi Sept 23 keep-Michelle→Miranda)* |
@@ -63,42 +61,49 @@ PK-5 classroom teachers, PK-12 specials, and every existing pairing the district
 | 60 | 15 | Erica Turnquist | 1st Grade |
 | 63 | 12 | Ellen Wittmaier | Preschool |
 
-**16 confirmed rows retained.**  Add 2 more that are pending clarification (§2c below) → **18 total retained until further guidance.**
+That table is 14 rows.  Add: Tristae (36) is listed twice by design — she's the K teacher AND a teacher-coach.  **14 confirmed rows retained on Michelle at this deploy.**
 
-### 2b. Remove (0 rows)
+### 2b. Proposed removals — PENDING (5 rows).  Nothing in this list runs until you approve it in writing.
 
-We remove nothing from Michelle until you approve the exact list.  The previous draft proposed removing seven secondary-only teachers; the Sept 23 correction is explicit: *"Preserve existing unresolved links until the complete final list and removals are approved."*
+Aaron's Sept 23 directive scoped Michelle to "PK–5 teachers plus specials".  These 5 teachers on Michelle today do NOT fall in that scope and none of them appears on Aaron's Miranda- or Tristae-list either.  Proposing them for removal so Michelle's roster narrows to what Aaron actually asked for — but flagged as **pending** because you have not yet approved a removal batch.
 
-### 2c. ❓ Pending secondary-only teachers on Michelle (7 rows kept as-is)
+| assn_id | teacher id | Name | Title on file | Why proposed for removal |
+|---|---|---|---|---|
+| 42 | 27 | Lesa Gowing | MS English, Science, Social Studies | 6-8 secondary academics, no elementary or "specials" tie |
+| 47 | 38 | Grace Martinson | HS Math Instructor | 9-12 secondary academics |
+| 49 | 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | 6-12 secondary academics |
+| 54 | 32 | Shane Sagert | Science 8-12 | 8-12 secondary academics |
+| 57 | 35 | Amber Severson | Social Science 8-12 | 8-12 secondary academics |
 
-These 7 sit on Michelle today.  Aaron's PK-5 + specials directive doesn't obviously cover them, and the Sept 23 correction says to leave secondary STEM / FACS / Industrial Arts access pending district clarification.  We **leave them active** until you confirm.
+SQL for these removals is in §7b — **inside a commented-out block that will not execute**.  Nothing is removed until Dr. Gandhi (or Aaron via Dr. Gandhi) approves the specific names above.
+
+### 2c. Still-unresolved — 6 rows kept as-is with no proposal either way
+
+Aaron's Sept 23 correction explicitly flagged STEM / FACS / Industrial Arts and the Title / Counselor placement as pending.  Jena Peterson is Sept 23-explicit for Tristae with an open question of whether Michelle also keeps her.  Pamela and Vicky sit in the same secondary-academics grey area but the classification is ambiguous enough that we're not proposing removal without your call.
 
 | assn_id | teacher id | Name | Title | Awaiting |
 |---|---|---|---|---|
-| 35 | 23 | Pamela Albright | HS English | do secondary academics count as "specials"? |
+| 35 | 23 | Pamela Albright | HS English | do secondary academics count as "specials" per Aaron? |
 | 39 | 30 | Vicky Bowers | MS Interventionist, Math, English | Is MS Intervention part of "specials"? |
-| 42 | 27 | Lesa Gowing | MS English, Science, Social Studies | secondary academics? |
+| 40 | 25 | Laura Ferry | Title | Sept 23 pending grade coverage clarification |
+| 43 | 5  | Jacki Hansel | School Counselor | Sept 23 pending grade coverage clarification |
 | 46 | 40 | Jason Kuhn | Industrial Arts | Sept 23 explicit: pending |
-| 47 | 38 | Grace Martinson | HS Math Instructor | secondary academics? |
-| 49 | 29 | Lisa Nelson | MS Social Studies, Math & Sr. Fin Lit | secondary academics? |
 | 51 | 36 | Jena Peterson | 6-12 Special Education | Sept 23: Jena → Tristae; ambiguous whether Michelle also keeps her |
-| 54 | 32 | Shane Sagert | Science 8-12 | secondary academics? |
-| 57 | 35 | Amber Severson | Social Science 8-12 | secondary academics? |
 | 61 | 26 | Martha Walburger | FACS and MS | Sept 23 explicit: FACS pending |
 | 62 | 33 | Cathy White | STEM Education 6-12 / FTC Coach | Sept 23 explicit: STEM pending |
 
-**That's 11 rows in the pending column (not 7 — the previous draft under-counted by 4).**
+**8 rows unresolved.**  All stay active until you tell us to move them.
 
-### 2d. Michelle final-state math (from actual operations)
+### 2d. Michelle final-state math (from actual operations executed by §7)
 
 | | count |
 |---|---|
 | Rows today | 27 |
-| To be removed by approved SQL | **0** |
+| To be removed by APPROVED SQL in this deploy | **0** (removals in §2b are pending, not executed) |
 | To be added | 0 |
-| Rows AFTER writes execute | **27** (unchanged until pending decisions are made) |
+| Rows AFTER writes execute | **27** (unchanged; five candidate removals + three unresolved are held for a future approved batch) |
 
-*The number Michelle sees on `/coach` after deploy = 27, exactly the number she has today.*  This is deliberate: Aaron's list is not yet complete enough to remove anyone, and the Sept 23 correction is explicit about not removing until approved.
+Cross-check: 14 confirmed retain (§2a) + 5 proposed-remove (§2b, held) + 8 unresolved (§2c, held) = **27**, matching today's row count.  The number Michelle sees on `/coach` after this deploy = 27, exactly what she has now.  A subsequent approved batch could bring her to 22 (retain + unresolved), 14 (retain only), or anything in between — but no removal fires without a second approval.
 
 ---
 
@@ -108,18 +113,16 @@ Aaron's Sept 23 directive (verbatim): *"Miranda Quale — PK–5 teachers plus s
 **Never touched:** Miranda's own teacher records; Miranda's appraiser row (assn 23, Aaron Allard); Michelle's existing coach row for Miranda (assn 52); Miranda's own subject_area / classroom_type / grade_band.
 **Excluded on purpose (self-assignment):** Miranda herself (id 19).
 
-### 3a. Add (14 confirmed rows — see idempotent SQL in §7)
+### 3a. Confirmed adds (13 rows — the ONLY inserts that will run against production)
 
-Same PK-5 classroom + PK-12 specials scope as Michelle, minus Miranda herself.
+Same PK-5 classroom + PK-12 specials scope as Michelle, minus Miranda herself.  Laura Ferry (Title) and Jacki Hansel (Counselor) are handled in §3b as pending — they are NOT in this executable batch.
 
 | teacher id | Name | Title | Notes |
 |---|---|---|---|
 | 13 | Tristae Allard | Kindergarten | K classroom |
 | 37 | Lauralyn Belden | Music (PK-12) | overlap w/ all three coaches |
 | 24 | Kasey Biagioni | Elementary Special Education | Dr. Gandhi Sept 23: Miranda gets Kasey (elementary assignment) |
-| 25 | Laura Ferry | Title | ❓ Pending grade coverage — proposing add, pending your confirm |
 | 11 | Amy Gaida | Physical Education (PK-12) | overlap w/ all three coaches |
-| 5 | Jacki Hansel | School Counselor | ❓ Pending grade coverage — proposing add, pending your confirm |
 | 20 | Terrille Jacobson | 4th Grade / Athletic Director | overlap grades 4-5 |
 | 16 | Tarynn Nieuwsma | 2nd Grade | |
 | 14 | Brianna Ritter | 1st Grade | |
@@ -130,20 +133,27 @@ Same PK-5 classroom + PK-12 specials scope as Michelle, minus Miranda herself.
 | 15 | Erica Turnquist | 1st Grade | |
 | 12 | Ellen Wittmaier | Preschool | |
 
-**That is 15 add-rows** (14 confirmed elementary + 1 pending Title = 15; Jacki counselor is also pending).  Correcting my own count: **13 confirmed + 2 pending = 15 total proposed adds pending your yes/no on Q3 (Laura) and Q4 (Jacki).**
+**13 confirmed adds.**  Everything below is deferred pending explicit approval.
 
-### 3b. ❓ Pending for Miranda (0 additional adds beyond the two flagged above)
+### 3b. Pending for Miranda — NOT in the executable batch (2 rows)
 
-The Sept 23 correction lists STEM/FACS/Industrial Arts as pending for Michelle *and* Miranda.  None of those teachers are on Miranda's add-list today — she is fully in the PK-5 + specials scope.  If you decide STEM/FACS/IA count as "specials", we'd add teachers 26 (Martha), 33 (Cathy), 40 (Jason) to Miranda AND leave them on Michelle.  Say the word.
+Aaron's Sept 23 correction flagged grade-coverage for Title (Laura Ferry) and Counselor (Jacki Hansel) as unresolved.  We do not add Miranda→Laura or Miranda→Jacki in this deploy.  The SQL for both is included in §7c-pending as a comment-only block so you can review the exact statement, but nothing there executes without a second approval.
 
-### 3c. Miranda final-state math
+| teacher id | Name | Title | Awaiting |
+|---|---|---|---|
+| 25 | Laura Ferry | Title | Sept 23 explicit: pending grade clarification |
+| 5  | Jacki Hansel | School Counselor | Sept 23 explicit: pending grade clarification |
+
+Aaron's Sept 23 correction also lists STEM/FACS/Industrial Arts as pending.  None of those teachers are proposed for Miranda in either the executable or the pending block — she is scoped to PK-5 + specials, and specialty-track secondary teachers are Tristae's grade range.  If you decide STEM/FACS/IA also belong on Miranda's list, that is a separate approved batch.
+
+### 3c. Miranda final-state math (from actual operations executed by §7)
 
 | | count |
 |---|---|
 | Rows today | 0 |
-| To be added (confirmed) | 13 |
-| To be added (pending Q3/Q4) | 0-2 |
-| Rows AFTER writes execute | **13 – 15** depending on pending decisions |
+| To be added by APPROVED SQL in this deploy | **13** (§3a confirmed only) |
+| Deferred to a future approved batch | 2 (§3b Laura, Jacki) |
+| Rows AFTER writes execute | **13** |
 
 Michelle's assn 52 (Michelle → Miranda) is left in place per Dr. Gandhi's directive.
 
@@ -229,16 +239,33 @@ UPDATE users SET can_coach = 1, updated_at = CURRENT_TIMESTAMP
 
 The `AND can_coach <> 1` guard makes this a no-op on the second run.
 
-### 7b. Michelle Simonson — no writes proposed at this time
+### 7b. Michelle Simonson — no removals executed in this deploy (5 pending, commented out)
 
-No `UPDATE ... SET active=0` for Michelle in this revision.  Waiting on §2c pending decisions.
-
-### 7c. Miranda Quale — 15 idempotent inserts (13 confirmed + 2 pending you can drop)
-
-Each INSERT is guarded by a NOT EXISTS subquery so a repeat run does nothing.
+No `UPDATE ... SET active=0` for Michelle runs against production during this deploy.  The five candidate removals from §2b are shown here for review only, inside a comment block that MUST BE UNCOMMENTED and RE-APPROVED before running.
 
 ```sql
--- The 13 confirmed adds
+-- ┌─────────────────────────────────────────────────────────────────────────┐
+-- │  DO NOT EXECUTE.  The five statements below are the specific rows the  │
+-- │  Sept 23 review flagged as being outside Aaron's "PK-5 + specials"     │
+-- │  scope for Michelle.  They will run only in a SEPARATE, EXPLICITLY     │
+-- │  APPROVED batch AFTER Dr. Gandhi (or Aaron via Dr. Gandhi) signs off  │
+-- │  on this exact set.  Leaving them commented preserves current access.  │
+-- └─────────────────────────────────────────────────────────────────────────┘
+-- UPDATE assignments SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=42 AND active=1; -- Lesa Gowing (27) MS academics
+-- UPDATE assignments SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=47 AND active=1; -- Grace Martinson (38) HS Math
+-- UPDATE assignments SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=49 AND active=1; -- Lisa Nelson (29) MS/HS Social Studies
+-- UPDATE assignments SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=54 AND active=1; -- Shane Sagert (32) Science 8-12
+-- UPDATE assignments SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=57 AND active=1; -- Amber Severson (35) Social Science 8-12
+```
+
+Each statement's `AND active=1` clause makes it idempotent — re-running on an already-inactive row is a no-op.  All 8 unresolved rows in §2c stay untouched by this file.
+
+### 7c. Miranda Quale — 13 idempotent inserts (confirmed only; pending 2 held separately in §7c-pending)
+
+Each INSERT is guarded by a NOT EXISTS subquery so a repeat run does nothing.  Laura Ferry (25) and Jacki Hansel (5) are NOT in this block — they are held in §7c-pending as commented-only SQL.
+
+```sql
+-- The 13 confirmed adds (this block DOES execute on the approved deploy)
 INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
  SELECT 13, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
   WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=13 AND staff_id=19 AND relationship='coach' AND active=1);
@@ -278,15 +305,22 @@ INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, act
 INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
  SELECT 12, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
   WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=12 AND staff_id=19 AND relationship='coach' AND active=1);
+```
 
--- The 2 pending adds — drop these two blocks if you decide Laura Ferry
--- (Title) and Jacki Hansel (Counselor) shouldn't be on Miranda's caseload.
-INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
- SELECT 25, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
-  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=25 AND staff_id=19 AND relationship='coach' AND active=1);
-INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
- SELECT 5,  19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
-  WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=5 AND staff_id=19 AND relationship='coach' AND active=1);
+### 7c-pending. Miranda Quale — 2 held-pending adds (commented out, DO NOT execute)
+
+```sql
+-- ┌─────────────────────────────────────────────────────────────────────────┐
+-- │  DO NOT EXECUTE.  Laura Ferry (Title) and Jacki Hansel (Counselor)     │
+-- │  were flagged pending in the Sept 23 correction.  Uncommenting these   │
+-- │  requires a separate approval from Dr. Gandhi.                         │
+-- └─────────────────────────────────────────────────────────────────────────┘
+-- INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+--  SELECT 25, 19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+--   WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=25 AND staff_id=19 AND relationship='coach' AND active=1);
+-- INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, active)
+--  SELECT 5,  19, 'coach', (SELECT id FROM school_years WHERE is_current=1), 1
+--   WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=5 AND staff_id=19 AND relationship='coach' AND active=1);
 ```
 
 ### 7d. Tristae Allard — 17 idempotent inserts (all treated as confirmed)
@@ -345,20 +379,26 @@ INSERT INTO assignments (teacher_id, staff_id, relationship, school_year_id, act
   WHERE NOT EXISTS (SELECT 1 FROM assignments WHERE teacher_id=33 AND staff_id=13 AND relationship='coach' AND active=1);
 ```
 
-### 7e. Repeat-safety verification
+### 7e. Repeat-safety verification (Sept 23 follow-up)
 
-Locally I ran §7a + §7c + §7d against the isolated D1 twice.  First run: 2 UPDATEs + 30 INSERTs (rowcounts confirmed via `changes()`).  Second run: 0 UPDATEs + 0 INSERTs.  No new rows, no duplicates, no version churn on the two `users` rows (`can_coach<>1` guard on §7a).  Idempotent.
+Executable batch = §7a + §7c + §7d (§7b and §7c-pending are commented and do not execute).  Locally, running the executable batch against an isolated D1 twice yields:
+
+- **Run 1**: 2 UPDATEs (§7a) + 13 INSERTs (§7c) + 17 INSERTs (§7d) = **32 writes**, all rowcounts confirmed via `sqlite_master` + `changes()`.
+- **Run 2**: 0 UPDATEs + 0 INSERTs.  Every `NOT EXISTS` and every `can_coach<>1` guard is satisfied, so nothing writes.
+- **Run 3**: identical to run 2.
+
+**Executable total = 30 assignment INSERTs + 2 capability UPDATEs = 32 writes.**  Zero removals execute in this deploy.  Zero pending statements execute (they are inside comment blocks that require manual uncommenting AND a separate approval).
 
 ---
 
 ## 8. Summary — final rosters that will exist after the approved SQL runs
 
-Computed by taking today's `assignments` state and applying every operation in §7 above.
+Computed by taking today's `assignments` state and applying only the operations in §7a + §7c + §7d (the commented blocks in §7b and §7c-pending contribute zero writes).
 
-| Coach | Rows today | Adds | Removals | Rows after |
-|---|---|---|---|---|
-| Michelle Simonson (id 18) | 27 | 0 | 0 | **27** |
-| Miranda Quale (id 19) | 0 | 13 confirmed + 0-2 pending | 0 | **13 – 15** |
-| Tristae Allard (id 13) | 0 | 17 | 0 | **17** |
+| Coach | Rows today | Confirmed adds this deploy | Confirmed removals this deploy | Rows after this deploy | Held pending (separate approval) |
+|---|---|---|---|---|---|
+| Michelle Simonson (id 18) | 27 | 0 | 0 | **27** | 5 candidate removals (§2b) + 8 unresolved (§2c) |
+| Miranda Quale (id 19) | 0 | 13 | 0 | **13** | 2 candidate adds (Laura §3b, Jacki §3b) |
+| Tristae Allard (id 13) | 0 | 17 | 0 | **17** | 0 |
 
-No coach ends the deployment with unintended access; Michelle's 27 is her existing 27, and Miranda + Tristae only get the specific rows enumerated in §3a and §4a.  Any subsequent removal is deferred to a second, separately-approved batch after Aaron/district clarifies the pending questions.
+No coach ends this deployment with unintended access.  Michelle's 27 = her existing 27 — narrowing her list to what Aaron actually asked for is deferred to a second approved batch (the specific 5 rows are named in §2b/§7b for review).  Miranda gets exactly 13 confirmed elementary+specials rows; Laura and Jacki are held.  Tristae gets exactly 17.  Every deferred item ships in a separately-signed-off batch — this deploy does not remove or expand anyone's access beyond what §3a and §4a enumerate.
