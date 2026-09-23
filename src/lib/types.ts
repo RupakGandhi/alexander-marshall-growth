@@ -28,6 +28,13 @@ export interface User {
   subject_area?: string | null;       // e.g. "Mathematics", "ELA", "Self-contained Elementary"
   classroom_type?: string | null;     // e.g. "self_contained", "departmentalized", "specials", "intervention"
   grade_band?: string | null;         // e.g. "K-2", "3-5", "6-8", "9-12"
+  // Sept 23, 2026 — Section 2 of the Aaron-caseload change.  A teacher with
+  // can_coach=1 gets the same coach *capability* as a role='coach' user WITHOUT
+  // losing their teacher role, records, or personal workspace.  Default 0
+  // (added in migration 0012).  role='coach' users don't need this flag —
+  // their role already grants coaching.  Prefer `hasCoachAccess(user)` over
+  // reading either the role or this flag directly at call sites.
+  can_coach?: number;
 }
 
 export type Variables = {

@@ -155,7 +155,11 @@ export function Layout(props: { title: string; user: User | null; children: any;
 }
 
 function navFor(user: User, active?: string) {
-  const nav = navItems(user.role);
+  // Sept 23, 2026 — pass the full user so navItems can check can_coach for
+  // the teacher-coach split-nav case.  A pure teacher sees only teacher nav;
+  // a teacher with can_coach=1 sees teacher nav plus "My Coaching" and "PD
+  // Review".  Pure coaches (role='coach') are unchanged.
+  const nav = navItems(user);
   return (
     <header class="bg-aps-navy text-white shadow-md sticky top-0 z-40 aps-header">
       <div class="max-w-7xl mx-auto px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-4">
@@ -297,7 +301,8 @@ function navFor(user: User, active?: string) {
   );
 }
 
-function navItems(role: string) {
+function navItems(user: User) {
+  const role = user.role;
   switch (role) {
     case 'super_admin':
       return [
@@ -336,14 +341,29 @@ function navItems(role: string) {
         { key: 'co-home',   label: 'My Teachers',  href: '/coach',      icon: 'fas fa-chalkboard-user' },
         { key: 'pd-review', label: 'PD Review',    href: '/pd/review',  icon: 'fas fa-clipboard-check' },
       ];
-    case 'teacher':
-      return [
-        { key: 't-home',    label: 'My Dashboard',  href: '/teacher',              icon: 'fas fa-gauge' },
+    case 'teacher': {
+      const items: any[] = [
+        // Sept 23, 2026 — teacher-coaches (Miranda, Tristae) keep everything
+        // in their existing teacher workspace.  A small label change makes
+        // it clear this is the TEACHING side when they also have a coaching
+        // workspace; pure teachers still see "My Dashboard" (unchanged).
+        { key: 't-home',    label: user.can_coach === 1 ? 'My Teaching' : 'My Dashboard',  href: '/teacher',              icon: 'fas fa-gauge' },
         { key: 't-obs',     label: 'Observations',  href: '/teacher/observations', icon: 'fas fa-clipboard-list' },
         { key: 't-focus',   label: 'Focus Areas',   href: '/teacher/focus',        icon: 'fas fa-bullseye' },
         { key: 't-pd',      label: 'My PD LMS',     href: '/teacher/pd',           icon: 'fas fa-graduation-cap' },
         { key: 't-reports', label: 'Exports',       href: '/reports',              icon: 'fas fa-file-export' },
       ];
+      // Teacher-coach add-ons: My Coaching + PD Review, appended (not
+      // interleaved) so the teacher's own workspace remains the primary
+      // navigation and coaching is clearly additive.
+      if (user.can_coach === 1) {
+        items.push(
+          { key: 'co-home',   label: 'My Coaching',  href: '/coach',      icon: 'fas fa-chalkboard-user' },
+          { key: 'pd-review', label: 'PD Review',    href: '/pd/review',  icon: 'fas fa-clipboard-check' },
+        );
+      }
+      return items;
+    }
     default:
       return [];
   }

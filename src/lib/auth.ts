@@ -74,3 +74,30 @@ export function requireAuth() {
     await next();
   };
 }
+
+// Sept 23, 2026 (Section 2/4) — coaching-capability middleware.  Coach routes
+// used to gate on `requireRole(['coach','super_admin'])`, which meant we would
+// have had to add 'teacher' to that list to let Miranda/Tristae in — and that
+// would let EVERY teacher into coach routes.  Instead, this middleware lets
+// through:
+//    - super_admin (always)
+//    - role='coach' users (unchanged)
+//    - role='teacher' users whose can_coach=1 flag is set (the new path)
+//
+// It does NOT check whether the user has an assignment to any particular
+// teacher; that per-target check lives in `requireCoachAssignment` in
+// src/lib/access.ts and MUST be called by every handler that mutates or
+// exposes another teacher's data.  Hiding a button is not sufficient.
+export function requireCoachAccess() {
+  return async (c: Context<{ Bindings: Bindings; Variables: Variables }>, next: () => Promise<void>) => {
+    const user = await getCurrentUser(c);
+    if (!user) return c.redirect('/login');
+    const allowed =
+      user.role === 'super_admin' ||
+      user.role === 'coach' ||
+      (user.role === 'teacher' && user.can_coach === 1);
+    if (!allowed) return c.text('Forbidden', 403);
+    c.set('user', user);
+    await next();
+  };
+}

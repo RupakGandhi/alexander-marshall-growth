@@ -105,12 +105,22 @@ function parseBlocks(raw: string): Block[] {
         i = j;
         continue;
       }
-      // Only one pipe row — NOT a table.  Consume it as a paragraph line
-      // right here so the outer loop can't fall through into the paragraph
-      // branch below, whose guard `!TABLE_ROW_RE.test(lines[i])` would be
-      // false and leave i un-advanced (the original bug).
-      blocks.push({ kind: 'p', lines: [line.trim()] });
-      i++;
+      // Not a valid table.  Sept 23, 2026 — linear-time correction (Section 7
+      // of the coaching change spec).  We ALREADY scanned every line from i
+      // to j and know none of them form a table.  Consuming just ONE line
+      // here (i++) meant the very next iteration would re-scan the same
+      // (j - i - 1) lines all over again, producing O(N^2) work on pathological
+      // inputs — a 2,048-row block of `|---|---|` took ~381 ms in local V8
+      // and is exactly the case the doc flagged.  The fix: preserve every
+      // line from [i, j) as escaped prose (a paragraph block per line, so
+      // literal `|` characters stay visible) and advance i = j so the outer
+      // loop never re-visits them.  Result: O(N) total work regardless of
+      // how many false-table lines appear in a row.
+      for (let k = i; k < j; k++) {
+        const t = lines[k].trim();
+        if (t) blocks.push({ kind: 'p', lines: [t] });
+      }
+      i = j;
       continue;
     }
 

@@ -269,6 +269,12 @@ app.get('/csv', async (c) => {
   let rows: any[][] = [];
   const filename = `observations_${mode}_${new Date().toISOString().slice(0,10)}.csv`;
 
+  // Sept 23, 2026 — coaches (both pure and teacher-coaches) must never see
+  // numeric observation scores in ANY export mode.  A single flag drives the
+  // scrub across summary/full modes below; the dedicated 'scores' mode is
+  // rejected outright.
+  const isCoachExport = user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1);
+
   if (mode === 'summary') {
     headers = ['observation_id','observed_at','type','status','teacher','teacher_email','school','appraiser','subject','grade_level','location','duration_minutes','overall_summary','avg_level','scored_indicators','glow_count','grow_count','focus_area_count','next_step_count','published_at','acknowledged_at'];
     const sBy = groupBy(scores, s => s.observation_id);
@@ -282,7 +288,11 @@ app.get('/csv', async (c) => {
         `${o.t_last}, ${o.t_first}`, o.t_email, o.school_name || '',
         `${o.a_last}, ${o.a_first}`, o.subject || '', o.grade_level || '', o.location || '', o.duration_minutes || '',
         (o.overall_summary || '').replace(/\s+/g,' ').trim(),
-        avg !== null ? avg.toFixed(2) : '', s.length,
+        // Blank out numeric score columns for coach exports; feedback counts
+        // (glows/grows/focus/next steps) stay because they're the qualitative
+        // signal coaches ARE allowed to see.
+        isCoachExport ? '' : (avg !== null ? avg.toFixed(2) : ''),
+        isCoachExport ? '' : s.length,
         fb.filter((x:any)=>x.category==='glow').length,
         fb.filter((x:any)=>x.category==='grow').length,
         fb.filter((x:any)=>x.category==='focus_area').length,
@@ -291,6 +301,17 @@ app.get('/csv', async (c) => {
       ]);
     }
   } else if (mode === 'scores') {
+    // Sept 23, 2026 (Section 4 leak fix): pure coaches (role='coach') and
+    // teacher-coaches (role='teacher', can_coach=1) MUST NOT receive numeric
+    // observation scores through any export.  Their scoping to
+    // assignments.relationship='coach' correctly limited WHICH teachers they
+    // see, but this CSV mode then dumped every score anyway.  Teacher-coaches
+    // still see their OWN scores through the teacher workspace (which uses a
+    // different code path).  This block gates by role, not the role+can_coach
+    // combo, because the exporter here is the coach view of others' data.
+    if (user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1)) {
+      return c.text('Coaches cannot export observation scores. Ask the principal for an evaluation report.', 403);
+    }
     headers = ['observation_id','observed_at','teacher','school','appraiser','domain_code','indicator_code','indicator_name','level','level_label','evidence_note'];
     const obsMap = new Map(observations.map(o => [o.id, o] as const));
     for (const s of scores) {
@@ -323,7 +344,12 @@ app.get('/csv', async (c) => {
     for (const o of observations) {
       const s = sBy.get(o.id) || [];
       const fb = fbBy.get(o.id) || [];
-      const scoreStr = s.map((x: any) => `${x.domain_code}.${(x.indicator_code||'').toUpperCase()} ${x.indicator_name}: ${x.level} (${x.level ? (levelLabels as any)[x.level] : ''})`).join(' | ');
+      // Coaches: blank the scores column entirely; keep every feedback
+      // column since those are the teacher-facing text that coaches ARE
+      // permitted to see.
+      const scoreStr = isCoachExport
+        ? ''
+        : s.map((x: any) => `${x.domain_code}.${(x.indicator_code||'').toUpperCase()} ${x.indicator_name}: ${x.level} (${x.level ? (levelLabels as any)[x.level] : ''})`).join(' | ');
       const byCat = (cat: string) => fb.filter((x:any)=>x.category===cat).map((x:any) => (x.title ? `${x.title}: ` : '') + (x.body || '')).join(' | ');
       rows.push([
         o.id, o.observed_at, o.observation_type, o.status,
@@ -369,6 +395,12 @@ app.get('/pdf', async (c) => {
   };
   // Teachers never see private notes no matter what.
   if (user.role === 'teacher' || user.role === 'coach') include.notes = false;
+  // Sept 23, 2026 (Section 4 leak fix): coaches (pure and teacher-coaches)
+  // must not receive numeric scores in the printable/PDF report either.
+  // The scoping already limits which teachers they see; this closes the
+  // score-column channel on that same set.
+  const isCoachExport = user.role === 'coach' || (user.role === 'teacher' && user.can_coach === 1);
+  if (isCoachExport) include.scores = false;
 
   const f = parseFilters(c);
   const observations = await scopedObservations(c.env.DB, user, f);

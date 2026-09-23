@@ -213,12 +213,28 @@ export async function submitDeliverable(
   ).bind(enrollmentId).run();
   if (!env) return;
 
-  // Notify every appraiser and coach currently linked to this teacher
+  // Notify every appraiser and coach currently linked to this teacher.
+  // Sept 23, 2026 — Section 5:
+  //   1) Include role='teacher' users who have can_coach=1 AND an active
+  //      relationship='coach' assignment to this teacher.  Without this,
+  //      Miranda/Tristae's coachees who submitted deliverables would never
+  //      alert them in the review queue.  We do NOT broaden to unrelated
+  //      staff — the assignment row is still required.
+  //   2) The notification URL was pointing at /appraiser/pd/review/... which
+  //      is not a real route.  The actual reviewer page is /pd/review/:id
+  //      (src/routes/pd.tsx: reviewPd handler).  A recipient clicking the
+  //      notification was landing on 404.  Fixed to /pd/review/:id.
   const supers = await db.prepare(
     `SELECT DISTINCT a.staff_id AS uid
        FROM assignments a
        JOIN users u ON u.id = a.staff_id
-       WHERE a.teacher_id = ? AND a.active = 1 AND u.active = 1 AND u.role IN ('appraiser','coach')`
+       WHERE a.teacher_id = ?
+         AND a.active = 1
+         AND u.active = 1
+         AND (
+              (u.role IN ('appraiser','coach'))
+           OR (u.role = 'teacher' AND u.can_coach = 1 AND a.relationship = 'coach')
+         )`
   ).bind(teacherId).all();
   const uids = ((supers.results as any[]) || []).map((r) => r.uid);
   const mod = await db.prepare(
@@ -231,7 +247,7 @@ export async function submitDeliverable(
       kind: 'pd_deliverable_submitted',
       title: 'PD deliverable submitted',
       body: `${teacher?.first_name || ''} ${teacher?.last_name || ''} submitted a deliverable for "${mod?.title || 'a PD module'}".`,
-      url: `/appraiser/pd/review/${enrollmentId}`,
+      url: `/pd/review/${enrollmentId}`, // was /appraiser/pd/review/... which 404s
       entity_type: 'pd_enrollment', entity_id: enrollmentId, actor_user_id: teacherId,
     }, env);
   }
@@ -326,6 +342,15 @@ export async function recommendModule(
   recommenderId: number,
   note?: string | null,
   env?: Bindings,
+  // Sept 23, 2026 (Section 5 attribution) — the CALLER knows which workspace
+  // triggered this action: 'coach' when called from src/routes/coach.tsx,
+  // 'appraiser' from the appraiser routes, 'admin' from admin routes.  The
+  // helper previously guessed via user.role which mislabels a teacher-coach
+  // (Miranda/Tristae are role='teacher') as "admin" in the notification body.
+  // Passing the actor explicitly fixes that.  Backwards-compatible: legacy
+  // call sites that don't pass this arg get the same role-based label as
+  // before.
+  actorLabel?: 'coach' | 'appraiser' | 'admin',
 ) {
   const exists = await db.prepare(
     `SELECT id, status FROM pd_enrollments
@@ -354,8 +379,20 @@ export async function recommendModule(
   const id = Number((res.meta as any)?.last_row_id || 0);
   if (env) {
     const mod = await db.prepare(`SELECT title FROM pd_modules WHERE id = ?`).bind(moduleId).first<any>();
-    const who = await db.prepare(`SELECT first_name, last_name, role FROM users WHERE id = ?`).bind(recommenderId).first<any>();
-    const whoLabel = who ? `${who.first_name} ${who.last_name} (${who.role === 'coach' ? 'coach' : 'admin'})` : 'a supervisor';
+    const who = await db.prepare(`SELECT first_name, last_name, role, can_coach FROM users WHERE id = ?`).bind(recommenderId).first<any>();
+    // Prefer the caller-supplied actorLabel (Section 5 attribution).  If the
+    // caller didn't say, fall back to a smarter guess that recognises the
+    // teacher-coach case (role='teacher' AND can_coach=1) — never mislabel
+    // Miranda/Tristae as "admin" just because their primary role is teacher.
+    const labelFromRole = who
+      ? (who.role === 'coach' || (who.role === 'teacher' && who.can_coach === 1))
+        ? 'coach'
+        : who.role === 'appraiser' || who.role === 'superintendent'
+          ? 'appraiser'
+          : 'admin'
+      : 'admin';
+    const effectiveLabel = actorLabel || labelFromRole;
+    const whoLabel = who ? `${who.first_name} ${who.last_name} (${effectiveLabel})` : 'a supervisor';
     await notify(db, {
       user_id: teacherId,
       kind: 'pd_module_assigned',

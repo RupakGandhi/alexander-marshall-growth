@@ -22,14 +22,26 @@ app.use('*', requireRole(['teacher']));
 app.get('/', async (c) => {
   const user = c.get('user')!;
   const welcome = c.req.query('welcome') === '1';
-  const [summary, enrollments, goals, externalPd, hours] = await Promise.all([
+  const [summary, enrollments, goals, externalPd, hours, coachingNotesRes] = await Promise.all([
     getTeacherSummary(c.env.DB, user.id),
     teacherEnrollments(c.env.DB, user.id),
     listTeacherGoals(c.env.DB, user.id),
     listExternalPdForTeacher(c.env.DB, user.id),
     getTeacherPDHoursSummary(c.env.DB, { teacherId: user.id }),
+    // Sept 23, 2026 — Section 3: pull the SHARED coaching notes for this
+    // teacher.  Drafts are deliberately excluded (author-only visibility).
+    // Multiple coaches can share notes about the same teacher (Aaron's
+    // overlapping caseloads); each row carries the author name so the
+    // teacher can see WHO wrote each entry.
+    c.env.DB.prepare(
+      `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, u.title AS author_title
+         FROM coaching_notes n JOIN users u ON u.id = n.author_id
+        WHERE n.teacher_id = ? AND n.status = 'shared'
+        ORDER BY COALESCE(n.first_shared_at, n.updated_at) DESC`
+    ).bind(user.id).all(),
   ]);
   const teacherHours = (hours.rows && hours.rows[0]) || { total_hours: 0, internal_hours: 0, external_hours: 0, target: hours.target };
+  const coachingNotes = (coachingNotesRes.results as any[]) || [];
   return c.html(
     <TeacherHome
       user={user}
@@ -39,6 +51,7 @@ app.get('/', async (c) => {
       externalPd={externalPd}
       hours={teacherHours}
       hoursTarget={hours.target}
+      coachingNotes={coachingNotes}
       welcome={welcome}
       msg={c.req.query('msg')}
     />
@@ -343,9 +356,10 @@ export default app;
 
 // ---------------------------- VIEWS ----------------------------
 
-function TeacherHome({ user, summary, enrollments, goals, externalPd, hours, hoursTarget, welcome, msg }: any) {
+function TeacherHome({ user, summary, enrollments, goals, externalPd, hours, hoursTarget, coachingNotes, welcome, msg }: any) {
   if (!summary) return <Layout title="Dashboard" user={user}><p>No teacher record found.</p></Layout>;
   const { observations, focusAreas } = summary;
+  coachingNotes = coachingNotes || [];
   const recent = observations.filter((o: any) => o.status === 'published' || o.status === 'acknowledged').slice(0, 5);
   const awaiting = observations.filter((o: any) => o.status === 'published').length;
   // Fix 4: "Recommended for You" — show non-declined recommended/started enrollments
@@ -619,6 +633,51 @@ function TeacherHome({ user, summary, enrollments, goals, externalPd, hours, hou
               </tbody>
             </table>
           </div>
+        )}
+      </Card>
+
+      {/* SECTION 3 — Coaching feedback (read-only for the teacher).
+          Only SHARED entries land here (drafts are author-only).  The hash
+          #coaching-feedback matches the URL the coach-share notification
+          links to, so a teacher tapping "open your workspace" scrolls to
+          this section on load. */}
+      <Card id="coaching-feedback" title="Non-evaluative coaching feedback" icon="fas fa-comment-medical" class="mt-6">
+        <p class="text-xs text-slate-500 italic mb-3">
+          <i class="fas fa-info-circle mr-1"></i>
+          Notes your instructional coach(es) chose to share with you. These are separate from formal observations, do not affect scores or evaluation, and are not visible to principals or the district.
+        </p>
+        {coachingNotes.length === 0 ? (
+          <p class="text-sm text-slate-500 italic">No coaching feedback shared with you yet.</p>
+        ) : (
+          <ul class="space-y-3">
+            {coachingNotes.map((n: any) => (
+              <li class="border border-slate-200 rounded p-3 bg-white">
+                <div class="flex items-start justify-between gap-3 flex-wrap">
+                  <div class="text-sm text-slate-700">
+                    <span class="font-medium text-aps-navy">{n.author_first} {n.author_last}</span>
+                    {n.author_title ? <span class="text-xs text-slate-500 ml-1">· {n.author_title}</span> : null}
+                    <span class="text-xs text-slate-500 ml-2">observed / talked with you on <strong>{formatDate(n.occurred_on)}</strong></span>
+                    {n.class_context && <span class="text-xs text-slate-500 block mt-0.5">Context: {n.class_context}</span>}
+                  </div>
+                  <div class="text-[11px] text-slate-400">shared {n.first_shared_at ? formatDateTime(n.first_shared_at) : formatDateTime(n.updated_at)}</div>
+                </div>
+                <div class="grid md:grid-cols-2 gap-3 mt-3 text-sm">
+                  {n.evidence && (
+                    <div><div class="text-[11px] uppercase tracking-wide text-slate-500 mb-1">What your coach noticed</div><Prose text={n.evidence} size="sm" /></div>
+                  )}
+                  {n.glow && (
+                    <div><div class="text-[11px] uppercase tracking-wide text-emerald-700 mb-1"><i class="fas fa-star mr-1"></i>Strengths</div><Prose text={n.glow} size="sm" /></div>
+                  )}
+                  {n.grow && (
+                    <div><div class="text-[11px] uppercase tracking-wide text-sky-700 mb-1"><i class="fas fa-seedling mr-1"></i>Growth</div><Prose text={n.grow} size="sm" /></div>
+                  )}
+                  {n.next_step && (
+                    <div><div class="text-[11px] uppercase tracking-wide text-amber-700 mb-1"><i class="fas fa-forward mr-1"></i>Agreed next step {n.follow_up_on ? <span class="text-slate-500 normal-case font-normal">(follow up {formatDate(n.follow_up_on)})</span> : null}</div><Prose text={n.next_step} size="sm" /></div>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
     </Layout>

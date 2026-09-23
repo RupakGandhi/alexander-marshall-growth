@@ -86,13 +86,17 @@ app.post('/users/create', async (c) => {
   const subjectArea    = String(body.subject_area || '').trim() || null;
   const classroomType  = String(body.classroom_type || '').trim() || null;
   const gradeBand      = String(body.grade_band || '').trim() || null;
+  // Sept 23, 2026 — Section 2: optional coaching capability.  Only meaningful
+  // for role='teacher'; ignored otherwise (pure coaches already coach via
+  // their role).  Default OFF so nothing turns on for anyone by accident.
+  const canCoach = (role === 'teacher' && body.can_coach) ? 1 : 0;
   if (!email || !first || !last || !role) return c.redirect('/admin/users?msg=Missing+fields');
   const hash = await hashPassword(pw);
   try {
     const res = await c.env.DB.prepare(
-      `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password, subject_area, classroom_type, grade_band)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`
-    ).bind(schoolIds[0] || null, email, hash, first, last, role, title, phone, subjectArea, classroomType, gradeBand).run();
+      `INSERT INTO users (district_id, school_id, email, password_hash, first_name, last_name, role, title, phone, active, must_change_password, subject_area, classroom_type, grade_band, can_coach)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)`
+    ).bind(schoolIds[0] || null, email, hash, first, last, role, title, phone, subjectArea, classroomType, gradeBand, canCoach).run();
     const newId = Number((res.meta as any)?.last_row_id);
     if (schoolIds.length) await setUserSchools(c.env.DB, newId, schoolIds);
     await logActivity(c.env.DB, user.id, 'user', newId, 'create_user', { email, role, schoolIds });
@@ -129,11 +133,16 @@ app.post('/users/:id/update', async (c) => {
   const subjectArea    = String(body.subject_area || '').trim() || null;
   const classroomType  = String(body.classroom_type || '').trim() || null;
   const gradeBand      = String(body.grade_band || '').trim() || null;
+  // Sept 23, 2026 — Section 2: admin can toggle the coaching capability on
+  // an existing user.  Only meaningful for role='teacher'; if the admin
+  // changes the role to 'coach' the flag is redundant (the role covers it)
+  // so we clear it to keep the source of truth in one place.
+  const canCoach = (role === 'teacher' && body.can_coach) ? 1 : 0;
   await c.env.DB.prepare(
-    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, active=?, subject_area=?, classroom_type=?, grade_band=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(first, last, email, role, title, phone, active, subjectArea, classroomType, gradeBand, id).run();
+    `UPDATE users SET first_name=?, last_name=?, email=?, role=?, title=?, phone=?, active=?, subject_area=?, classroom_type=?, grade_band=?, can_coach=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(first, last, email, role, title, phone, active, subjectArea, classroomType, gradeBand, canCoach, id).run();
   await setUserSchools(c.env.DB, id, schoolIds);
-  await logActivity(c.env.DB, user.id, 'user', id, 'update_user', { schoolIds, subjectArea, classroomType, gradeBand });
+  await logActivity(c.env.DB, user.id, 'user', id, 'update_user', { schoolIds, subjectArea, classroomType, gradeBand, canCoach });
   return c.redirect('/admin/users?msg=Updated');
 });
 
@@ -261,20 +270,30 @@ app.post('/users/:id/hard-delete', async (c) => {
   // the user disappears from active pickers. Observations are the real anchor:
   // feedback, scores, and deliverables all chain off an observation or enrollment,
   // so if there's an observation on file (as teacher OR appraiser) we keep the row.
+  //
+  // Sept 23, 2026 — Section 5 requirement: coaching_notes are ALSO history
+  // that must survive account cleanup.  We check BOTH sides (author and
+  // teacher) so removing a coach doesn't cascade-delete their teachers'
+  // shared feedback, and removing a coached teacher doesn't wipe the
+  // coach's authored history.  A user with coaching notes on file follows
+  // the deactivation path exactly the way an evaluator with observations
+  // does today.
   const hasAnchor = await c.env.DB.prepare(
     `SELECT
        (SELECT COUNT(*) FROM observations WHERE teacher_id=? OR appraiser_id=?) AS obs,
        (SELECT COUNT(*) FROM external_pd_submissions WHERE teacher_id=? OR reviewed_by=?) AS ext_pd,
-       (SELECT COUNT(*) FROM pd_deliverable_scores WHERE scored_by=?) AS scores`
-  ).bind(id, id, id, id, id).first<any>();
-  const totalAnchor = (hasAnchor?.obs || 0) + (hasAnchor?.ext_pd || 0) + (hasAnchor?.scores || 0);
+       (SELECT COUNT(*) FROM pd_deliverable_scores WHERE scored_by=?) AS scores,
+       (SELECT COUNT(*) FROM coaching_notes WHERE author_id=? OR teacher_id=?) AS coach_notes`
+  ).bind(id, id, id, id, id, id, id).first<any>();
+  const totalAnchor =
+    (hasAnchor?.obs || 0) + (hasAnchor?.ext_pd || 0) + (hasAnchor?.scores || 0) + (hasAnchor?.coach_notes || 0);
   if (totalAnchor > 0) {
     await c.env.DB.prepare(`UPDATE users SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
     await c.env.DB.prepare(`DELETE FROM sessions WHERE user_id=?`).bind(id).run();
     await logActivity(c.env.DB, user.id, 'user', id, 'hard_delete_blocked_soft_deleted',
-      { email: target.email, obs: hasAnchor.obs, ext_pd: hasAnchor.ext_pd, scores: hasAnchor.scores });
+      { email: target.email, obs: hasAnchor.obs, ext_pd: hasAnchor.ext_pd, scores: hasAnchor.scores, coach_notes: hasAnchor.coach_notes });
     return c.redirect('/admin/users?msg=' + encodeURIComponent(
-      `${target.first_name} ${target.last_name} had evaluation history on file (observations / PD credit), so their account was deactivated instead of deleted — this preserves the audit trail. They will no longer appear in active lists or pickers.`));
+      `${target.first_name} ${target.last_name} had evaluation or coaching history on file, so their account was deactivated instead of deleted — this preserves the audit trail. They will no longer appear in active lists or pickers.`));
   }
 
   // No anchored history — safe to fully remove. Wipe every row that references this
@@ -1652,6 +1671,17 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
             <option value="CTE" />
             <option value="Counseling" />
           </datalist>
+          {/* Sept 23, 2026 — coaching capability opt-in.  Only applies to
+              role='teacher'; ignored server-side when role is anything else.
+              Turning this on gives the teacher My Coaching + PD Review nav
+              in ADDITION to their existing teacher workspace. */}
+          <label class="md:col-span-4 flex items-start gap-2 p-2 border border-slate-200 rounded bg-slate-50">
+            <input type="checkbox" name="can_coach" value="1" class="mt-1" />
+            <span class="text-xs text-slate-700">
+              <strong>Also grant coaching capability</strong> (only meaningful if Role = Teacher)<br/>
+              Adds "My Coaching" + "PD Review" nav on top of the teacher workspace. Does not affect scores or evaluation. Assign coachees separately on the Assignments page.
+            </span>
+          </label>
           <div class="md:col-span-4"><button class="bg-aps-navy text-white px-4 py-2 rounded hover:bg-aps-blue text-sm"><i class="fas fa-plus mr-1"></i>Create user</button></div>
         </form>
       </Card>
@@ -1739,6 +1769,18 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                         </select>
                       </label>
                       <label class="flex items-center gap-2 mt-5"><input type="checkbox" name="active" checked={!!u.active} /> Active</label>
+                      {/* Sept 23, 2026 — coaching capability toggle in the edit form.
+                          Shown only for role='teacher' users because it's a no-op for
+                          pure coaches (their role already grants coaching).  Turning
+                          on grants My Coaching + PD Review in the nav; turning off
+                          revokes coaching route access on the NEXT request (existing
+                          coaching_notes rows are preserved, per Section 4/5). */}
+                      {u.role === 'teacher' && (
+                        <label class="flex items-center gap-2 mt-5" title="Grants coaching capability without changing the teacher role or workspace.">
+                          <input type="checkbox" name="can_coach" value="1" checked={!!u.can_coach} />
+                          <span class="text-xs">Can coach (add coaching workspace)</span>
+                        </label>
+                      )}
                       <div class="md:col-span-4 flex flex-wrap gap-2"><button class="bg-aps-navy text-white px-3 py-1 rounded text-xs"><i class="fas fa-save mr-1"></i>Save</button></div>
                     </form>
                     <div class="mt-2 flex flex-wrap items-center gap-2 bg-amber-50 p-2 rounded text-xs">

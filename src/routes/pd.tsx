@@ -15,7 +15,7 @@ import { Hono } from 'hono';
 import type { Bindings, Variables } from '../lib/types';
 import { Layout, Card, Button, DomainTabs } from '../lib/layout';
 import { softenTitleForTeacher, softenSourceForTeacher } from '../lib/teacher_labels';
-import { requireRole } from '../lib/auth';
+import { requireRole, getCurrentUser } from '../lib/auth';
 import { logActivity } from '../lib/db';
 import { formatDate, formatDateTime, escapeHtml } from '../lib/ui';
 import { buildCsv, parseCsvAsObjects } from '../lib/csv';
@@ -207,16 +207,97 @@ teacherPd.get('/plans/:id', async (c) => {
 
 // ==========================================================================
 // B. APPRAISER / COACH REVIEW QUEUE  /pd/review
+//
+// Sept 23, 2026 — Section 4 tightening.  The old assignment gate was
+// `active=1` alone, which does not distinguish between an appraiser
+// relationship and a coach relationship.  Now that a single user can be
+// EITHER (Michelle is coach-only, an appraiser is appraiser-only, and a
+// teacher-coach like Miranda is both a teacher and a coach), the check must
+// require the RELATIONSHIP that actually authorizes the action:
+//
+//   • role='appraiser' or role='superintendent' → require relationship='appraiser'
+//   • role='coach' (pure coach)                 → require relationship='coach'
+//   • role='teacher' with can_coach=1 (teacher-coach) → require relationship='coach'
+//     (they act ONLY as coach here — evaluation is not a teacher-coach action)
+//   • role='super_admin'                        → allowed regardless
+//
+// A user whose primary role wouldn't otherwise let them into this queue is
+// already blocked by the outer middleware, so this helper only decides the
+// per-target authorization.
 // ==========================================================================
 export const reviewPd = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-reviewPd.use('*', requireRole(['appraiser', 'coach', 'super_admin']));
+// Route access: appraisers, coaches, super_admins, AND teachers with the
+// coaching capability.  Non-coach teachers are still refused by the middleware.
+reviewPd.use('*', async (c, next) => {
+  const user = await getCurrentUser(c);
+  if (!user) return c.redirect('/login');
+  const allowed =
+    user.role === 'super_admin' ||
+    user.role === 'appraiser' ||
+    user.role === 'superintendent' ||
+    user.role === 'coach' ||
+    (user.role === 'teacher' && user.can_coach === 1);
+  if (!allowed) return c.text('Forbidden', 403);
+  c.set('user', user);
+  await next();
+});
+
+// Returns the assignment relationship(s) that authorize `user` to touch a
+// given teacher's PD deliverables via /pd/review.  Empty array = no
+// authorization path at all through this route family.
+function requiredRelationshipsFor(user: { role: string; can_coach?: number }): string[] {
+  if (user.role === 'appraiser' || user.role === 'superintendent') return ['appraiser'];
+  if (user.role === 'coach') return ['coach'];
+  if (user.role === 'teacher' && user.can_coach === 1) return ['coach'];
+  return [];
+}
+
+// Assignment gate used by every mutating handler in this router.  super_admin
+// bypasses (documented above); everyone else must have an ACTIVE assignment
+// with the correct relationship for their coaching/supervisor role.
+async function authorizedForTeacher(
+  db: D1Database,
+  user: { id: number; role: string; can_coach?: number },
+  teacherId: number,
+): Promise<boolean> {
+  if (user.role === 'super_admin') return true;
+  if (user.id === teacherId) return false; // never review your own submission
+  const rels = requiredRelationshipsFor(user);
+  if (rels.length === 0) return false;
+  const placeholders = rels.map(() => '?').join(',');
+  const hit = await db
+    .prepare(
+      `SELECT 1 FROM assignments
+        WHERE teacher_id = ? AND staff_id = ? AND active = 1
+          AND relationship IN (${placeholders})
+        LIMIT 1`,
+    )
+    .bind(teacherId, user.id, ...rels)
+    .first();
+  return !!hit;
+}
 
 reviewPd.get('/', async (c) => {
   const user = c.get('user')!;
-  // Only show deliverables from teachers assigned to this supervisor (for appraisers/coaches)
-  // Super-admin sees everything.
-  const visibleTeacherClause = user.role === 'super_admin'
-    ? '' : `AND e.teacher_id IN (SELECT teacher_id FROM assignments WHERE staff_id = ? AND active = 1)`;
+  // Sept 23, 2026 — scope by the RELATIONSHIP that authorizes this user's
+  // supervisor role, not any active assignment.  Prevents a coach-only user
+  // from ever seeing PD queued from teachers they only happen to appraise
+  // (which shouldn't happen today but the schema allows it), and prevents
+  // an appraiser-only user from seeing PD queued from teachers they only
+  // happen to coach.
+  const rels = requiredRelationshipsFor(user);
+  let visibleTeacherClause = '';
+  let binds: any[] = [];
+  if (user.role !== 'super_admin') {
+    if (rels.length === 0) {
+      // No supervisor path — render an empty queue rather than 403 on a GET.
+      return c.html(<ReviewPdQueue user={user} rows={[]} />);
+    }
+    const placeholders = rels.map(() => '?').join(',');
+    visibleTeacherClause =
+      `AND e.teacher_id IN (SELECT teacher_id FROM assignments WHERE staff_id = ? AND active = 1 AND relationship IN (${placeholders}))`;
+    binds = [user.id, ...rels];
+  }
   const stmt = c.env.DB.prepare(
     `SELECT e.id, e.status, e.submitted_at, e.teacher_id,
             t.first_name AS t_first, t.last_name AS t_last,
@@ -236,7 +317,7 @@ reviewPd.get('/', async (c) => {
          e.submitted_at DESC
        LIMIT 100`
   );
-  const rows = user.role === 'super_admin' ? await stmt.all() : await stmt.bind(user.id).all();
+  const rows = binds.length ? await stmt.bind(...binds).all() : await stmt.all();
   return c.html(<ReviewPdQueue user={user} rows={(rows.results as any[]) || []} />);
 });
 
@@ -245,11 +326,8 @@ reviewPd.get('/:id', async (c) => {
   const id = Number(c.req.param('id'));
   const e = await getEnrollment(c.env.DB, id);
   if (!e) return c.text('Not found', 404);
-  if (user.role !== 'super_admin') {
-    const ok = await c.env.DB.prepare(
-      `SELECT 1 FROM assignments WHERE teacher_id = ? AND staff_id = ? AND active = 1 LIMIT 1`
-    ).bind(e.teacher_id, user.id).first();
-    if (!ok) return c.text('Forbidden', 403);
+  if (!(await authorizedForTeacher(c.env.DB, user, e.teacher_id))) {
+    return c.text('Forbidden', 403);
   }
   const reflections = await getReflections(c.env.DB, id);
   const refMap: Record<string, string> = {};
@@ -284,11 +362,8 @@ reviewPd.post('/:id/rubric', async (c) => {
   const id = Number(c.req.param('id'));
   const e = await getEnrollment(c.env.DB, id);
   if (!e) return c.text('Not found', 404);
-  if (user.role !== 'super_admin') {
-    const ok = await c.env.DB.prepare(
-      `SELECT 1 FROM assignments WHERE teacher_id = ? AND staff_id = ? AND active = 1 LIMIT 1`
-    ).bind(e.teacher_id, user.id).first();
-    if (!ok) return c.text('Forbidden', 403);
+  if (!(await authorizedForTeacher(c.env.DB, user, e.teacher_id))) {
+    return c.text('Forbidden', 403);
   }
   const body = await c.req.parseBody();
   const criterionId = Number(body.criterion_id);
@@ -318,11 +393,8 @@ reviewPd.post('/:id/verify', async (c) => {
   const note = String(body.note || '').trim() || null;
   const e = await getEnrollment(c.env.DB, id);
   if (!e) return c.text('Not found', 404);
-  if (user.role !== 'super_admin') {
-    const ok = await c.env.DB.prepare(
-      `SELECT 1 FROM assignments WHERE teacher_id = ? AND staff_id = ? AND active = 1 LIMIT 1`
-    ).bind(e.teacher_id, user.id).first();
-    if (!ok) return c.text('Forbidden', 403);
+  if (!(await authorizedForTeacher(c.env.DB, user, e.teacher_id))) {
+    return c.text('Forbidden', 403);
   }
   // Fix 7 — when the supervisor clicks "Approve & Credit Hours" the form
   // submits a non-empty credit_hours value. We parse it defensively (NaN /
@@ -349,11 +421,19 @@ reviewPd.post('/:id/verify', async (c) => {
 
 reviewPd.post('/:id/assign', async (c) => {
   const user = c.get('user')!;
-  // A supervisor can also assign a NEW module to a teacher from this page
+  // A supervisor can also assign a NEW module to a teacher from this page.
+  // Sept 23, 2026 — Section 4: target authorization was previously MISSING
+  // here.  Any authenticated appraiser/coach could bind ANY teacher to
+  // ANY module without an assignment gate.  Now we require an authorized
+  // relationship to `teacher_id` (same rule as /rubric and /verify).  An
+  // altered form target that swaps in an unassigned teacher_id is rejected.
   const body = await c.req.parseBody();
   const teacherId = Number(body.teacher_id);
   const moduleId = Number(body.module_id);
   if (!teacherId || !moduleId) return c.redirect('/pd/review?msg=Invalid+assignment');
+  if (!(await authorizedForTeacher(c.env.DB, user, teacherId))) {
+    return c.text('Forbidden', 403);
+  }
   const { enrollment_id } = await enrollTeacher(c.env.DB, teacherId, moduleId, 'assigned', user.id, c.env);
   return c.redirect(`/pd/review/${enrollment_id}?msg=Assigned`);
 });
