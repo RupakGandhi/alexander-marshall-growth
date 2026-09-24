@@ -124,7 +124,8 @@ teacherPd.post('/:id/reflect', async (c) => {
 teacherPd.post('/:id/reflect-json', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
-  const e = await c.env.DB.prepare(`SELECT teacher_id, status FROM pd_enrollments WHERE id = ?`).bind(id).first<any>();
+  // Practice-cleanup soft-delete: reflect against active enrollments only.
+  const e = await c.env.DB.prepare(`SELECT teacher_id, status FROM pd_enrollments WHERE id = ? AND deleted_at IS NULL`).bind(id).first<any>();
   if (!e || e.teacher_id !== user.id) return c.json({ ok: false, err: 'forbidden' }, 403);
   if (e.status === 'declined' || e.status === 'verified') {
     return c.json({ ok: false, err: 'locked' }, 409);
@@ -309,8 +310,9 @@ reviewPd.get('/', async (c) => {
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id
-       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
        WHERE e.status IN ('submitted','verified','needs_revision')
+             AND e.deleted_at IS NULL
              ${visibleTeacherClause}
        ORDER BY
          CASE e.status WHEN 'submitted' THEN 0 WHEN 'needs_revision' THEN 1 ELSE 2 END,
@@ -343,7 +345,8 @@ reviewPd.get('/:id', async (c) => {
        ORDER BY sort_order, id`
   ).all();
   const scores = await c.env.DB.prepare(
-    `SELECT criterion_id, level, note FROM pd_deliverable_scores WHERE enrollment_id = ?`
+    // pd_deliverable_scores now honors deleted_at (migration 0015).
+    `SELECT criterion_id, level, note FROM pd_deliverable_scores WHERE enrollment_id = ? AND deleted_at IS NULL`
   ).bind(id).all();
   const scoreMap: Record<number, any> = {};
   for (const s of (scores.results as any[]) || []) scoreMap[s.criterion_id] = s;
@@ -448,7 +451,7 @@ adminPd.get('/', async (c) => {
   const user = c.get('user')!;
   const rows = await c.env.DB.prepare(
     `SELECT m.*, i.code AS icode, i.name AS iname, d.code AS dcode,
-            (SELECT COUNT(*) FROM pd_enrollments e WHERE e.module_id = m.id) AS enrollments
+            (SELECT COUNT(*) FROM pd_enrollments e WHERE e.module_id = m.id AND e.deleted_at IS NULL) AS enrollments
        FROM pd_modules m
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id

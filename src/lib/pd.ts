@@ -111,8 +111,10 @@ export async function enrollTeacher(
   // When there's no observation context, source_observation_id is NULL — so
   // the UNIQUE constraint uses (teacher_id, module_id, NULL) which in SQLite
   // does allow duplicate NULLs.  Guard manually against the common case.
+  // Skip soft-deleted enrollments when checking for an existing pairing —
+  // a cleaned practice enrollment shouldn't block a fresh recommendation.
   const exists = await db.prepare(
-    `SELECT id FROM pd_enrollments WHERE teacher_id = ? AND module_id = ? AND source_observation_id IS NULL AND status NOT IN ('declined')`
+    `SELECT id FROM pd_enrollments WHERE teacher_id = ? AND module_id = ? AND source_observation_id IS NULL AND status NOT IN ('declined') AND deleted_at IS NULL`
   ).bind(teacherId, moduleId).first<any>();
   if (exists) return { enrollment_id: exists.id, created: false };
   const res = await db.prepare(
@@ -140,7 +142,7 @@ export async function enrollTeacher(
 // and trusts the library to reject illegal transitions.
 // --------------------------------------------------------------------------
 export async function advanceEnrollment(db: D1Database, enrollmentId: number, teacherId: number, to: PDStatus) {
-  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ? AND teacher_id = ?`)
+  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ? AND teacher_id = ? AND deleted_at IS NULL`)
     .bind(enrollmentId, teacherId).first<any>();
   if (!e) throw new Error('not found');
   const from = e.status as PDStatus;
@@ -200,7 +202,7 @@ export async function submitDeliverable(
   body: string,
   env?: Bindings
 ) {
-  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ? AND teacher_id = ?`)
+  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ? AND teacher_id = ? AND deleted_at IS NULL`)
     .bind(enrollmentId, teacherId).first<any>();
   if (!e) throw new Error('not found');
   await db.prepare(
@@ -272,7 +274,7 @@ export async function verifyDeliverable(
   env?: Bindings,
   creditHours?: number | null,
 ) {
-  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ?`).bind(enrollmentId).first<any>();
+  const e = await db.prepare(`SELECT * FROM pd_enrollments WHERE id = ? AND deleted_at IS NULL`).bind(enrollmentId).first<any>();
   if (!e) throw new Error('not found');
   if (e.status !== 'submitted' && e.status !== 'needs_revision') throw new Error('not submitted');
 

@@ -7,6 +7,11 @@ import {
   setUserSchools, getUserSchoolIds,
   listExternalPdQueue, getNumericSetting, setSetting, recentAdminAudit, logAdminAudit,
 } from '../lib/db';
+import {
+  listPracticeCandidates, togglePracticeFlag, executeCleanup, restoreBatch,
+  loadBatch, listBatches,
+  type EntityType,
+} from '../lib/practice_cleanup';
 // Aug 16, 2026 — Fix: /admin/users/create called `notify(...)` without importing it,
 // which surfaced to the admin as a "Could not create user: notify is not defined" toast
 // (even though the INSERT succeeded before notify() threw). Pull it in explicitly so
@@ -1430,6 +1435,185 @@ app.get('/data/audit-log', async (c) => {
   return c.html(<AdminAuditLogPage user={user} rows={rows} />);
 });
 
+// ============================================================================
+// PRACTICE-CLEANUP WORKFLOW (super-admin only — the * gate at line 19 already
+// enforces this; every mutation additionally records to admin_audit_log)
+// ----------------------------------------------------------------------------
+// See src/lib/practice_cleanup.ts for the design + dependency map.  The
+// workflow is:
+//   1. GET  /admin/data/practice-cleanup        — landing page: mark rows,
+//                                                 review scope, past batches
+//   2. POST /admin/data/practice-cleanup/mark   — toggle is_practice on a row
+//   3. POST /admin/data/practice-cleanup/execute — soft-delete every tagged
+//                                                  row + its dependencies
+//   4. GET  /admin/data/practice-cleanup/batches/:id  — results view
+//   5. POST /admin/data/practice-cleanup/batches/:id/restore — undo
+// ============================================================================
+
+// Landing page: pick candidates + review current scope + see past batches.
+app.get('/data/practice-cleanup', async (c) => {
+  const user = c.get('user')!;
+  const msg = c.req.query('msg');
+  // Rows the admin might want to mark as practice (limit to recent 250 per
+  // table so the page renders quickly; the mark endpoint accepts any id).
+  const [candidates, batches] = await Promise.all([
+    listPracticeCandidates(c.env.DB),
+    listBatches(c.env.DB, 25),
+  ]);
+  // Also fetch a small "browse" list per table so admins can find and tag
+  // records without hunting for IDs.  Excludes soft-deleted rows.
+  const browseCoachingNotes = await c.env.DB.prepare(
+    `SELECT n.id, n.status, n.occurred_on, n.is_practice,
+            u.first_name || ' ' || u.last_name AS teacher_name,
+            a.first_name || ' ' || a.last_name AS author_name
+       FROM coaching_notes n
+       JOIN users u ON u.id = n.teacher_id
+       JOIN users a ON a.id = n.author_id
+      WHERE n.deleted_at IS NULL
+      ORDER BY n.id DESC LIMIT 50`
+  ).all<any>();
+  const browsePd = await c.env.DB.prepare(
+    `SELECT e.id, e.status, e.source, e.hours_credited, e.is_practice,
+            u.first_name || ' ' || u.last_name AS teacher_name,
+            m.title AS module_title
+       FROM pd_enrollments e
+       JOIN users u ON u.id = e.teacher_id
+       LEFT JOIN pd_modules m ON m.id = e.module_id
+      WHERE e.deleted_at IS NULL
+      ORDER BY e.id DESC LIMIT 50`
+  ).all<any>();
+  const browseExt = await c.env.DB.prepare(
+    `SELECT x.id, x.title, x.status, x.hours, x.is_practice,
+            u.first_name || ' ' || u.last_name AS teacher_name
+       FROM external_pd_submissions x
+       JOIN users u ON u.id = x.teacher_id
+      WHERE x.deleted_at IS NULL
+      ORDER BY x.id DESC LIMIT 50`
+  ).all<any>();
+  const browseObs = await c.env.DB.prepare(
+    `SELECT o.id, o.status, o.observed_at, o.observation_type, o.is_practice,
+            u.first_name || ' ' || u.last_name AS teacher_name,
+            a.first_name || ' ' || a.last_name AS appraiser_name
+       FROM observations o
+       JOIN users u ON u.id = o.teacher_id
+       JOIN users a ON a.id = o.appraiser_id
+      WHERE o.deleted_at IS NULL
+      ORDER BY o.id DESC LIMIT 50`
+  ).all<any>();
+  return c.html(
+    <PracticeCleanupPage
+      user={user}
+      candidates={candidates}
+      batches={batches}
+      browse={{
+        coaching_notes: (browseCoachingNotes.results as any[]) || [],
+        pd_enrollments: (browsePd.results as any[]) || [],
+        external_pd_submissions: (browseExt.results as any[]) || [],
+        observations: (browseObs.results as any[]) || [],
+      }}
+      msg={msg}
+    />
+  );
+});
+
+// Toggle is_practice on a single row.  This is the "select records" step;
+// nothing is deleted or hidden yet.
+app.post('/data/practice-cleanup/mark', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const entityType = String(body.entity_type || '') as EntityType;
+  const entityId = Number(body.entity_id || 0);
+  const isPractice = String(body.is_practice || '') === '1';
+  if (!entityId || !['coaching_note','pd_enrollment','external_pd_submission','observation'].includes(entityType)) {
+    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent('Invalid entity — nothing marked.'));
+  }
+  const changed = await togglePracticeFlag(c.env.DB, entityType, entityId, isPractice);
+  await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_mark', {
+    entityType, entityIds: [entityId], rowCount: changed,
+    detail: `${isPractice ? 'Tagged' : 'Untagged'} ${entityType}#${entityId} as practice (is_practice=${isPractice ? 1 : 0}).`,
+    filters: { is_practice: isPractice ? 1 : 0 },
+  });
+  return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(
+    `${isPractice ? 'Tagged' : 'Untagged'} ${entityType}#${entityId} (${changed} row${changed === 1 ? '' : 's'} updated).`
+  ) + '#scope');
+});
+
+// Execute cleanup — soft-delete every currently-tagged row + its cascade.
+// Phrase guard: "CLEAN PRACTICE DATA".
+app.post('/data/practice-cleanup/execute', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  const note = String(body.note || '').trim() || null;
+  if (confirm !== 'CLEAN PRACTICE DATA') {
+    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(
+      'You must type "CLEAN PRACTICE DATA" exactly to confirm.'
+    ) + '#execute');
+  }
+  try {
+    const result = await executeCleanup(c.env.DB, user.id, note);
+    const total =
+      result.affected.coaching_note +
+      result.affected.pd_enrollment +
+      result.affected.external_pd_submission +
+      result.affected.observation;
+    await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_execute', {
+      entityType: 'bulk', rowCount: total,
+      detail: `Batch #${result.batch_id}: cleaned ${total} parent record${total === 1 ? '' : 's'} + cascade.`,
+      filters: { batch_id: result.batch_id },
+    });
+    return c.redirect(`/admin/data/practice-cleanup/batches/${result.batch_id}`);
+  } catch (e: any) {
+    const msg = e?.message === 'nothing_to_clean'
+      ? 'Nothing tagged as practice. Mark records first, then confirm.'
+      : ('Cleanup failed: ' + (e?.message || 'unknown error'));
+    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(msg));
+  }
+});
+
+// Results view for a specific batch (also linked from the past-batches list).
+app.get('/data/practice-cleanup/batches/:id', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const data = await loadBatch(c.env.DB, id);
+  if (!data) return c.notFound();
+  return c.html(<PracticeCleanupBatchPage user={user} batch={data.batch} rows={data.rows} />);
+});
+
+// Restore a previously-executed batch.  Phrase guard: "RESTORE BATCH".
+app.post('/data/practice-cleanup/batches/:id/restore', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  if (confirm !== 'RESTORE BATCH') {
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
+      'You must type "RESTORE BATCH" exactly to confirm.'
+    ));
+  }
+  try {
+    const result = await restoreBatch(c.env.DB, id, user.id);
+    const total =
+      result.restored.coaching_note +
+      result.restored.pd_enrollment +
+      result.restored.external_pd_submission +
+      result.restored.observation;
+    await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_restore', {
+      entityType: 'bulk', rowCount: total,
+      detail: `Batch #${id}: restored ${total} parent record${total === 1 ? '' : 's'} + cascade. Notifications and activity_log rows were NOT re-created (they were hard-deleted at execute time).`,
+      filters: { batch_id: id },
+    });
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
+      `Restored batch #${id}: ${total} parent record${total === 1 ? '' : 's'} + cascade.`
+    ));
+  } catch (e: any) {
+    const msg = e?.message === 'batch_not_found' ? 'Batch not found.'
+      : e?.message === 'batch_not_restorable' ? 'This batch is not in a state that can be restored.'
+      : ('Restore failed: ' + (e?.message || 'unknown error'));
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg));
+  }
+});
+
 export default app;
 
 // ============================== VIEWS ==============================
@@ -2310,9 +2494,15 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
     <Layout title="Data Management" user={user} activeNav="data">
       <div class="flex items-start justify-between mb-1">
         <h1 class="font-display text-2xl text-aps-navy">Data Management</h1>
-        <a href="/admin/data/audit-log" class="text-sm text-aps-blue hover:underline mt-1"><i class="fas fa-list-check mr-1"></i>Full admin audit log</a>
+        <div class="text-sm mt-1 space-x-3">
+          <a href="/admin/data/practice-cleanup" class="text-aps-blue hover:underline"><i class="fas fa-broom mr-1"></i>Practice-data cleanup</a>
+          <a href="/admin/data/audit-log" class="text-aps-blue hover:underline"><i class="fas fa-list-check mr-1"></i>Full admin audit log</a>
+        </div>
       </div>
       <p class="text-slate-600 text-sm mb-4">Edit or delete observations, mass-delete by filter, reset practice / demo data, and toggle soft-delete. Users, schools, rubric, and pedagogy library are <strong>never</strong> touched by the actions below.</p>
+      <div class="mb-4 p-3 rounded bg-sky-50 border border-sky-200 text-sky-900 text-sm">
+        <strong>Cleaning up after training?</strong> Use <a href="/admin/data/practice-cleanup" class="underline">Practice-data cleanup</a> to <strong>select individual records</strong> (coaching notes, PD activity, practice observations) and remove them along with their dependents and matching notifications, with a working <strong>undo</strong>. The buttons below on this page clear <strong>entire categories</strong> — use them only when you intend to wipe.
+      </div>
       {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
 
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
@@ -2482,6 +2672,325 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
           </form>
         </Card>
       </div>
+    </Layout>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Practice-cleanup workflow — landing page (Sept 24, 2026)
+// ----------------------------------------------------------------------------
+function PracticeCleanupPage({ user, candidates, batches, browse, msg }: any) {
+  // Group candidates by entity_type so the "review scope" panel is readable.
+  const byType: Record<string, any[]> = {
+    coaching_note: [], pd_enrollment: [], external_pd_submission: [], observation: [],
+  };
+  for (const c of (candidates as any[])) (byType[c.entity_type] ||= []).push(c);
+  const totalCandidates = candidates.length;
+  const sumDep = (rows: any[], key: string) => rows.reduce((s, r) => s + (r.dep_counts?.[key] || 0), 0);
+  return (
+    <Layout title="Practice-data cleanup" user={user} activeNav="data">
+      <div class="flex items-start justify-between mb-1">
+        <h1 class="font-display text-2xl text-aps-navy">Practice-data cleanup</h1>
+        <a href="/admin/data" class="text-sm text-aps-blue hover:underline mt-1"><i class="fas fa-arrow-left mr-1"></i>Back to Data Management</a>
+      </div>
+      <p class="text-slate-600 text-sm mb-2">
+        Select individual records to clean up after training. This is <strong>selected practice cleanup</strong> —
+        it never clears an entire category and never touches records you haven't explicitly tagged. Accounts,
+        passwords, roles, coaching capabilities, assignments, schools, rubric, module content, and any records
+        you don't tag remain untouched.
+      </p>
+      <p class="text-slate-600 text-sm mb-4"><strong>Workflow:</strong> tag records → review scope → confirm → see results. Every execute step creates a batch you can undo.</p>
+      {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
+
+      {/* ==================== REVIEW SCOPE ==================== */}
+      <a id="scope"></a>
+      <Card title={`Review scope — ${totalCandidates} record${totalCandidates === 1 ? '' : 's'} tagged as practice`} icon="fas fa-magnifying-glass">
+        {totalCandidates === 0 ? (
+          <p class="text-sm text-slate-500 italic">Nothing tagged as practice yet. Use the "Tag records" section below to select which records to clean.</p>
+        ) : (
+          <>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <div class="bg-slate-50 border border-slate-200 rounded p-3">
+                <div class="text-xs text-slate-500">Coaching notes</div>
+                <div class="text-2xl font-display text-aps-navy">{byType.coaching_note.length}</div>
+                <div class="text-[11px] text-slate-500 mt-1">
+                  {sumDep(byType.coaching_note, 'audit_rows')} audit · {sumDep(byType.coaching_note, 'share_ledger_rows')} ledger ·<br />
+                  {sumDep(byType.coaching_note, 'notifications')} notif · {sumDep(byType.coaching_note, 'activity_log_rows')} activity
+                </div>
+              </div>
+              <div class="bg-slate-50 border border-slate-200 rounded p-3">
+                <div class="text-xs text-slate-500">PD enrollments</div>
+                <div class="text-2xl font-display text-aps-navy">{byType.pd_enrollment.length}</div>
+                <div class="text-[11px] text-slate-500 mt-1">
+                  {sumDep(byType.pd_enrollment, 'deliverables')} deliv · {sumDep(byType.pd_enrollment, 'reflections')} refl ·<br />
+                  {sumDep(byType.pd_enrollment, 'deliverable_scores')} scores · {sumDep(byType.pd_enrollment, 'notifications')} notif
+                </div>
+              </div>
+              <div class="bg-slate-50 border border-slate-200 rounded p-3">
+                <div class="text-xs text-slate-500">External PD</div>
+                <div class="text-2xl font-display text-aps-navy">{byType.external_pd_submission.length}</div>
+                <div class="text-[11px] text-slate-500 mt-1">
+                  {sumDep(byType.external_pd_submission, 'notifications')} notif · {sumDep(byType.external_pd_submission, 'activity_log_rows')} activity
+                </div>
+              </div>
+              <div class="bg-slate-50 border border-slate-200 rounded p-3">
+                <div class="text-xs text-slate-500">Observations</div>
+                <div class="text-2xl font-display text-aps-navy">{byType.observation.length}</div>
+                <div class="text-[11px] text-slate-500 mt-1">
+                  {sumDep(byType.observation, 'feedback_items')} fb · {sumDep(byType.observation, 'focus_areas')} focus ·<br />
+                  {sumDep(byType.observation, 'observation_scores')} scores · {sumDep(byType.observation, 'notifications')} notif
+                </div>
+              </div>
+            </div>
+            <div class="overflow-x-auto"><table class="w-full text-sm">
+              <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+                <tr><th class="py-2">Kind</th><th>Label</th><th class="text-right">Dependent rows</th><th class="text-right">Untag</th></tr>
+              </thead>
+              <tbody>
+                {(candidates as any[]).map((c: any) => {
+                  const deps = Object.entries(c.dep_counts).filter(([, v]: any) => v > 0).map(([k, v]) => `${k}=${v}`).join(', ') || '—';
+                  return (
+                    <tr class="border-b border-slate-100 align-top">
+                      <td class="py-2 text-xs font-mono">{c.entity_type}</td>
+                      <td class="text-xs">{c.label}</td>
+                      <td class="text-xs text-slate-600 text-right">{deps}</td>
+                      <td class="text-xs text-right">
+                        <form method="post" action="/admin/data/practice-cleanup/mark" class="inline">
+                          <input type="hidden" name="entity_type" value={c.entity_type} />
+                          <input type="hidden" name="entity_id" value={c.entity_id} />
+                          <input type="hidden" name="is_practice" value="0" />
+                          <button class="text-xs text-slate-500 hover:underline">Untag</button>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table></div>
+          </>
+        )}
+      </Card>
+
+      {/* ==================== CONFIRM & EXECUTE ==================== */}
+      <a id="execute"></a>
+      <div class="mt-6">
+        <Card title="Confirm & clean" icon="fas fa-broom">
+          <p class="text-sm text-slate-600 mb-2">
+            Executing will <strong>soft-delete</strong> every tagged parent record above along with its dependent audit / ledger / deliverable / score / feedback / focus-area rows. Matching <strong>notifications</strong> and <strong>activity_log</strong> rows are removed permanently so cleaned practice notes don't leave alert history. A batch id will be created so you can undo the entire cleanup with one click.
+          </p>
+          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-shield-halved mr-1"></i>Preserved: user accounts, passwords, roles, coaching capabilities, assignments, schools, rubric, module content, credited hours on any record you did NOT tag, and every notification/activity entry that does not point at a tagged record.</p>
+          <form method="post" action="/admin/data/practice-cleanup/execute" onsubmit={`return confirm('Clean ${totalCandidates} tagged record(s) + cascade? This creates a batch you can undo from the results page.');`}>
+            <label class="block text-xs text-slate-600 mb-1">Optional note (context for the audit log)</label>
+            <input name="note" maxLength={200} placeholder="e.g. After Sept 24 all-staff training" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAN PRACTICE DATA</code> to confirm</label>
+            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+            <button class="bg-rose-700 text-white px-3 py-1.5 rounded text-sm hover:bg-rose-800" disabled={totalCandidates === 0}>
+              <i class="fas fa-broom mr-1"></i>Clean {totalCandidates} tagged record{totalCandidates === 1 ? '' : 's'}
+            </button>
+          </form>
+        </Card>
+      </div>
+
+      {/* ==================== BROWSE + TAG ==================== */}
+      <div class="mt-8">
+        <h2 class="font-display text-lg text-aps-navy mb-2">Tag records</h2>
+        <p class="text-slate-600 text-sm mb-4">Recent 50 rows per table. Click Tag to mark a record as practice; the review-scope panel above updates immediately.</p>
+        <div class="grid md:grid-cols-2 gap-4">
+          <BrowseTable
+            title="Coaching notes"
+            icon="fas fa-comment-medical"
+            entity_type="coaching_note"
+            rows={browse.coaching_notes}
+            renderLabel={(r: any) => `#${r.id} — ${r.author_name} → ${r.teacher_name} · ${r.status} · ${r.occurred_on}`}
+          />
+          <BrowseTable
+            title="PD enrollments"
+            icon="fas fa-graduation-cap"
+            entity_type="pd_enrollment"
+            rows={browse.pd_enrollments}
+            renderLabel={(r: any) => `#${r.id} — ${r.teacher_name} · ${r.module_title || 'module'} · ${r.status}${r.hours_credited ? ` · ${r.hours_credited}h` : ''}`}
+          />
+          <BrowseTable
+            title="External PD submissions"
+            icon="fas fa-file-import"
+            entity_type="external_pd_submission"
+            rows={browse.external_pd_submissions}
+            renderLabel={(r: any) => `#${r.id} — ${r.teacher_name} · "${r.title}" · ${r.status} · ${r.hours}h`}
+          />
+          <BrowseTable
+            title="Observations"
+            icon="fas fa-clipboard-list"
+            entity_type="observation"
+            rows={browse.observations}
+            renderLabel={(r: any) => `#${r.id} — ${r.appraiser_name} → ${r.teacher_name} · ${r.observation_type} · ${r.status} · ${r.observed_at || ''}`}
+          />
+        </div>
+      </div>
+
+      {/* ==================== PAST BATCHES ==================== */}
+      <div class="mt-8">
+        <Card title="Recent cleanup batches" icon="fas fa-clock-rotate-left">
+          {batches.length === 0 ? (
+            <p class="text-sm text-slate-500 italic">No cleanup batches yet.</p>
+          ) : (
+            <div class="overflow-x-auto"><table class="w-full text-sm">
+              <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+                <tr><th class="py-2">Batch</th><th>When</th><th>Actor</th><th>Status</th><th class="text-right">Rows</th><th>Note</th><th></th></tr>
+              </thead>
+              <tbody>
+                {(batches as any[]).map((b: any) => (
+                  <tr class="border-b border-slate-100 align-top">
+                    <td class="py-2 text-xs font-mono">#{b.id}</td>
+                    <td class="text-xs text-slate-500 whitespace-nowrap">{formatDateTime(b.created_at)}</td>
+                    <td class="text-xs">{b.actor_name}</td>
+                    <td class="text-xs">
+                      <span class={
+                        b.status === 'executed' ? 'text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-2 py-0.5 text-[11px]'
+                          : b.status === 'restored' ? 'text-slate-700 bg-slate-100 border border-slate-300 rounded px-2 py-0.5 text-[11px]'
+                          : 'text-amber-800 bg-amber-100 border border-amber-300 rounded px-2 py-0.5 text-[11px]'
+                      }>{b.status}</span>
+                    </td>
+                    <td class="text-xs text-right">{b.row_count}</td>
+                    <td class="text-xs text-slate-600">{b.note || ''}</td>
+                    <td class="text-xs text-right"><a href={`/admin/data/practice-cleanup/batches/${b.id}`} class="text-aps-blue hover:underline">View →</a></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+        </Card>
+      </div>
+    </Layout>
+  );
+}
+
+function BrowseTable({ title, icon, entity_type, rows, renderLabel }: any) {
+  return (
+    <Card title={title} icon={icon}>
+      {rows.length === 0 ? (
+        <p class="text-sm text-slate-500 italic">No records to show.</p>
+      ) : (
+        <div class="overflow-x-auto"><table class="w-full text-xs">
+          <tbody>
+            {rows.map((r: any) => (
+              <tr class="border-b border-slate-100 align-top">
+                <td class="py-1.5">
+                  {r.is_practice ? <span class="text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1 mr-1">tagged</span> : null}
+                  {renderLabel(r)}
+                </td>
+                <td class="text-right whitespace-nowrap">
+                  <form method="post" action="/admin/data/practice-cleanup/mark" class="inline">
+                    <input type="hidden" name="entity_type" value={entity_type} />
+                    <input type="hidden" name="entity_id" value={r.id} />
+                    <input type="hidden" name="is_practice" value={r.is_practice ? '0' : '1'} />
+                    <button class={`text-xs px-2 py-0.5 rounded ${r.is_practice ? 'text-slate-600 border border-slate-300 hover:bg-slate-100' : 'bg-amber-600 text-white hover:bg-amber-700'}`}>
+                      {r.is_practice ? 'Untag' : 'Tag'}
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Practice-cleanup workflow — results / restore page
+// ----------------------------------------------------------------------------
+function PracticeCleanupBatchPage({ user, batch, rows }: any) {
+  const summary = batch.affected_counts_json ? JSON.parse(batch.affected_counts_json) : null;
+  return (
+    <Layout title={`Cleanup batch #${batch.id}`} user={user} activeNav="data">
+      <div class="flex items-start justify-between mb-1">
+        <h1 class="font-display text-2xl text-aps-navy">Cleanup batch #{batch.id}</h1>
+        <a href="/admin/data/practice-cleanup" class="text-sm text-aps-blue hover:underline mt-1"><i class="fas fa-arrow-left mr-1"></i>Back to practice cleanup</a>
+      </div>
+      <p class="text-slate-600 text-sm mb-4">
+        Actor: <strong>{batch.actor_name}</strong> · Created: {formatDateTime(batch.created_at)}
+        {batch.executed_at ? <> · Executed: {formatDateTime(batch.executed_at)}</> : null}
+        {batch.restored_at ? <> · Restored: {formatDateTime(batch.restored_at)} by {batch.restored_by_name || '—'}</> : null}
+        <span class={`ml-3 inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${
+          batch.status === 'executed' ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+          : batch.status === 'restored' ? 'bg-slate-100 border-slate-300 text-slate-700'
+          : 'bg-amber-50 border-amber-300 text-amber-800'}`}>{batch.status}</span>
+      </p>
+      {batch.note ? <p class="text-sm italic text-slate-500 mb-4">Note: {batch.note}</p> : null}
+
+      {/* Results summary */}
+      {summary ? (
+        <Card title="Affected rows (this batch)" icon="fas fa-list-check">
+          <div class="grid md:grid-cols-2 gap-4 text-sm">
+            <div>
+              <h3 class="font-display text-aps-navy mb-1">Parent records soft-deleted</h3>
+              <ul class="space-y-1 text-slate-700">
+                <li>coaching_notes: <strong>{summary.affected.coaching_note}</strong></li>
+                <li>pd_enrollments: <strong>{summary.affected.pd_enrollment}</strong></li>
+                <li>external_pd_submissions: <strong>{summary.affected.external_pd_submission}</strong></li>
+                <li>observations: <strong>{summary.affected.observation}</strong></li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="font-display text-aps-navy mb-1">Cascade</h3>
+              <ul class="space-y-1 text-slate-700">
+                <li>coaching_note_audit (soft): <strong>{summary.cascaded.coaching_note_audit_soft}</strong></li>
+                <li>coaching_note_share_delivery (hard): <strong>{summary.cascaded.coaching_note_share_delivery_hard}</strong></li>
+                <li>pd_deliverables (soft): <strong>{summary.cascaded.pd_deliverables_soft}</strong></li>
+                <li>pd_reflections (soft): <strong>{summary.cascaded.pd_reflections_soft}</strong></li>
+                <li>pd_deliverable_scores (soft): <strong>{summary.cascaded.pd_deliverable_scores_soft}</strong></li>
+                <li>feedback_items (soft): <strong>{summary.cascaded.feedback_items_soft}</strong></li>
+                <li>focus_areas (soft): <strong>{summary.cascaded.focus_areas_soft}</strong></li>
+                <li>notifications (hard): <strong>{summary.cascaded.notifications_hard}</strong></li>
+                <li>activity_log (hard): <strong>{summary.cascaded.activity_log_hard}</strong></li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 mt-3">
+            <i class="fas fa-info-circle mr-1"></i>
+            Restore un-soft-deletes every parent + its soft-deleted cascade. It does NOT re-create the notifications or activity_log rows that were hard-deleted at execute time (those are derived; a restored note becomes visible again but the recipient's inbox isn't retroactively repopulated).
+          </p>
+        </Card>
+      ) : null}
+
+      {/* Enumerated selection */}
+      <div class="mt-6">
+        <Card title={`Records in this batch (${rows.length})`} icon="fas fa-list-ol">
+          <div class="overflow-x-auto"><table class="w-full text-sm">
+            <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+              <tr><th class="py-2">Kind</th><th>Id</th><th>Label</th></tr>
+            </thead>
+            <tbody>
+              {(rows as any[]).map((r: any) => (
+                <tr class="border-b border-slate-100">
+                  <td class="py-2 text-xs font-mono">{r.entity_type}</td>
+                  <td class="text-xs font-mono">#{r.entity_id}</td>
+                  <td class="text-xs text-slate-600">{r.label}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        </Card>
+      </div>
+
+      {/* Restore */}
+      {batch.status === 'executed' ? (
+        <div class="mt-6">
+          <Card title="Restore this batch" icon="fas fa-arrow-rotate-left">
+            <p class="text-sm text-slate-600 mb-2">
+              Un-soft-delete every parent record and its soft-deleted cascade. Notifications and activity_log rows that were hard-deleted at execute time are NOT re-created.
+            </p>
+            <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/restore`} onsubmit="return confirm('Restore this batch? Records will become visible again in the affected views.')">
+              <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">RESTORE BATCH</code> to confirm</label>
+              <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+              <button class="bg-emerald-700 text-white px-3 py-1.5 rounded text-sm hover:bg-emerald-800">
+                <i class="fas fa-arrow-rotate-left mr-1"></i>Restore batch #{batch.id}
+              </button>
+            </form>
+          </Card>
+        </div>
+      ) : null}
     </Layout>
   );
 }

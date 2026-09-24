@@ -33,10 +33,12 @@ app.get('/', async (c) => {
     // Multiple coaches can share notes about the same teacher (Aaron's
     // overlapping caseloads); each row carries the author name so the
     // teacher can see WHO wrote each entry.
+    // Practice-cleanup soft-delete (migration 0015): hide n.deleted_at rows
+    // so a soft-deleted practice note disappears from the teacher's view.
     c.env.DB.prepare(
       `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, u.title AS author_title
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
-        WHERE n.teacher_id = ? AND n.status = 'shared'
+        WHERE n.teacher_id = ? AND n.status = 'shared' AND n.deleted_at IS NULL
         ORDER BY COALESCE(n.first_shared_at, n.updated_at) DESC`
     ).bind(user.id).all(),
   ]);
@@ -77,7 +79,10 @@ app.get('/observations/:id', async (c) => {
 app.post('/observations/:id/acknowledge', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
-  const o = await c.env.DB.prepare('SELECT * FROM observations WHERE id = ? AND teacher_id = ?').bind(id, user.id).first<any>();
+  const o = await c.env.DB.prepare(
+    // Soft-deleted observation cannot be acknowledged.
+    'SELECT * FROM observations WHERE id = ? AND teacher_id = ? AND deleted_at IS NULL'
+  ).bind(id, user.id).first<any>();
   if (!o) return c.text('Not found', 404);
   if (o.status !== 'published') return c.redirect(`/teacher/observations/${id}`);
   const body = await c.req.parseBody();

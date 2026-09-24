@@ -97,18 +97,20 @@ export async function getTeacherSummary(db: D1Database, teacherId: number) {
   const teacher = await db.prepare('SELECT * FROM users WHERE id = ? AND role = ?').bind(teacherId, 'teacher').first();
   if (!teacher) return null;
   const observations = await db.prepare(
+    // Practice-cleanup soft-delete (migration 0015): hide o.deleted_at rows.
     `SELECT o.*, a.first_name AS app_first, a.last_name AS app_last
      FROM observations o
      JOIN users a ON a.id = o.appraiser_id
-     WHERE o.teacher_id = ?
+     WHERE o.teacher_id = ? AND o.deleted_at IS NULL
      ORDER BY o.observed_at DESC`
   ).bind(teacherId).all();
   const focus = await db.prepare(
+    // Practice-cleanup soft-delete (migration 0015): hide f.deleted_at rows.
     `SELECT f.*, i.name AS indicator_name, i.code AS indicator_code, d.code AS domain_code, d.name AS domain_name
      FROM focus_areas f
      LEFT JOIN framework_indicators i ON i.id = f.indicator_id
      LEFT JOIN framework_domains d ON d.id = i.domain_id
-     WHERE f.teacher_id = ? AND f.status = 'active'
+     WHERE f.teacher_id = ? AND f.status = 'active' AND f.deleted_at IS NULL
      ORDER BY f.opened_at DESC`
   ).bind(teacherId).all();
   return { teacher, observations: observations.results || [], focusAreas: focus.results || [] };
@@ -116,6 +118,9 @@ export async function getTeacherSummary(db: D1Database, teacherId: number) {
 
 export async function getObservation(db: D1Database, id: number) {
   const o = await db.prepare(
+    // Practice-cleanup soft-delete: reading a deleted observation returns
+    // null, which upstream routes translate to 404.  This keeps a
+    // soft-deleted practice observation out of every detail view.
     `SELECT o.*,
             t.first_name AS t_first, t.last_name AS t_last, t.email AS t_email, t.title AS t_title,
             t.subject_area AS t_subject_area, t.classroom_type AS t_classroom_type, t.grade_band AS t_grade_band,
@@ -123,7 +128,7 @@ export async function getObservation(db: D1Database, id: number) {
      FROM observations o
      JOIN users t ON t.id = o.teacher_id
      JOIN users a ON a.id = o.appraiser_id
-     WHERE o.id = ?`
+     WHERE o.id = ? AND o.deleted_at IS NULL`
   ).bind(id).first<any>();
   if (!o) return null;
   const scores = await db.prepare(
@@ -135,11 +140,12 @@ export async function getObservation(db: D1Database, id: number) {
      ORDER BY d.sort_order, i.sort_order`
   ).bind(id).all();
   const feedback = await db.prepare(
+    // feedback_items now has deleted_at (migration 0015).
     `SELECT fi.*, i.name AS indicator_name, i.code AS indicator_code, d.code AS domain_code
      FROM feedback_items fi
      LEFT JOIN framework_indicators i ON i.id = fi.indicator_id
      LEFT JOIN framework_domains d ON d.id = i.domain_id
-     WHERE fi.observation_id = ?
+     WHERE fi.observation_id = ? AND fi.deleted_at IS NULL
      ORDER BY fi.sort_order, fi.id`
   ).bind(id).all();
   return { ...o, scores: scores.results || [], feedback: feedback.results || [] };
@@ -164,7 +170,7 @@ export async function getTeacherPerformanceSummary(db: D1Database, teacherId: nu
      FROM framework_domains d
      LEFT JOIN framework_indicators i ON i.domain_id = d.id
      LEFT JOIN observation_scores s ON s.indicator_id = i.id
-     LEFT JOIN observations o ON o.id = s.observation_id
+     LEFT JOIN observations o ON o.id = s.observation_id AND o.deleted_at IS NULL
      WHERE (o.teacher_id = ? OR o.teacher_id IS NULL)
        AND (o.status IN ('published','acknowledged') OR o.status IS NULL)
      GROUP BY d.id, d.code, d.name, d.sort_order
@@ -180,7 +186,7 @@ export async function getTeacherPerformanceSummary(db: D1Database, teacherId: nu
      JOIN framework_indicators i ON i.id = s.indicator_id
      JOIN framework_domains d ON d.id = i.domain_id
      JOIN observations o ON o.id = s.observation_id
-     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged')
+     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged') AND o.deleted_at IS NULL
      ORDER BY o.observed_at DESC, d.sort_order, i.sort_order
      LIMIT 200`
   ).bind(teacherId).all();
@@ -192,7 +198,7 @@ export async function getTeacherPerformanceSummary(db: D1Database, teacherId: nu
        SUM(CASE WHEN status IN ('draft','scored','awaiting_signature') THEN 1 ELSE 0 END) AS in_progress,
        MAX(CASE WHEN status IN ('published','acknowledged') THEN observed_at END) AS last_observed_at,
        SUM(CASE WHEN status IN ('published','acknowledged') THEN 1 ELSE 0 END) AS total_published
-     FROM observations WHERE teacher_id = ?`
+     FROM observations WHERE teacher_id = ? AND deleted_at IS NULL`
   ).bind(teacherId).first<any>();
 
   // Overall totals
@@ -204,7 +210,7 @@ export async function getTeacherPerformanceSummary(db: D1Database, teacherId: nu
             SUM(CASE WHEN s.level=1 THEN 1 ELSE 0 END) AS n1
      FROM observation_scores s
      JOIN observations o ON o.id = s.observation_id
-     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged')`
+     WHERE o.teacher_id = ? AND o.status IN ('published','acknowledged') AND o.deleted_at IS NULL`
   ).bind(teacherId).first<any>();
 
   // Keep latest rating per indicator for the "Most Recent Indicator Ratings" block

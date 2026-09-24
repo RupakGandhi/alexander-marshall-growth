@@ -26,7 +26,8 @@ app.get('/', async (c) => {
   const data: any[] = [];
   for (const t of (teachers as any[])) {
     const focus = await c.env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM focus_areas WHERE teacher_id=? AND status='active'`
+      // Practice-cleanup soft-delete: exclude f.deleted_at rows.
+    `SELECT COUNT(*) AS n FROM focus_areas WHERE teacher_id=? AND status='active' AND deleted_at IS NULL`
     ).bind(t.id).first<any>();
     data.push({ ...t, focusCount: focus?.n || 0 });
   }
@@ -49,16 +50,18 @@ app.get('/teachers/:id', async (c) => {
 
   // Published observations only — feedback items minus scores/private notes
   const obs = await c.env.DB.prepare(
+    // Practice-cleanup soft-delete: exclude o.deleted_at rows.
     `SELECT o.id, o.observed_at, o.observation_type, o.class_context, o.subject, o.published_at, o.overall_summary, o.status,
        a.first_name AS a_first, a.last_name AS a_last
      FROM observations o JOIN users a ON a.id = o.appraiser_id
-     WHERE o.teacher_id=? AND (o.status='published' OR o.status='acknowledged')
+     WHERE o.teacher_id=? AND (o.status='published' OR o.status='acknowledged') AND o.deleted_at IS NULL
      ORDER BY o.observed_at DESC`
   ).bind(teacherId).all();
 
   const obsWithFeedback: any[] = [];
   for (const o of (obs.results as any[])) {
     const fb = await c.env.DB.prepare(
+      // feedback_items now honors deleted_at (migration 0015).
       `SELECT fi.category, fi.title, fi.body, fi.indicator_id,
          i.name AS indicator_name, i.code AS indicator_code, d.code AS domain_code
        FROM feedback_items fi
@@ -66,17 +69,19 @@ app.get('/teachers/:id', async (c) => {
        LEFT JOIN framework_domains d ON d.id = i.domain_id
        WHERE fi.observation_id = ?
        AND fi.category IN ('glow','grow','focus_area','next_step')
+       AND fi.deleted_at IS NULL
        ORDER BY fi.sort_order, fi.id`
     ).bind(o.id).all();
     obsWithFeedback.push({ ...o, feedback: fb.results || [] });
   }
 
   const focus = await c.env.DB.prepare(
+    // Practice-cleanup soft-delete: exclude f.deleted_at rows.
     `SELECT f.*, i.name AS indicator_name, i.code AS indicator_code, d.code AS domain_code, d.name AS domain_name
      FROM focus_areas f
      LEFT JOIN framework_indicators i ON i.id = f.indicator_id
      LEFT JOIN framework_domains d ON d.id = i.domain_id
-     WHERE f.teacher_id=? AND f.status='active'
+     WHERE f.teacher_id=? AND f.status='active' AND f.deleted_at IS NULL
      ORDER BY f.opened_at DESC`
   ).bind(teacherId).all();
 
@@ -133,14 +138,17 @@ app.get('/teachers/:id', async (c) => {
        AND nx.entity_type = 'coaching_note'
        AND nx.entity_id = n.id
   ) AS inbox_delivered`;
+  // Practice-cleanup soft-delete (migration 0015): hide n.deleted_at rows
+  // from BOTH the author-scoped view and the super_admin support view.
+  // A soft-deleted practice note must not surface in any coach page.
   const notesSql = user.role === 'super_admin'
     ? `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}, ${inboxExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
-        WHERE n.teacher_id = ?
+        WHERE n.teacher_id = ? AND n.deleted_at IS NULL
         ORDER BY n.updated_at DESC`
     : `SELECT n.*, u.first_name AS author_first, u.last_name AS author_last, ${deliveryStatus}, ${inboxExists}
          FROM coaching_notes n JOIN users u ON u.id = n.author_id
-        WHERE n.teacher_id = ? AND n.author_id = ?
+        WHERE n.teacher_id = ? AND n.author_id = ? AND n.deleted_at IS NULL
         ORDER BY n.updated_at DESC`;
   const notesRes = user.role === 'super_admin'
     ? await c.env.DB.prepare(notesSql).bind(teacherId).all()
@@ -804,9 +812,11 @@ app.post('/teachers/:id/notes', async (c) => {
   // row with this (author_id, client_token) already exists we're on a retry
   // path, and the retry branch is the only place that runs.  This keeps the
   // atomic-batch path (below) reserved for genuine first inserts.
+  // Soft-deleted priors are ignored: if the original row was cleaned as
+  // practice, the coach can re-use the same token for a genuine new save.
   const priorRow = await c.env.DB.prepare(
     `SELECT id, teacher_id, status, first_shared_at, version, payload_digest
-       FROM coaching_notes WHERE author_id=? AND client_token=?`
+       FROM coaching_notes WHERE author_id=? AND client_token=? AND deleted_at IS NULL`
   ).bind(user.id, clientToken).first<any>();
 
   if (priorRow) {
@@ -937,7 +947,7 @@ app.post('/teachers/:id/notes', async (c) => {
     // wrote something different under our token.
     const stored = await c.env.DB.prepare(
       `SELECT id, teacher_id, status, payload_digest, first_shared_at
-         FROM coaching_notes WHERE author_id=? AND client_token=?`
+         FROM coaching_notes WHERE author_id=? AND client_token=? AND deleted_at IS NULL`
     ).bind(user.id, clientToken).first<any>();
     if (!stored) return c.text('save failed', 500);
     if (Number(stored.teacher_id) !== teacherId) {
@@ -1007,7 +1017,9 @@ app.post('/teachers/:teacherId/notes/:noteId/update', async (c) => {
     return c.text('Super-admin support access is view-only for coaching notes. Only the authoring coach can edit or share.', 403);
   }
   const existing = await c.env.DB.prepare(
-    `SELECT * FROM coaching_notes WHERE id=? AND teacher_id=?`
+    // Ownership check filters soft-deleted notes so an admin-cleaned note
+    // cannot be edited via a stale form URL.
+    `SELECT * FROM coaching_notes WHERE id=? AND teacher_id=? AND deleted_at IS NULL`
   ).bind(noteId, teacherId).first<any>();
   if (!existing) return c.text('Note not found', 404);
   // C7 tightening: author ownership is now REQUIRED — super_admin no longer
@@ -1169,7 +1181,7 @@ app.post('/teachers/:teacherId/notes/:noteId/notify-retry', async (c) => {
     return c.text('Super-admin support access is view-only for coaching notes.', 403);
   }
   const existing = await c.env.DB.prepare(
-    `SELECT id, author_id, teacher_id, status FROM coaching_notes WHERE id=? AND teacher_id=?`
+    `SELECT id, author_id, teacher_id, status FROM coaching_notes WHERE id=? AND teacher_id=? AND deleted_at IS NULL`
   ).bind(noteId, teacherId).first<any>();
   if (!existing) return c.text('Note not found', 404);
   if (existing.author_id !== user.id) {

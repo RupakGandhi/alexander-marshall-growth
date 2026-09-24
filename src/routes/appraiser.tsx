@@ -50,9 +50,11 @@ app.get('/', async (c) => {
   if (ids.length) {
     const placeholders = ids.map(() => '?').join(',');
     const rows = await c.env.DB.prepare(
+      // Practice-cleanup soft-delete: exclude o.deleted_at rows.
       `SELECT o.* FROM observations o
        WHERE o.teacher_id IN (${placeholders})
-       AND o.id = (SELECT MAX(id) FROM observations o2 WHERE o2.teacher_id = o.teacher_id)`
+       AND o.deleted_at IS NULL
+       AND o.id = (SELECT MAX(id) FROM observations o2 WHERE o2.teacher_id = o.teacher_id AND o2.deleted_at IS NULL)`
     ).bind(...ids).all();
     for (const r of (rows.results as any[])) latest[r.teacher_id] = r;
   }
@@ -187,10 +189,11 @@ app.post('/teachers/:id/observations/start', async (c) => {
 app.get('/observations', async (c) => {
   const user = c.get('user')!;
   const rows = await c.env.DB.prepare(
+    // Practice-cleanup soft-delete: exclude o.deleted_at rows.
     `SELECT o.*, t.first_name AS t_first, t.last_name AS t_last, t.title AS t_title
      FROM observations o
      JOIN users t ON t.id = o.teacher_id
-     WHERE o.appraiser_id = ?
+     WHERE o.appraiser_id = ? AND o.deleted_at IS NULL
      ORDER BY o.observed_at DESC`
   ).bind(user.id).all();
   return c.html(<AppraiserObservations user={user} rows={(rows.results as any[]) || []} />);
@@ -521,7 +524,7 @@ app.post('/observations/:id/generate-feedback', async (c) => {
     // without reloading the page or losing the appraiser's scroll position.
     const items = await c.env.DB.prepare(
       `SELECT id, indicator_id, category, title, body, sort_order, source
-         FROM feedback_items WHERE observation_id=? ORDER BY category, sort_order, id`
+         FROM feedback_items WHERE observation_id=? AND deleted_at IS NULL ORDER BY category, sort_order, id`
     ).bind(id).all();
     return c.json({
       ok: true,
@@ -614,7 +617,7 @@ app.post('/observations/:id/publish', async (c) => {
 
   // Promote focus_area feedback items to teacher focus_areas
   const focus = await c.env.DB.prepare(
-    `SELECT * FROM feedback_items WHERE observation_id=? AND category='focus_area'`
+    `SELECT * FROM feedback_items WHERE observation_id=? AND category='focus_area' AND deleted_at IS NULL`
   ).bind(id).all();
   const focusRows = (focus.results as any[]) || [];
   for (const f of focusRows) {

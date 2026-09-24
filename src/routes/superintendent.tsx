@@ -27,12 +27,12 @@ app.get('/', async (c) => {
        (SELECT COUNT(DISTINCT o.id) FROM observations o
           JOIN users u ON u.id = o.teacher_id
           LEFT JOIN user_schools us ON us.user_id = u.id
-         WHERE (u.school_id = s.id OR us.school_id = s.id)) AS total_obs,
+         WHERE (u.school_id = s.id OR us.school_id = s.id) AND o.deleted_at IS NULL) AS total_obs,
        (SELECT COUNT(DISTINCT o.id) FROM observations o
           JOIN users u ON u.id = o.teacher_id
           LEFT JOIN user_schools us ON us.user_id = u.id
          WHERE (u.school_id = s.id OR us.school_id = s.id)
-           AND (o.status='published' OR o.status='acknowledged')) AS published_obs
+           AND (o.status='published' OR o.status='acknowledged') AND o.deleted_at IS NULL) AS published_obs
      FROM schools s WHERE s.district_id=1 ORDER BY s.name`
   ).all();
   // Fix 6 — district-wide PD-hours heat-map data.  No school filter at this
@@ -78,8 +78,8 @@ app.get('/schools', async (c) => {
     // Include teachers whose primary school OR any user_schools link matches.
     const teachers = await c.env.DB.prepare(
       `SELECT DISTINCT u.id, u.first_name, u.last_name, u.title,
-         (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND (o.status='published' OR o.status='acknowledged')) AS pub,
-         (SELECT MAX(observed_at) FROM observations o WHERE o.teacher_id = u.id) AS last_obs
+         (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND (o.status='published' OR o.status='acknowledged') AND o.deleted_at IS NULL) AS pub,
+         (SELECT MAX(observed_at) FROM observations o WHERE o.teacher_id = u.id AND o.deleted_at IS NULL) AS last_obs
        FROM users u
        LEFT JOIN user_schools us ON us.user_id = u.id
        WHERE u.role='teacher' AND u.active=1
@@ -96,9 +96,9 @@ app.get('/teachers', async (c) => {
   const user = c.get('user')!;
   const rows = await c.env.DB.prepare(
     `SELECT u.id, u.first_name, u.last_name, u.title, s.name AS school_name,
-       (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id) AS obs_count,
-       (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND (o.status='published' OR o.status='acknowledged')) AS pub_count,
-       (SELECT MAX(observed_at) FROM observations o WHERE o.teacher_id = u.id) AS last_obs
+       (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND o.deleted_at IS NULL) AS obs_count,
+       (SELECT COUNT(*) FROM observations o WHERE o.teacher_id = u.id AND (o.status='published' OR o.status='acknowledged') AND o.deleted_at IS NULL) AS pub_count,
+       (SELECT MAX(observed_at) FROM observations o WHERE o.teacher_id = u.id AND o.deleted_at IS NULL) AS last_obs
      FROM users u LEFT JOIN schools s ON s.id = u.school_id
      WHERE u.role='teacher' AND u.active=1 ORDER BY u.last_name, u.first_name`
   ).all();
@@ -115,7 +115,7 @@ app.get('/teachers/:id', async (c) => {
   const obs = await c.env.DB.prepare(
     `SELECT o.*, a.first_name AS a_first, a.last_name AS a_last
      FROM observations o JOIN users a ON a.id=o.appraiser_id
-     WHERE o.teacher_id=? ORDER BY o.observed_at DESC`
+     WHERE o.teacher_id=? AND o.deleted_at IS NULL ORDER BY o.observed_at DESC`
   ).bind(id).all();
   return c.html(<SuperintendentTeacherDetail user={user} t={t} observations={obs.results || []} />);
 });
@@ -143,7 +143,8 @@ app.get('/insights', async (c) => {
   const sortBy = (c.req.query('sort') || 'avg_desc') as string;
 
   // Build shared WHERE clause for scoped queries.
-  const whereParts: string[] = [`(o.status = 'published' OR o.status = 'acknowledged')`, 's.level IS NOT NULL'];
+  // Practice-cleanup soft-delete: hide o.deleted_at rows from every scoped read.
+  const whereParts: string[] = [`(o.status = 'published' OR o.status = 'acknowledged')`, 's.level IS NOT NULL', 'o.deleted_at IS NULL'];
   const whereBinds: any[] = [];
   if (schoolFilter) { whereParts.push(`(t.school_id = ? OR EXISTS (SELECT 1 FROM user_schools us WHERE us.user_id = t.id AND us.school_id = ?))`); whereBinds.push(Number(schoolFilter), Number(schoolFilter)); }
   if (domainFilter) { whereParts.push(`d.code = ?`); whereBinds.push(domainFilter); }
@@ -305,7 +306,14 @@ app.get('/insights', async (c) => {
   ).bind(...whereBinds).all();
 
   // Recent feedback stream (what's actually being said to teachers).
-  const feedbackWhereParts: string[] = [`(o.status = 'published' OR o.status = 'acknowledged')`];
+  // Practice-cleanup soft-delete (migration 0015): exclude f.deleted_at and
+  // o.deleted_at rows so soft-deleted feedback / observations don't leak
+  // into the superintendent's recent-feedback stream.
+  const feedbackWhereParts: string[] = [
+    `f.deleted_at IS NULL`,
+    `o.deleted_at IS NULL`,
+    `(o.status = 'published' OR o.status = 'acknowledged')`,
+  ];
   const feedbackBinds: any[] = [];
   if (schoolFilter) { feedbackWhereParts.push(`(t.school_id = ? OR EXISTS (SELECT 1 FROM user_schools us WHERE us.user_id = t.id AND us.school_id = ?))`); feedbackBinds.push(Number(schoolFilter), Number(schoolFilter)); }
   if (typeFilter) { feedbackWhereParts.push(`o.observation_type = ?`); feedbackBinds.push(typeFilter); }
@@ -348,15 +356,15 @@ async function computeDistrictKpis(db: D1Database) {
   const teachers = await db.prepare(`SELECT COUNT(*) AS n FROM users WHERE role='teacher' AND active=1`).first<any>();
   const appraisers = await db.prepare(`SELECT COUNT(*) AS n FROM users WHERE role='appraiser' AND active=1`).first<any>();
   const coaches = await db.prepare(`SELECT COUNT(*) AS n FROM users WHERE role='coach' AND active=1`).first<any>();
-  const obs = await db.prepare(`SELECT COUNT(*) AS n FROM observations`).first<any>();
-  const pub = await db.prepare(`SELECT COUNT(*) AS n FROM observations WHERE status='published' OR status='acknowledged'`).first<any>();
-  const ack = await db.prepare(`SELECT COUNT(*) AS n FROM observations WHERE status='acknowledged'`).first<any>();
-  const focus = await db.prepare(`SELECT COUNT(*) AS n FROM focus_areas WHERE status='active'`).first<any>();
+  const obs = await db.prepare(`SELECT COUNT(*) AS n FROM observations WHERE deleted_at IS NULL`).first<any>();
+  const pub = await db.prepare(`SELECT COUNT(*) AS n FROM observations WHERE (status='published' OR status='acknowledged') AND deleted_at IS NULL`).first<any>();
+  const ack = await db.prepare(`SELECT COUNT(*) AS n FROM observations WHERE status='acknowledged' AND deleted_at IS NULL`).first<any>();
+  const focus = await db.prepare(`SELECT COUNT(*) AS n FROM focus_areas WHERE status='active' AND deleted_at IS NULL`).first<any>();
   // Distribution
   const dist = await db.prepare(
     `SELECT level, COUNT(*) AS n FROM observation_scores s
      JOIN observations o ON o.id = s.observation_id
-     WHERE s.level IS NOT NULL AND (o.status='published' OR o.status='acknowledged')
+     WHERE s.level IS NOT NULL AND (o.status='published' OR o.status='acknowledged') AND o.deleted_at IS NULL
      GROUP BY level`
   ).all();
   const distribution: Record<number, number> = { 1:0, 2:0, 3:0, 4:0 };

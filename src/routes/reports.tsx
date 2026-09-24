@@ -76,7 +76,7 @@ async function scopedObservations(db: D1Database, user: any, f: ReportFilters) {
        JOIN users t ON t.id = o.teacher_id
        JOIN users a ON a.id = o.appraiser_id
        LEFT JOIN schools s ON s.id = t.school_id
-      WHERE o.status IN ('published','acknowledged')`;
+      WHERE o.status IN ('published','acknowledged') AND o.deleted_at IS NULL`;
 
   // --- Role scoping ---
   if (user.role === 'appraiser') {
@@ -134,7 +134,7 @@ async function loadObservationDetails(db: D1Database, observationIds: number[]) 
        FROM feedback_items fi
        LEFT JOIN framework_indicators i ON i.id = fi.indicator_id
        LEFT JOIN framework_domains d ON d.id = i.domain_id
-      WHERE fi.observation_id IN (${placeholders})
+      WHERE fi.observation_id IN (${placeholders}) AND fi.deleted_at IS NULL
       ORDER BY fi.sort_order, fi.id`
   ).bind(...observationIds).all();
   return { scores: (scores.results as any[]) || [], feedback: (feedback.results as any[]) || [] };
@@ -644,7 +644,10 @@ function parsePdFilters(c: any): PdFilters {
 // on top of their own personal PD row (union).  Nothing changes for
 // super_admin / superintendent (district-wide).
 async function pdScopeSql(db: D1Database, user: any, f: PdFilters) {
-  const where: string[] = ['1=1'];
+  // Practice-cleanup soft-delete (migration 0015): every PD report row
+  // starts with `e.deleted_at IS NULL` so soft-deleted enrollments never
+  // reach any report list, CSV, or drill-down.
+  const where: string[] = ['e.deleted_at IS NULL'];
   const binds: any[] = [];
 
   // Role scoping
@@ -783,7 +786,7 @@ app.get('/pd', async (c) => {
     JOIN pd_modules m ON m.id = e.module_id
     JOIN framework_indicators i ON i.id = m.indicator_id
     JOIN framework_domains d ON d.id = i.domain_id
-    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
     LEFT JOIN users vb ON vb.id = e.verified_by
     WHERE ${where}
     ORDER BY ${order}
@@ -864,7 +867,7 @@ app.get('/pd.csv', async (c) => {
     JOIN pd_modules m ON m.id = e.module_id
     JOIN framework_indicators i ON i.id = m.indicator_id
     JOIN framework_domains d ON d.id = i.domain_id
-    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+    LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
     LEFT JOIN users vb ON vb.id = e.verified_by
     WHERE ${where}
     ORDER BY ${order}
@@ -935,7 +938,7 @@ app.get('/pd/:id', async (c) => {
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id
-       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
        LEFT JOIN users vb ON vb.id = e.verified_by
        LEFT JOIN users ab ON ab.id = e.assigned_by
        WHERE e.id = ?`
@@ -984,7 +987,8 @@ app.get('/pd/:id', async (c) => {
   }
 
   const reflections = await c.env.DB.prepare(
-    `SELECT phase, body, created_at FROM pd_reflections WHERE enrollment_id = ? ORDER BY phase`
+    // pd_reflections now honors deleted_at (migration 0015).
+    `SELECT phase, body, created_at FROM pd_reflections WHERE enrollment_id = ? AND deleted_at IS NULL ORDER BY phase`
   ).bind(id).all();
 
   return c.html(<PdReportDetail user={user} e={row} reflections={(reflections.results as any[]) || []} />);
