@@ -1612,6 +1612,349 @@ suite('V20 (item 4 — POST /appraiser/observations/:id/save rejects stale write
 }
 
 // ==========================================================================
+suite('V21 (0018 item 1 — concurrent executeCleanup: one winner, restoration works)');
+{
+  // Set up: a single preview batch on a fresh coaching_note.  Kick off
+  // two execute HTTP requests in parallel (they land in D1 as
+  // overlapping db.batch() calls).  Only one may commit the writes; the
+  // loser's INSERT INTO practice_cleanup_execution_lock hits the
+  // PRIMARY KEY constraint and the loser's whole batch rolls back.
+  // The winner writes its stamp to the parent AND the manifest, and the
+  // loser overwrites NEITHER.  A subsequent restore reads the winner's
+  // stamp and successfully un-deletes the parent + children.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9210`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9210, ?, ?, '2026-09-24', 'V21 concurrent-execute test', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  // Untag everything else.
+  const others = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL AND id<>9210
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of others) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9210`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V21 concurrent-execute' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`V21: preview created (id=${bid})`, bid > 0);
+
+  // Fire two concurrent execute POSTs.  Both go through the same admin
+  // session; the HTTP layer serialises requests over the same TCP
+  // connection but fetch() with different bodies triggers separate
+  // requests, which the wrangler dev server processes concurrently.
+  const runOne = () => admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  const [rExecA, rExecB] = await Promise.all([runOne(), runOne()]);
+  ok(`V21: both requests returned 302 (A=${rExecA.status}, B=${rExecB.status})`,
+     rExecA.status === 302 && rExecB.status === 302);
+  // At least one must land on the batch page; the other may either land
+  // on the same batch page (concurrent_execute fallback returns the
+  // winner's state) or on the preview error page with a concurrent
+  // message.
+  const aOk = (rExecA.location || '').includes('/batches/');
+  const bOk = (rExecB.location || '').includes('/batches/');
+  ok(`V21: at least one request landed on batch page (A_ok=${aOk} B_ok=${bOk})`, aOk || bOk);
+
+  // Batch is now in 'executed' status with a SINGLE consistent stamp.
+  const afterExec = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V21: batch status='executed' (${afterExec?.status})`, afterExec?.status === 'executed');
+
+  // Parent's deleted_at must EQUAL the manifest row's deleted_at_stamp.
+  const parentRow = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9210`).get();
+  const manifestRow = db.prepare(`SELECT deleted_at_stamp FROM practice_cleanup_row WHERE batch_id=? AND entity_id=9210`).get(bid);
+  ok(`V21: parent.deleted_at is set (${parentRow?.deleted_at})`, !!parentRow?.deleted_at);
+  ok(`V21: manifest.deleted_at_stamp is set (${manifestRow?.deleted_at_stamp})`, !!manifestRow?.deleted_at_stamp);
+  ok(`V21: parent.deleted_at === manifest.deleted_at_stamp (STAMP CONSISTENCY — the item-1 invariant)`,
+     parentRow?.deleted_at === manifestRow?.deleted_at_stamp);
+
+  // Same consistency for the audit child rows (if any).
+  const childCheck = db.prepare(`SELECT c.child_id, c.deleted_at_stamp AS m_stamp, a.deleted_at AS a_stamp
+    FROM practice_cleanup_child c
+    JOIN coaching_note_audit a ON a.id = c.child_id AND c.child_kind='coaching_note_audit'
+    WHERE c.batch_id=?`).all(bid);
+  let anyChildMismatch = false;
+  for (const cr of childCheck) {
+    if (cr.m_stamp !== cr.a_stamp) anyChildMismatch = true;
+  }
+  ok(`V21: EVERY child's actual deleted_at matches its manifest stamp (${childCheck.length} children checked)`,
+     !anyChildMismatch);
+
+  // Only ONE execution_lock row exists for this batch (the winner).
+  const lockCount = db.prepare(`SELECT COUNT(*) AS n FROM practice_cleanup_execution_lock WHERE batch_id=?`).get(bid).n;
+  ok(`V21: exactly ONE execution_lock row exists (${lockCount})`, lockCount === 1);
+
+  // Restore succeeds and returns parent + children.
+  const rRestore = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  ok(`V21: restore returns 302 (${rRestore.status})`, rRestore.status === 302);
+  const afterRestore = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9210`).get();
+  ok(`V21: parent restored — deleted_at is NULL (${afterRestore?.deleted_at})`, !afterRestore?.deleted_at);
+  const stillDeletedChildren = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_audit
+    WHERE id IN (SELECT child_id FROM practice_cleanup_child WHERE batch_id=? AND child_kind='coaching_note_audit')
+      AND deleted_at IS NOT NULL`).get(bid).n;
+  ok(`V21: children restored — none of this batch's children remain soft-deleted (${stillDeletedChildren})`,
+     stillDeletedChildren === 0);
+  const batchAfterRestore = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V21: batch status='restored' (${batchAfterRestore?.status})`, batchAfterRestore?.status === 'restored');
+}
+
+// ==========================================================================
+suite('V22 (0018 item 2 — frozen scope: late-added child AND notification are preserved)');
+{
+  // Preview a PD enrollment with no existing children.  Between the
+  // scope-hash check inside executeCleanup and the actual db.batch(),
+  // insert (a) a new deliverable AND (b) a new notification for the
+  // enrollment.  Because the delete targets are frozen at preview
+  // time, neither the new deliverable nor the new notification may be
+  // deleted — they are outside the reviewed scope.
+  //
+  // We cannot practically inject "between the internal check and the
+  // batch" from the HTTP layer.  The stronger invariant the 0018 fix
+  // guarantees is: even if the drift check passes, the actual DELETE
+  // targets come from the FROZEN manifest, so a late-added row is not
+  // deleted regardless.  We test that stronger invariant by:
+  //   1. Previewing an enrollment with existing children (frozen scope).
+  //   2. Adding a new deliverable + a new notification AFTER preview.
+  //   3. Executing (drift check will REJECT because the added rows
+  //      changed the dep fingerprint — that's the friendly path).
+  //   4. To also verify the manifest-restriction path: MANUALLY revert
+  //      the added rows just for the drift check, execute, then re-add.
+  //      This is contrived; the more meaningful test is the standard
+  //      drift rejection.
+  //
+  // Additionally we assert that the frozen manifest contains ONLY the
+  // preview-time ids so the execute batch cannot possibly widen its
+  // delete set.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  db.prepare(`DELETE FROM pd_deliverables WHERE enrollment_id=9220`).run();
+  db.prepare(`DELETE FROM pd_reflections WHERE enrollment_id=9220`).run();
+  db.prepare(`DELETE FROM notifications WHERE entity_type='pd_enrollment' AND entity_id=9220`).run();
+  db.prepare(`DELETE FROM activity_log WHERE entity_type='pd_enrollment' AND entity_id=9220`).run();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id=9220`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9220, ?, ?, 'self', 'submitted', 1, ?, ?)`).run(t, mod.id, now, now);
+  // Existing children: one reflection + one notification (so the
+  // preview manifest is non-empty and we can verify late-added rows
+  // are NOT in it).
+  db.prepare(`INSERT INTO pd_reflections (id, enrollment_id, phase, body, created_at)
+    VALUES (92201, 9220, 'learn', 'V22 pre-preview reflection', ?)`).run(now);
+  db.prepare(`INSERT INTO notifications (user_id, kind, title, body, url, entity_type, entity_id, created_at)
+    VALUES (?, 'pd_deliverable_verified', 'V22 pre-preview notif', 'body', '/', 'pd_enrollment', 9220, ?)`).run(t, now);
+  const preNotifId = db.prepare(`SELECT id FROM notifications WHERE entity_type='pd_enrollment' AND entity_id=9220 ORDER BY id DESC LIMIT 1`).get().id;
+
+  // Untag everything else.
+  const othersV22 = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL AND id<>9220
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of othersV22) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='pd_enrollment' AND entity_id=9220`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V22 frozen scope' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+
+  // Frozen scope inspection: the preview manifest contains EXACTLY the
+  // pre-preview rows.
+  const manifestChildIds = db.prepare(`SELECT child_id FROM practice_cleanup_child WHERE batch_id=? ORDER BY child_id`)
+    .all(bid).map(r => r.child_id);
+  const manifestNotifScope = db.prepare(`SELECT scope_id FROM practice_cleanup_notif_scope WHERE batch_id=? AND scope_kind='notification' ORDER BY scope_id`)
+    .all(bid).map(r => r.scope_id);
+  ok(`V22: manifest child ids = [92201] (${manifestChildIds.join(',')})`,
+     manifestChildIds.length === 1 && manifestChildIds[0] === 92201);
+  ok(`V22: manifest notification scope ids = [${preNotifId}] (${manifestNotifScope.join(',')})`,
+     manifestNotifScope.length === 1 && manifestNotifScope[0] === preNotifId);
+
+  // Insert LATE-ADDED child + notification AFTER preview.
+  db.prepare(`INSERT INTO pd_reflections (id, enrollment_id, phase, body, created_at)
+    VALUES (92202, 9220, 'apply', 'V22 LATE ADDED reflection', ?)`).run(now);
+  db.prepare(`INSERT INTO notifications (user_id, kind, title, body, url, entity_type, entity_id, created_at)
+    VALUES (?, 'pd_deliverable_verified', 'V22 LATE ADDED notif', 'body', '/', 'pd_enrollment', 9220, ?)`).run(t, now);
+  const lateNotifId = db.prepare(`SELECT id FROM notifications WHERE entity_type='pd_enrollment' AND entity_id=9220 ORDER BY id DESC LIMIT 1`).get().id;
+
+  // Execute — must reject with scope_changed (dep_fingerprint now
+  // includes notification/activity ids so a late notification alone
+  // trips the check).
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V22: execute rejects with 302 (${rExec.status})`, rExec.status === 302);
+  const errLoc = decodeURIComponent(rExec.location || '');
+  ok(`V22: reject message mentions scope/dependencies changed`,
+     /tagged set.*changed|scope|dependencies|reviewed/i.test(errLoc),
+     `loc=${errLoc}`);
+
+  // Everything remains untouched.
+  const enrAfter = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9220`).get();
+  ok(`V22: enrollment 9220 NOT soft-deleted by rejected execute`, !enrAfter?.deleted_at);
+  const preReflAfter = db.prepare(`SELECT deleted_at FROM pd_reflections WHERE id=92201`).get();
+  const lateReflAfter = db.prepare(`SELECT deleted_at FROM pd_reflections WHERE id=92202`).get();
+  ok(`V22: pre-preview reflection 92201 NOT deleted`, !preReflAfter?.deleted_at);
+  ok(`V22: late-added reflection 92202 NOT deleted (outside reviewed scope)`, !lateReflAfter?.deleted_at);
+  const preNotifAfter = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(preNotifId);
+  const lateNotifAfter = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(lateNotifId);
+  ok(`V22: pre-preview notification #${preNotifId} STILL present (execute was rejected)`, !!preNotifAfter);
+  ok(`V22: late-added notification #${lateNotifId} STILL present (outside reviewed scope)`, !!lateNotifAfter);
+
+  // NOW verify the stronger invariant: even if we bypass the drift
+  // check, the FROZEN manifest is what drives DELETE targets.  We do
+  // this by overriding the batch's dep_fingerprint to match the
+  // current state (simulating a passed drift check), then executing.
+  // The late-added rows are STILL not deleted because the batch's
+  // delete targets come from practice_cleanup_child / practice_cleanup_
+  // notif_scope, which only contain pre-preview ids.
+  const currentCandidatesForBatch = [{ entity_type: 'pd_enrollment', entity_id: 9220 }];
+  // Recompute what depFingerprintFromFrozenScope would emit for the
+  // CURRENT world — mirror the code's format.
+  const currentKids = db.prepare(`SELECT id FROM pd_reflections WHERE enrollment_id=9220 AND deleted_at IS NULL ORDER BY id`).all().map(r => r.id);
+  const currentNotifs = db.prepare(`SELECT id FROM notifications WHERE entity_type='pd_enrollment' AND entity_id=9220 ORDER BY id`).all().map(r => r.id);
+  const currentActs = db.prepare(`SELECT id FROM activity_log WHERE entity_type='pd_enrollment' AND entity_id=9220 ORDER BY id`).all().map(r => r.id);
+  const forgedDep = `pd_enrollment#9220{pd_reflection=[${currentKids.join(',')}];n=[${currentNotifs.join(',')}];a=[${currentActs.join(',')}]}`;
+  db.prepare(`UPDATE practice_cleanup_batches SET dep_fingerprint=? WHERE id=?`).run(forgedDep, bid);
+  const rExecForced = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V22-forced: forged-fingerprint execute returns 302 (${rExecForced.status})`, rExecForced.status === 302);
+  const batchAfterForced = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V22-forced: batch status='executed' after forged-check execute (${batchAfterForced?.status})`, batchAfterForced?.status === 'executed');
+  // Pre-preview reflection 92201: DELETED (was in manifest).
+  const preReflFinal = db.prepare(`SELECT deleted_at FROM pd_reflections WHERE id=92201`).get();
+  ok(`V22-forced INVARIANT: pre-preview reflection 92201 IS soft-deleted (was in frozen manifest)`, !!preReflFinal?.deleted_at);
+  // Late-added reflection 92202: NOT deleted (NOT in manifest).
+  const lateReflFinal = db.prepare(`SELECT deleted_at FROM pd_reflections WHERE id=92202`).get();
+  ok(`V22-forced INVARIANT: late-added reflection 92202 IS NOT deleted (outside frozen manifest — the item-2 invariant)`,
+     !lateReflFinal?.deleted_at);
+  // Pre-preview notification: DELETED (was in scope).
+  const preNotifFinal = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(preNotifId);
+  ok(`V22-forced INVARIANT: pre-preview notification #${preNotifId} IS deleted (was in frozen scope)`, !preNotifFinal);
+  // Late-added notification: NOT deleted (NOT in scope).
+  const lateNotifFinal = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(lateNotifId);
+  ok(`V22-forced INVARIANT: late-added notification #${lateNotifId} IS NOT deleted (outside frozen scope — the item-2 invariant)`,
+     !!lateNotifFinal);
+}
+
+// ==========================================================================
+suite('V23 (0018 item 3 — counts-backfill failure: cleanup commits, results page works, restore reachable)');
+{
+  // Set up a fresh preview.  Inject a trigger that aborts the
+  // counts-backfill UPDATE (UPDATE practice_cleanup_batches SET
+  // affected_counts_json=?).  Execute must:
+  //   * commit the cleanup writes (parent + children + notifs)
+  //   * NOT throw a fatal error to the HTTP handler
+  //   * redirect to the batch results page
+  //   * results page must render and expose the Restore button
+  //   * restoration must succeed
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9230`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9230, ?, ?, '2026-09-24', 'V23 counts-backfill failure', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  // Untag everything else.
+  const othersV23 = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL AND id<>9230
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of othersV23) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9230`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V23 counts backfill' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`V23: preview created (id=${bid})`, bid > 0);
+
+  // Install trigger that aborts the counts-backfill UPDATE.  The batch's
+  // main flip UPDATE writes affected_counts_json='__pending__'.  The
+  // POST-batch UPDATE writes the actual JSON — we abort THAT one only.
+  db.prepare(`DROP TRIGGER IF EXISTS v23_abort_counts_backfill`).run();
+  db.prepare(`CREATE TRIGGER v23_abort_counts_backfill
+              BEFORE UPDATE OF affected_counts_json ON practice_cleanup_batches
+              FOR EACH ROW WHEN NEW.id=${bid}
+                AND NEW.affected_counts_json <> '__pending__'
+                AND OLD.affected_counts_json = '__pending__'
+              BEGIN SELECT RAISE(ABORT, 'v23_counts_failure'); END`).run();
+
+  // Execute.  The MAIN batch commits ('__pending__' is written by the
+  // in-batch flip).  The post-batch backfill UPDATE throws in
+  // executeCleanup; the handler must SWALLOW it and redirect to the
+  // batch page, NOT surface a "Cleanup failed" error.
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V23: execute returns 302 (${rExec.status})`, rExec.status === 302);
+  const execLoc = rExec.location || '';
+  ok(`V23: execute redirect goes to /batches/${bid} (results page), NOT the error page`,
+     execLoc.includes(`/batches/${bid}`) && !execLoc.includes('msg=Cleanup+failed'),
+     `loc=${execLoc}`);
+
+  // Truthful completion status.
+  const batchAfter = db.prepare(`SELECT status, affected_counts_json FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V23: batch status='executed' (${batchAfter?.status}) — cleanup DID commit`, batchAfter?.status === 'executed');
+  // BEFORE the results page renders, affected_counts_json is '__pending__'.
+  ok(`V23: affected_counts_json currently '__pending__' (before self-heal)`,
+     batchAfter?.affected_counts_json === '__pending__');
+  const parentDeleted = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9230`).get();
+  ok(`V23: parent WAS soft-deleted (cleanup writes committed)`, !!parentDeleted?.deleted_at);
+
+  // Fetch the results page — must render (no unconditional JSON.parse
+  // crash), must expose Restore button, must include the "counts pending"
+  // fallback banner OR the self-healed summary card.
+  const rPage = await admin.get(`/admin/data/practice-cleanup/batches/${bid}`);
+  ok(`V23: results page GET returns 200 (${rPage.status})`, rPage.status === 200);
+  ok(`V23: results page includes the batch id in the heading`,
+     rPage.text.includes(`Cleanup batch #${bid}`));
+  ok(`V23: results page includes the Restore controls (button is reachable)`,
+     rPage.text.includes('Restore this batch') && rPage.text.includes('RESTORE BATCH'),
+     'restore controls missing from results page');
+
+  // With the trigger still active, loadBatch's self-heal write is ALSO
+  // blocked (both writes touch affected_counts_json).  The results page
+  // MUST still render truthfully — the "Cleanup counts" fallback banner
+  // reads directly from the manifest tables, and the Restore button
+  // remains reachable regardless.  Verify the fallback banner appears.
+  ok(`V23: results page shows the manifest-driven fallback banner (self-heal blocked by trigger)`,
+     rPage.text.includes('The saved counts report is not yet available'),
+     'expected the __pending__ fallback banner text on the results page');
+  // Now REMOVE the trigger and re-fetch the page — loadBatch's self-heal
+  // write should succeed on this second read, upgrading affected_counts_
+  // json to a valid JSON summary.
+  db.prepare(`DROP TRIGGER v23_abort_counts_backfill`).run();
+  const rPage2 = await admin.get(`/admin/data/practice-cleanup/batches/${bid}`);
+  ok(`V23: second results page GET returns 200 (${rPage2.status})`, rPage2.status === 200);
+  const healed = db.prepare(`SELECT affected_counts_json FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V23: loadBatch self-healed affected_counts_json to a valid JSON summary (after trigger removed)`,
+     healed?.affected_counts_json && healed.affected_counts_json !== '__pending__'
+       && !!(safeJsonParse(healed.affected_counts_json)?.affected));
+
+  // Restoration succeeds.
+  const rRestore = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  ok(`V23: restore returns 302 (${rRestore.status})`, rRestore.status === 302);
+  const parentAfterRestore = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9230`).get();
+  ok(`V23: parent restored — deleted_at is NULL`, !parentAfterRestore?.deleted_at);
+  const batchAfterRestore = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V23: batch status='restored' (${batchAfterRestore?.status})`, batchAfterRestore?.status === 'restored');
+}
+
+function safeJsonParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
+}
+
+// ==========================================================================
 console.log('\n============================================================');
 console.log(`  ${passed} passed · ${failed} failed`);
 if (failed) {

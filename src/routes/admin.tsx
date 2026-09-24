@@ -1634,6 +1634,7 @@ app.get('/data/practice-cleanup/batches/:id', async (c) => {
       rows={data.rows}
       ambiguous_notifs={data.ambiguous_notifs}
       children={data.children}
+      notif_scope={data.notif_scope}
       msg={msg}
       scope_current_matches={scope_current_matches}
     />
@@ -3044,8 +3045,18 @@ function BrowseTable({ title, icon, entity_type, rows, renderLabel }: any) {
 // ----------------------------------------------------------------------------
 // Practice-cleanup workflow — results / restore page
 // ----------------------------------------------------------------------------
-function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, children, msg, scope_current_matches }: any) {
-  const summary = batch.affected_counts_json ? JSON.parse(batch.affected_counts_json) : null;
+function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, children, notif_scope, msg, scope_current_matches }: any) {
+  // 0018 item 3: affected_counts_json may be missing (older batches),
+  // '__pending__' (counts backfill hadn't landed yet — self-heal in
+  // loadBatch normally converts this before we get here), or malformed.
+  // A JSON.parse must NEVER throw here; the results page must always
+  // render and always expose the restore controls.
+  let summary: any = null;
+  const raw = batch.affected_counts_json;
+  if (raw && raw !== '__pending__') {
+    try { summary = JSON.parse(raw); } catch { summary = null; }
+  }
+  const summaryUnavailable = (batch.status === 'executed' || batch.status === 'restored') && !summary;
   const isPreview  = batch.status === 'preview';
   const isExecuted = batch.status === 'executed';
   const isRestored = batch.status === 'restored';
@@ -3135,7 +3146,39 @@ function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, childre
         </div>
       ) : null}
 
-      {/* Results summary — only when executed or restored */}
+      {/* 0018 item 3: if executed/restored but summary is unavailable
+          (backfill failed or old format), show a durable fallback that
+          reads the manifest counts directly.  Restore controls below
+          remain reachable regardless. */}
+      {summaryUnavailable ? (
+        <div class="mt-6">
+          <Card title="Cleanup counts" icon="fas fa-triangle-exclamation">
+            <p class="text-sm text-slate-700 mb-2">
+              <strong>Cleanup completed.</strong> The saved counts report is not yet available for this batch (backfill pending or failed). The record manifest below shows the exact parents and children the batch affected — restoration works from the manifest and is fully available.
+            </p>
+            <div class="grid md:grid-cols-2 gap-4 text-sm">
+              <div>
+                <h3 class="font-display text-aps-navy mb-1">Parents in this batch</h3>
+                <ul class="space-y-1 text-slate-700">
+                  <li>Total reviewed: <strong>{(rows || []).length}</strong></li>
+                  <li>With this-batch stamp: <strong>{(rows || []).filter((r: any) => r.deleted_at_stamp).length}</strong></li>
+                </ul>
+              </div>
+              <div>
+                <h3 class="font-display text-aps-navy mb-1">Cascade recorded in manifest</h3>
+                <ul class="space-y-1 text-slate-700">
+                  <li>Children this batch soft-deleted: <strong>{(children || []).filter((c: any) => c.deleted_at_stamp).length}</strong></li>
+                  <li>Notifications in scope (deleted): <strong>{(notif_scope || []).filter((s: any) => s.scope_kind === 'notification').length}</strong></li>
+                  <li>Activity_log rows in scope (deleted): <strong>{(notif_scope || []).filter((s: any) => s.scope_kind === 'activity_log').length}</strong></li>
+                  <li>Ambiguous notifications preserved: <strong>{(ambiguous_notifs || []).length}</strong></li>
+                </ul>
+              </div>
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Results summary — only when executed or restored AND counts are usable */}
       {summary ? (
         <div class="mt-6">
         <Card title="Affected rows (this batch)" icon="fas fa-list-check">

@@ -1,48 +1,60 @@
 // ============================================================================
 // practice_cleanup.ts — Practice-data cleanup workflow (super-admin only)
 // ----------------------------------------------------------------------------
-// Third-round rewrite (Sept 24, 2026 evening) — see migrations/0017 header
-// for the defect list this file corrects.  Highlights:
+// Fourth-round rewrite (Sept 24, 2026 late) — migration 0018 corrects
+// three remaining defects on top of the 0015/0016/0017 work.  Design:
 //
-//   * FULL-BATCH ATOMICITY (item 1).  A SINGLE db.batch() call carries every
-//     write for every parent's cascade AND the final status='executed' flip.
-//     D1 runs the whole batch inside one implicit BEGIN/COMMIT — any single-
-//     statement failure rolls back every write in the batch.  No "first
-//     parent stuck deleted, batch stuck at preview" state is reachable.
-//     Even a failure on the very last status-flip statement rolls back the
-//     rows that were just soft-deleted.
+//   * WINNING-EXECUTION CLAIM (0018 item 1).  The FIRST statement in
+//     executeCleanup's db.batch() is INSERT INTO practice_cleanup_
+//     execution_lock (batch_id) VALUES (?).  PRIMARY KEY(batch_id)
+//     rejects a duplicate concurrent execute; SQLite aborts the entire
+//     batch, and no manifest/parent/child state is mutated by the
+//     loser.  This closes the window where two overlapping executes
+//     both ran and the second overwrote the manifest stamp.  Manifest
+//     stamp UPDATE also carries "AND deleted_at_stamp IS NULL" as
+//     defense in depth.
 //
-//   * EXACT-SCOPE BINDING (item 2).  In addition to the parent-id fingerprint
-//     (scope_hash), preview computes a dep_fingerprint over the child rows
-//     currently attached to each parent.  Execute recomputes both and
-//     refuses to run if either changed since preview.
+//   * EXACT-SCOPE ENFORCEMENT INSIDE THE TRANSACTION (0018 item 2).
+//     Child rows AND notification/activity_log ids are captured into
+//     dedicated manifest tables at PREVIEW time.  Execute's batch does
+//     "UPDATE ... WHERE id IN (SELECT child_id FROM
+//     practice_cleanup_child WHERE batch_id=? AND child_kind=?)" and
+//     "DELETE FROM notifications WHERE id IN (SELECT scope_id FROM
+//     practice_cleanup_notif_scope WHERE batch_id=? AND
+//     scope_kind='notification')".  Anything added between preview
+//     and execute is NOT in these frozen sets, so it survives —
+//     late-added dependents cannot be silently deleted.
 //
-//   * OWNERSHIP CLAIM inside the transaction (items 2 & 3).  Child-manifest
-//     rows are inserted via INSERT ... SELECT WHERE deleted_at IS NULL,
-//     inside the same batch that soft-deletes them.  The full child set is
-//     therefore atomically claimed AND deleted in the same transaction; no
-//     child can be added mid-batch and get soft-deleted without also
-//     entering the manifest (both statements see the same row set within
-//     the transaction).  A UNIQUE(entity_type, entity_id) table
-//     practice_cleanup_open_claim prevents a second preview from touching
-//     the same parent while an earlier preview is still open.
+//   * DURABLE COUNTS (0018 item 3).  executeCleanup's post-batch counts
+//     backfill runs in its own try/catch — a failure to write the
+//     summary does NOT throw (the cleanup already committed).  loadBatch
+//     recognises the '__pending__' sentinel and recomputes the summary
+//     from the manifest, then self-heals by writing the recomputed
+//     summary back.  The results page always has usable numbers and
+//     the restore controls stay reachable.
 //
-//   * RESTORE OWNERSHIP (item 3).  Restore compares the parent's CURRENT
-//     deleted_at to the timestamp this batch stamped (recorded in
-//     practice_cleanup_row.deleted_at_stamp) and refuses to touch a row
-//     whose stamp has changed (a newer cleanup batch is now the responsible
-//     party).  Same for children.
+// Preserved from earlier rounds:
 //
-//   * AMBIGUOUS-NOTIFICATION COLLISIONS (item 4).  The historical PD-notif
-//     detector now preserves ANY notification whose recipient user_id is
-//     NOT the enrollment's teacher_id, OR whose entity_id also happens to
-//     match a pd_modules.id.  A stray "entity_id happens to equal our
-//     enrollment id" cross-teacher alert is now preserved for review instead
-//     of hard-deleted.
+//   * SINGLE-BATCH ATOMICITY (0017 item 1).  One db.batch() spans every
+//     parent's cascade plus the status flip.  A failure at any single
+//     statement rolls back every write.
 //
-//   * BATCH SIZE CAP.  previewBatch refuses to accept more than
-//     PRACTICE_CLEANUP_MAX_BATCH candidate parents so a runaway preview
-//     can never produce a batch too large for D1 to run in one call.
+//   * CONCURRENT-PREVIEW GUARD (0017 item 3).  practice_cleanup_open_claim
+//     UNIQUE(entity_type, entity_id) prevents two previews from
+//     claiming the same parent.
+//
+//   * PER-BATCH DELETE STAMPS (0017 item 3).  practice_cleanup_row.
+//     deleted_at_stamp = 'YYYY-MM-DD HH:MM:SS #b<batch_id>' is unique
+//     per batch even within the same second.  Restore only clears
+//     deleted_at where the current value equals this batch's stamp.
+//
+//   * AMBIGUOUS-NOTIF PRESERVATION (0017 item 4).  Cross-teacher
+//     collisions and legacy pd_module-in-entity_id patterns are
+//     recorded in practice_cleanup_ambiguous_notif for admin review
+//     instead of hard-deleted.
+//
+//   * BATCH SIZE CAP.  previewBatch refuses > PRACTICE_CLEANUP_MAX_BATCH
+//     candidate parents.
 //
 // Dependency ordering (unchanged from 0016):
 //   coaching_note     → coaching_note_share_delivery (soft),
@@ -247,76 +259,34 @@ function scopeFingerprintFromCandidates(cands: Candidate[]): string {
     .join('|');
 }
 
-/** Item 2 fix: fingerprint over the current CHILDREN of every candidate.
- *  Called at preview time to snapshot the dependency shape, and again at
- *  execute time (INSIDE the transaction — see below) to detect drift.  If
- *  a child was added or removed between preview and execute, the two
- *  fingerprints differ and execute rejects the batch. */
-async function depFingerprint(db: D1Database, cands: Candidate[]): Promise<string> {
-  const parts: string[] = [];
-  for (const c of cands) {
-    const kids = await gatherChildIds(db, c.entity_type, c.entity_id);
-    // Group child ids by kind, sort within kind for determinism.
-    const byKind: Record<string, number[]> = {};
-    for (const k of kids) (byKind[k.kind] ||= []).push(k.id);
-    const kindKeys = Object.keys(byKind).sort();
-    const shape = kindKeys.map(kk => `${kk}=[${byKind[kk].sort((a, b) => a - b).join(',')}]`).join(';');
-    parts.push(`${c.entity_type}#${c.entity_id}{${shape}}`);
-  }
-  return parts.join('|');
-}
-
-/** Read the current deleted_at IS NULL child rows for a parent.  Used by
- *  depFingerprint() and (informationally) by the results screen. */
-async function gatherChildIds(
-  db: D1Database, entityType: EntityType, entityId: number,
-): Promise<Array<{ kind: ChildKind; id: number }>> {
-  const out: Array<{ kind: ChildKind; id: number }> = [];
-  if (entityType === 'coaching_note') {
-    const r1 = await db.prepare(
-      `SELECT id FROM coaching_note_audit WHERE note_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r1.results as any[]) || [])) out.push({ kind: 'coaching_note_audit', id: Number(r.id) });
-    const r2 = await db.prepare(
-      `SELECT id FROM coaching_note_share_delivery WHERE note_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r2.results as any[]) || [])) out.push({ kind: 'coaching_note_share_delivery', id: Number(r.id) });
-  } else if (entityType === 'pd_enrollment') {
-    const r1 = await db.prepare(
-      `SELECT id FROM pd_deliverables WHERE enrollment_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r1.results as any[]) || [])) out.push({ kind: 'pd_deliverable', id: Number(r.id) });
-    const r2 = await db.prepare(
-      `SELECT id FROM pd_reflections WHERE enrollment_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r2.results as any[]) || [])) out.push({ kind: 'pd_reflection', id: Number(r.id) });
-    const r3 = await db.prepare(
-      `SELECT id FROM pd_deliverable_scores WHERE enrollment_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r3.results as any[]) || [])) out.push({ kind: 'pd_deliverable_score', id: Number(r.id) });
-  } else if (entityType === 'observation') {
-    const r1 = await db.prepare(
-      `SELECT id FROM feedback_items WHERE observation_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r1.results as any[]) || [])) out.push({ kind: 'feedback_item', id: Number(r.id) });
-    const r2 = await db.prepare(
-      `SELECT id FROM focus_areas WHERE opened_observation_id=? AND deleted_at IS NULL ORDER BY id`
-    ).bind(entityId).all<any>();
-    for (const r of ((r2.results as any[]) || [])) out.push({ kind: 'focus_area', id: Number(r.id) });
-  }
-  // external_pd_submission has no soft-deletable children.
-  return out;
-}
+// (Old depFingerprint / gatherChildIds helpers removed in 0018 — the
+// dep_fingerprint is now computed from the frozen scope by
+// depFingerprintFromFrozenScope() and a live-vs-frozen comparison uses
+// currentDepFingerprint() defined below.  Preview uses
+// gatherChildIdsWithPrior() to also capture prior_deleted_at.)
 
 // ---------------------------------------------------------------------------
-// previewBatch — creates a preview atomically and claims ownership
+// previewBatch — freeze scope + all dependent ids atomically
 // ---------------------------------------------------------------------------
 /** Create a preview batch that freezes the currently-tagged is_practice=1
- *  set.  The batch row + all practice_cleanup_row entries + all
- *  practice_cleanup_open_claim rows are written in a SINGLE db.batch()
- *  so a race between two concurrent previews on the same parent record
- *  produces exactly one winner (the loser's INSERT hits the UNIQUE on
- *  open_claim and the whole batch rolls back).
+ *  set AND EVERY dependent record subject to deletion:
+ *
+ *    * practice_cleanup_row      — one row per parent, with label
+ *    * practice_cleanup_open_claim — mutual-exclusion vs concurrent previews
+ *    * practice_cleanup_child    — one row per child (audit, ledger,
+ *                                   deliverable, reflection, score,
+ *                                   feedback_item, focus_area) that is
+ *                                   CURRENTLY deleted_at IS NULL
+ *    * practice_cleanup_notif_scope — one row per notification and
+ *                                     activity_log row currently keyed
+ *                                     at this parent (with the ambiguous-
+ *                                     notif exclusion applied at preview
+ *                                     time so admins see the exact final
+ *                                     delete set)
+ *
+ *  All writes happen in ONE db.batch() so a race between two concurrent
+ *  previews on the same parent (open_claim UNIQUE) or a race between
+ *  preview and any other write produces exactly one winner.
  *
  *  Fails with:
  *    'nothing_to_clean'  — no is_practice=1 records
@@ -329,12 +299,55 @@ export async function previewBatch(
   if (candidates.length === 0) throw new Error('nothing_to_clean');
   if (candidates.length > PRACTICE_CLEANUP_MAX_BATCH) throw new Error('batch_too_large');
 
+  // Gather EVERY dependent id per parent — children AND notifications AND
+  // activity_log rows.  These become the frozen scope.
+  const perParentChildren: Array<{ parent: Candidate; kids: Array<{ kind: ChildKind; id: number; prior_deleted_at: string | null }> }> = [];
+  const perParentNotifScope: Array<{ parent: Candidate; kind: 'notification' | 'activity_log'; id: number }[]> = [];
+  const perParentAmbiguous: Array<{ parent: Candidate; amb: AmbiguousDetection[] }> = [];
+
+  for (const c of candidates) {
+    // Children (soft-delete cascade dependents).  Capture the CURRENT
+    // deleted_at value so restore's per-child ownership check works.
+    const kids = await gatherChildIdsWithPrior(db, c.entity_type, c.entity_id);
+    perParentChildren.push({ parent: c, kids });
+
+    // Ambiguous-notif detection is preview-time (item 4 correction from
+    // 0017).  Store them for the manifest insert AND to exclude from
+    // notif_scope below.
+    const amb = c.entity_type === 'pd_enrollment'
+      ? await detectAmbiguousNotifs(db, c.entity_id)
+      : [];
+    perParentAmbiguous.push({ parent: c, amb });
+    const ambIds = new Set(amb.map(a => a.notification_id));
+
+    // Notifications the batch will DELETE (i.e., all notifications keyed
+    // at this parent EXCEPT the ambiguous ones which are preserved).
+    const notifs = await db.prepare(
+      `SELECT id FROM notifications WHERE entity_type=? AND entity_id=? ORDER BY id`
+    ).bind(c.entity_type, c.entity_id).all<any>();
+    const notifIds = ((notifs.results as any[]) || [])
+      .map(r => Number(r.id))
+      .filter(id => !ambIds.has(id));
+    // Activity_log the batch will DELETE.
+    const activity = await db.prepare(
+      `SELECT id FROM activity_log WHERE entity_type=? AND entity_id=? ORDER BY id`
+    ).bind(c.entity_type, c.entity_id).all<any>();
+    const actIds = ((activity.results as any[]) || []).map(r => Number(r.id));
+
+    const list: { parent: Candidate; kind: 'notification' | 'activity_log'; id: number }[] = [];
+    for (const nid of notifIds)  list.push({ parent: c, kind: 'notification', id: nid });
+    for (const aid of actIds)    list.push({ parent: c, kind: 'activity_log', id: aid });
+    perParentNotifScope.push(list);
+  }
+
   const scopeHash = scopeFingerprintFromCandidates(candidates);
-  const depFp = await depFingerprint(db, candidates);
+  // dep_fingerprint now incorporates ALL frozen dependent ids so drift
+  // shows notification/activity_log additions too.
+  const depFp = depFingerprintFromFrozenScope(candidates, perParentChildren, perParentNotifScope);
   const snapshot = JSON.stringify(candidates);
   const nonce = cryptoRandomId();
 
-  // Create the batch row first (we need its id for the claim + row inserts).
+  // Create the batch row first (we need its id for the manifest inserts).
   const batchRes = await db.prepare(
     `INSERT INTO practice_cleanup_batches
        (actor_id, status, note, writer_nonce, scope_hash, candidate_snapshot_json, dep_fingerprint)
@@ -344,29 +357,67 @@ export async function previewBatch(
   const batchId = Number(((batchRes.results as any[])?.[0] || {}).id);
   if (!batchId) throw new Error('failed_to_create_batch');
 
-  // Now atomically claim every parent + write manifest rows.  UNIQUE on
-  // practice_cleanup_open_claim(entity_type, entity_id) ensures a
-  // concurrent preview attempting to claim the same parent loses.  If ANY
-  // row conflicts, the entire batch rolls back and we clean up the empty
-  // batch row above.
-  const claimStmts: D1PreparedStatement[] = [];
+  // Assemble the entire freeze in a single db.batch().  open_claim's
+  // UNIQUE(entity_type, entity_id) enforces mutual exclusion vs other
+  // open previews.  practice_cleanup_child's UNIQUE(batch_id, child_kind,
+  // child_id) keeps the manifest insert idempotent.  practice_cleanup_
+  // notif_scope's UNIQUE(batch_id, scope_kind, scope_id) does the same
+  // for notifications/activity_log ids.
+  const stmts: D1PreparedStatement[] = [];
   for (const c of candidates) {
-    claimStmts.push(
+    stmts.push(
       db.prepare(
-        `INSERT INTO practice_cleanup_open_claim (batch_id, entity_type, entity_id)
-         VALUES (?, ?, ?)`
+        `INSERT INTO practice_cleanup_open_claim (batch_id, entity_type, entity_id) VALUES (?, ?, ?)`
       ).bind(batchId, c.entity_type, c.entity_id),
       db.prepare(
-        `INSERT INTO practice_cleanup_row (batch_id, entity_type, entity_id, label)
-         VALUES (?, ?, ?, ?)`
+        `INSERT INTO practice_cleanup_row (batch_id, entity_type, entity_id, label) VALUES (?, ?, ?, ?)`
       ).bind(batchId, c.entity_type, c.entity_id, c.label),
     );
   }
+  for (const grp of perParentChildren) {
+    for (const k of grp.kids) {
+      stmts.push(
+        db.prepare(
+          `INSERT INTO practice_cleanup_child
+             (batch_id, parent_entity_type, parent_entity_id, child_kind, child_id, prior_deleted_at, deleted_at_stamp)
+           VALUES (?, ?, ?, ?, ?, ?, NULL)
+           ON CONFLICT DO NOTHING`
+        ).bind(batchId, grp.parent.entity_type, grp.parent.entity_id, k.kind, k.id, k.prior_deleted_at),
+      );
+    }
+  }
+  for (const grp of perParentNotifScope) {
+    for (const s of grp) {
+      stmts.push(
+        db.prepare(
+          `INSERT INTO practice_cleanup_notif_scope
+             (batch_id, parent_entity_type, parent_entity_id, scope_kind, scope_id, action)
+           VALUES (?, ?, ?, ?, ?, 'delete')
+           ON CONFLICT DO NOTHING`
+        ).bind(batchId, s.parent.entity_type, s.parent.entity_id, s.kind, s.id),
+      );
+    }
+  }
+  // Ambiguous notifications: recorded here at PREVIEW time so the admin
+  // sees them on the confirm screen (not only after execute).  ON CONFLICT
+  // keeps it idempotent.
+  for (const grp of perParentAmbiguous) {
+    for (const n of grp.amb) {
+      stmts.push(
+        db.prepare(
+          `INSERT INTO practice_cleanup_ambiguous_notif
+             (batch_id, notification_id, entity_type, entity_id, resolves_as,
+              user_id, kind, title, suspected_parent_enrollment_id)
+           VALUES (?, ?, 'pd_enrollment', ?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`
+        ).bind(batchId, n.notification_id, n.entity_id, n.resolves_as, n.user_id, n.kind, n.title, grp.parent.entity_id),
+      );
+    }
+  }
+
   try {
-    await db.batch(claimStmts);
+    await db.batch(stmts);
   } catch (e) {
-    // Roll back the empty preview batch (row inserts failed, so no manifest
-    // to clean up).  ON DELETE CASCADE removes any partial rows.
     await db.prepare(`DELETE FROM practice_cleanup_batches WHERE id=?`).bind(batchId).run();
     const msg = (e as any)?.message || String(e);
     if (/UNIQUE.*open_claim/i.test(msg) || /constraint failed/i.test(msg)) {
@@ -376,6 +427,68 @@ export async function previewBatch(
   }
 
   return { batch_id: batchId, candidates, scope_hash: scopeHash, dep_fingerprint: depFp };
+}
+
+/** Deterministic short string over CANDIDATES + their FROZEN dependent
+ *  scope (children + notifications + activity_log ids).  A parent-only
+ *  fingerprint (scope_hash) is not enough — a child added after preview
+ *  would go undetected by scope_hash but is caught here. */
+function depFingerprintFromFrozenScope(
+  candidates: Candidate[],
+  perParentChildren: Array<{ parent: Candidate; kids: Array<{ kind: ChildKind; id: number; prior_deleted_at: string | null }> }>,
+  perParentNotifScope: Array<{ parent: Candidate; kind: 'notification' | 'activity_log'; id: number }[]>,
+): string {
+  const parts: string[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const kids = perParentChildren[i]?.kids || [];
+    const scope = perParentNotifScope[i] || [];
+    const byKind: Record<string, number[]> = {};
+    for (const k of kids) (byKind[k.kind] ||= []).push(k.id);
+    const kindKeys = Object.keys(byKind).sort();
+    const shape = kindKeys.map(kk => `${kk}=[${byKind[kk].slice().sort((a, b) => a - b).join(',')}]`).join(';');
+    const notifIds = scope.filter(s => s.kind === 'notification').map(s => s.id).sort((a, b) => a - b);
+    const actIds   = scope.filter(s => s.kind === 'activity_log').map(s => s.id).sort((a, b) => a - b);
+    parts.push(`${c.entity_type}#${c.entity_id}{${shape};n=[${notifIds.join(',')}];a=[${actIds.join(',')}]}`);
+  }
+  return parts.join('|');
+}
+
+/** Read children with their current deleted_at (should always be NULL at
+ *  preview time — listPracticeCandidates only surfaces parents that are
+ *  themselves deleted_at IS NULL, and normally their children are too).
+ *  Prior_deleted_at is captured for use by restore ownership check. */
+async function gatherChildIdsWithPrior(
+  db: D1Database, entityType: EntityType, entityId: number,
+): Promise<Array<{ kind: ChildKind; id: number; prior_deleted_at: string | null }>> {
+  const out: Array<{ kind: ChildKind; id: number; prior_deleted_at: string | null }> = [];
+  const spec: Array<{ kind: ChildKind; table: string; col: string }> =
+      entityType === 'coaching_note'          ? [
+        { kind: 'coaching_note_audit',          table: 'coaching_note_audit',          col: 'note_id' },
+        { kind: 'coaching_note_share_delivery', table: 'coaching_note_share_delivery', col: 'note_id' },
+      ]
+    : entityType === 'pd_enrollment'          ? [
+        { kind: 'pd_deliverable',       table: 'pd_deliverables',       col: 'enrollment_id' },
+        { kind: 'pd_reflection',        table: 'pd_reflections',        col: 'enrollment_id' },
+        { kind: 'pd_deliverable_score', table: 'pd_deliverable_scores', col: 'enrollment_id' },
+      ]
+    : entityType === 'observation'            ? [
+        { kind: 'feedback_item', table: 'feedback_items', col: 'observation_id' },
+        { kind: 'focus_area',    table: 'focus_areas',    col: 'opened_observation_id' },
+      ]
+    : [];
+  for (const s of spec) {
+    // Only rows currently NOT soft-deleted — those are the ones this
+    // batch will soft-delete.  Rows already soft-deleted by a prior
+    // batch are intentionally NOT in this batch's frozen scope.
+    const r = await db.prepare(
+      `SELECT id, deleted_at FROM ${s.table} WHERE ${s.col}=? AND deleted_at IS NULL ORDER BY id`
+    ).bind(entityId).all<any>();
+    for (const row of ((r.results as any[]) || [])) {
+      out.push({ kind: s.kind, id: Number(row.id), prior_deleted_at: row.deleted_at ?? null });
+    }
+  }
+  return out;
 }
 
 function cryptoRandomId(): string {
@@ -419,15 +532,20 @@ export async function executeCleanup(
   if (batch.status === 'restored') throw new Error('already_restored');
   if (batch.status !== 'preview')  throw new Error('batch_not_previewable');
 
-  // Re-read the current candidates and recompute BOTH fingerprints.  A
-  // parent-tag drift OR a child-shape drift causes rejection.  This is done
-  // right before the transaction; a change between this check and the
-  // BEGIN would still be caught by the child-manifest INSERT ... SELECT
-  // below, because the SELECT captures the row set at statement time
-  // inside the batch's implicit transaction.
+  // Pre-batch fingerprint check — a friendly early rejection.  Even if
+  // this passes, the frozen-scope enforcement below (deletion targets
+  // read from practice_cleanup_child / practice_cleanup_notif_scope,
+  // populated at preview time) is what actually restricts the write set.
+  // A concurrent write after this check but before db.batch() cannot
+  // cause an unreviewed row to be deleted, because the batch does NOT
+  // consult live tables to pick its DELETE targets.
   const currentCandidates = await listPracticeCandidates(db);
   const currentHash = scopeFingerprintFromCandidates(currentCandidates);
-  const currentDep  = await depFingerprint(db, currentCandidates);
+  // For dep drift we recompute from the CURRENT snapshot of children +
+  // notifications + activity_log — this is a superset check (the frozen
+  // scope in the manifest is authoritative for what actually gets
+  // deleted; this early check is just a nicer error message).
+  const currentDep  = await currentDepFingerprint(db, currentCandidates);
   if (currentHash !== batch.scope_hash || currentDep !== batch.dep_fingerprint) {
     await db.prepare(
       `UPDATE practice_cleanup_batches
@@ -437,8 +555,7 @@ export async function executeCleanup(
     throw new Error('scope_changed');
   }
 
-  // Load the frozen parent manifest (should equal currentCandidates, but
-  // we use the manifest for determinism and future-safety).
+  // Load the frozen parent manifest.
   const parents = await db.prepare(
     `SELECT entity_type, entity_id, label FROM practice_cleanup_row
       WHERE batch_id=? ORDER BY id`
@@ -494,62 +611,72 @@ export async function executeCleanup(
   // uses that value to prove ownership.
   // -------------------------------------------------------------------
 
-  // Batch stamp: current UTC timestamp SUFFIXED with the batch id so two
-  // batches that execute within the same second do NOT collide.  Restore
-  // uses this exact string to prove ownership (WHERE deleted_at=<stamp>);
-  // downstream reads only ever check deleted_at IS NULL / IS NOT NULL,
-  // so the non-ISO format is safe.
+  // Batch stamp: unique per batch even within the same second.
   const batchStamp = `${new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '')} #b${batchId}`;
 
-  // Ambiguous-notif pre-scan (item 4): we insert into
-  // practice_cleanup_ambiguous_notif OUTSIDE the batch (it's a
-  // best-effort audit table; on batch rollback we clean up its rows).
-  // This has to happen BEFORE the batch so the DELETE inside the batch
-  // can filter by "id NOT IN (SELECT notification_id FROM
-  // practice_cleanup_ambiguous_notif WHERE batch_id=?)".
-  const preInsertedAmbiguous: number[] = [];
-  for (const p of parentRows) {
-    if (p.entity_type !== 'pd_enrollment') continue;
-    const amb = await detectAmbiguousNotifs(db, p.entity_id);
-    for (const n of amb) {
-      try {
-        await db.prepare(
-          `INSERT INTO practice_cleanup_ambiguous_notif
-             (batch_id, notification_id, entity_type, entity_id, resolves_as,
-              user_id, kind, title, suspected_parent_enrollment_id)
-           VALUES (?, ?, 'pd_enrollment', ?, ?, ?, ?, ?, ?)
-           ON CONFLICT DO NOTHING`
-        ).bind(
-          batchId, n.notification_id, n.entity_id, n.resolves_as,
-          n.user_id, n.kind, n.title, p.entity_id,
-        ).run();
-        preInsertedAmbiguous.push(n.notification_id);
-      } catch (_) { /* ignore duplicates */ }
-    }
-  }
+  // ---------------------------------------------------------------------
+  // BUILD THE SINGLE ATOMIC BATCH.
+  //
+  //   0. INSERT INTO practice_cleanup_execution_lock (batch_id) VALUES (?)
+  //      — PRIMARY KEY guards against overlapping executes.  A duplicate
+  //      hits the constraint and the entire batch rolls back, so no
+  //      manifest/parent/child state is mutated by the loser.
+  //
+  //   For each parent P (in order):
+  //     A. UPDATE <child_table> SET deleted_at=<stamp>
+  //         WHERE id IN (SELECT child_id FROM practice_cleanup_child
+  //                       WHERE batch_id=? AND child_kind=?)
+  //           AND deleted_at IS NULL
+  //         — restricted to the FROZEN scope (the manifest was populated
+  //         at preview time).  A late-added child is NOT here.
+  //     B. UPDATE parent SET deleted_at=<stamp>
+  //         WHERE id=? AND deleted_at IS NULL
+  //     C. UPDATE practice_cleanup_row
+  //         SET prior_deleted_at=NULL, deleted_at_stamp=<stamp>
+  //        WHERE batch_id=? AND entity_type=? AND entity_id=?
+  //          AND deleted_at_stamp IS NULL          -- one-winner guard
+  //     D. UPDATE practice_cleanup_child
+  //         SET deleted_at_stamp=<stamp>
+  //        WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+  //          AND deleted_at_stamp IS NULL          -- one-winner guard
+  //     E. DELETE FROM notifications
+  //         WHERE id IN (SELECT scope_id FROM practice_cleanup_notif_scope
+  //                       WHERE batch_id=? AND scope_kind='notification'
+  //                         AND parent_entity_type=? AND parent_entity_id=?)
+  //         — restricted to the FROZEN scope; late-added notifs survive.
+  //     F. DELETE FROM activity_log … same pattern with scope_kind=
+  //        'activity_log'.
+  //
+  //   Z1. DELETE FROM practice_cleanup_open_claim WHERE batch_id=?
+  //   Z2. UPDATE practice_cleanup_batches SET status='executed',
+  //         executed_at=?, writer_nonce=NULL,
+  //         affected_counts_json='__pending__'
+  //       WHERE id=? AND status='preview' AND writer_nonce=?
+  //
+  // If ANY statement fails, D1 rolls back the entire batch: no parent
+  // deleted, no child deleted, no manifest stamp written, batch stays
+  // at 'preview', execution_lock row not committed → a subsequent retry
+  // (or a losing concurrent request) can proceed cleanly.
+  // ---------------------------------------------------------------------
 
   const stmts: D1PreparedStatement[] = [];
+
+  // (0) One-winner claim.
+  stmts.push(
+    db.prepare(
+      `INSERT INTO practice_cleanup_execution_lock (batch_id) VALUES (?)`
+    ).bind(batchId),
+  );
+
   for (const p of parentRows) {
     appendParentBatchStatements(db, stmts, batchId, batchStamp, p.entity_type, p.entity_id);
   }
 
-  // (G) release the ownership claim.
+  // (Z1) release the preview ownership claim.
   stmts.push(
     db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE batch_id=?`).bind(batchId),
   );
-
-  // (H) status flip.  We DEFER the affected_counts_json bind until AFTER
-  // the batch runs — we cannot know the actual rowcounts until D1 returns
-  // them.  So the last statement writes the placeholder counts and a
-  // SUBSEQUENT UPDATE outside the batch fixes them up.  BUT that violates
-  // the "same transaction" guarantee for the counts.
-  //
-  // Solution: use a two-statement pattern where the flip UPDATE writes
-  // '__pending__' as affected_counts_json inside the batch (so status
-  // transitions atomically with the writes), and we backfill the real
-  // counts with a follow-up UPDATE that is idempotent (status is already
-  // 'executed').  The status flip is what matters for correctness — the
-  // affected_counts_json is a report, not a source of truth.
+  // (Z2) status flip — placeholder for counts (backfilled below).
   stmts.push(
     db.prepare(
       `UPDATE practice_cleanup_batches
@@ -563,85 +690,189 @@ export async function executeCleanup(
   try {
     results = await db.batch(stmts);
   } catch (e) {
-    // The entire batch rolled back.  Clean up any ambiguous-notif rows we
-    // pre-inserted so a retry sees a clean state (they'll be re-detected
-    // on the next execute attempt).
-    for (const nid of preInsertedAmbiguous) {
-      await db.prepare(
-        `DELETE FROM practice_cleanup_ambiguous_notif WHERE batch_id=? AND notification_id=?`
-      ).bind(batchId, nid).run().catch(() => {});
+    const msg = (e as any)?.message || String(e);
+    // If the first-statement lock INSERT failed with PRIMARY KEY /
+    // UNIQUE violation, another concurrent execute is either running
+    // or already ran.  Translate to a clear error so callers can
+    // read the winner's committed state instead of re-running.
+    if (/UNIQUE|PRIMARY KEY|constraint failed/i.test(msg) && /execution_lock/i.test(msg)) {
+      // If the winner has already finished, return its stored summary
+      // (loadBatch handles the '__pending__' recompute).
+      const after = await db.prepare(
+        `SELECT status FROM practice_cleanup_batches WHERE id=?`
+      ).bind(batchId).first<any>();
+      if (after?.status === 'executed' || after?.status === 'restored') {
+        const loaded = await loadBatch(db, batchId);
+        const stored = loaded?.batch?.affected_counts_json && loaded.batch.affected_counts_json !== '__pending__'
+          ? JSON.parse(loaded.batch.affected_counts_json)
+          : summarizeFromManifest(loaded);
+        return { batch_id: batchId, ...stored };
+      }
+      // Winner is still mid-flight (or the row is otherwise weird);
+      // surface a clear error so the caller doesn't retry blindly.
+      throw new Error('concurrent_execute');
     }
+    // Any other error — the batch rolled back completely, so preview
+    // state is intact and the caller can retry.
     throw e;
   }
 
-  // Verify the status flip actually landed (nonce might have been cleared
-  // by an idempotent retry that ran between our batch's read and write).
-  const flipStmt = results[results.length - 1] as any;
-  const flipped = (flipStmt?.meta?.changes || 0) === 1;
-  if (!flipped) {
-    // Somebody else ran the flip.  Read the stored counts and return.
-    const after = await db.prepare(
-      `SELECT status, affected_counts_json FROM practice_cleanup_batches WHERE id=?`
-    ).bind(batchId).first<any>();
-    if (after?.status !== 'executed') throw new Error('flip_lost_but_not_executed');
-    const stored = after?.affected_counts_json && after.affected_counts_json !== '__pending__'
-      ? JSON.parse(after.affected_counts_json)
-      : { affected: emptyAffected(), cascaded: emptyCascaded() };
-    return { batch_id: batchId, ...stored };
-  }
-
-  // Reconcile the affected + cascaded counts from the manifest and the
-  // batch's D1Result meta.changes, then backfill affected_counts_json.
+  // The batch committed.  Reconcile counts from the manifest and the
+  // batch's D1Result meta.changes.  A failure in this best-effort
+  // reporting pass MUST NOT re-throw — the cleanup already happened
+  // and calling code must be able to redirect the admin to the results
+  // page.  loadBatch handles '__pending__' by recomputing on read.
   const affected: Record<EntityType, number> = emptyAffected();
   const cascaded = emptyCascaded();
-  cascaded.ambiguous_notifications_preserved = preInsertedAmbiguous.length;
 
-  for (const p of parentRows) {
-    // Parent soft-delete: read current deleted_at_stamp on manifest row.
-    const stamped = await db.prepare(
-      `SELECT deleted_at_stamp FROM practice_cleanup_row
-        WHERE batch_id=? AND entity_type=? AND entity_id=?`
-    ).bind(batchId, p.entity_type, p.entity_id).first<any>();
-    if (stamped?.deleted_at_stamp) affected[p.entity_type] += 1;
+  try {
+    // Ambiguous count: rows for this batch (populated at preview time).
+    const ambCount = await db.prepare(
+      `SELECT COUNT(*) AS n FROM practice_cleanup_ambiguous_notif WHERE batch_id=?`
+    ).bind(batchId).first<any>();
+    cascaded.ambiguous_notifications_preserved = Number(ambCount?.n) || 0;
+
+    // Parents: count manifest rows whose deleted_at_stamp equals our stamp
+    // (we won the one-winner guard for them).
+    const parentStamps = await db.prepare(
+      `SELECT entity_type, COUNT(*) AS n
+         FROM practice_cleanup_row
+        WHERE batch_id=? AND deleted_at_stamp=?
+        GROUP BY entity_type`
+    ).bind(batchId, batchStamp).all<any>();
+    for (const r of ((parentStamps.results as any[]) || [])) {
+      const et = r.entity_type as EntityType;
+      if (et in affected) affected[et] += Number(r.n) || 0;
+    }
+    // Children: same idea.
+    const cm = await db.prepare(
+      `SELECT child_kind, COUNT(*) AS n FROM practice_cleanup_child
+        WHERE batch_id=? AND deleted_at_stamp=?
+        GROUP BY child_kind`
+    ).bind(batchId, batchStamp).all<any>();
+    for (const r of ((cm.results as any[]) || [])) {
+      const n = Number(r.n) || 0;
+      switch (r.child_kind as ChildKind) {
+        case 'coaching_note_audit':          cascaded.coaching_note_audit_soft         += n; break;
+        case 'coaching_note_share_delivery': cascaded.coaching_note_share_delivery_soft += n; break;
+        case 'pd_deliverable':               cascaded.pd_deliverables_soft             += n; break;
+        case 'pd_reflection':                cascaded.pd_reflections_soft              += n; break;
+        case 'pd_deliverable_score':         cascaded.pd_deliverable_scores_soft       += n; break;
+        case 'feedback_item':                cascaded.feedback_items_soft              += n; break;
+        case 'focus_area':                   cascaded.focus_areas_soft                 += n; break;
+      }
+    }
+    // Notifications / activity_log: sum meta.changes from the batch
+    // results.  Layout: statement 0 = lock INSERT, then per parent 8
+    // statements (A×3 padded, B, C, D, E, F), then Z1 + Z2.
+    // Per-parent block indices (relative to cursor):
+    //   0,1,2 = child UPDATEs (padded with SELECT-noop when parent has
+    //           fewer than 3 child_tables), 3 = parent, 4 = row stamp,
+    //           5 = child stamp, 6 = notif DELETE, 7 = activity DELETE.
+    const PER_PARENT_STMTS = 8;
+    let cursor = 1; // skip the lock INSERT
+    for (const p of parentRows) {
+      const notifIdx = cursor + 6;
+      const actIdx   = cursor + 7;
+      cascaded.notifications_hard += safeChanges(results, notifIdx);
+      cascaded.activity_log_hard  += safeChanges(results, actIdx);
+      cursor += PER_PARENT_STMTS;
+    }
+
+    // Backfill the summary.  If this UPDATE fails, we still return the
+    // computed summary and loadBatch will recompute + self-heal on read.
+    const summary = { affected, cascaded };
+    try {
+      await db.prepare(
+        `UPDATE practice_cleanup_batches SET affected_counts_json=? WHERE id=?`
+      ).bind(JSON.stringify(summary), batchId).run();
+    } catch (backfillErr) {
+      // Do NOT throw.  Cleanup committed; the results page uses
+      // loadBatch which self-heals on read.
+      console.warn('practice_cleanup: counts backfill failed (self-heal on read)', {
+        batchId, err: (backfillErr as any)?.message || backfillErr,
+      });
+    }
+    return { batch_id: batchId, ...summary };
+  } catch (reportErr) {
+    // Even the manifest reads failed.  The cleanup is committed; return
+    // zero counts and let loadBatch self-heal on the next page render.
+    console.warn('practice_cleanup: post-batch reporting failed (self-heal on read)', {
+      batchId, err: (reportErr as any)?.message || reportErr,
+    });
+    return { batch_id: batchId, affected, cascaded };
   }
-  // Child counts from manifest.
-  const cm = await db.prepare(
-    `SELECT child_kind, COUNT(*) AS n FROM practice_cleanup_child WHERE batch_id=? GROUP BY child_kind`
-  ).bind(batchId).all<any>();
-  for (const r of ((cm.results as any[]) || [])) {
-    const n = Number(r.n) || 0;
-    switch (r.child_kind as ChildKind) {
-      case 'coaching_note_audit':          cascaded.coaching_note_audit_soft         += n; break;
-      case 'coaching_note_share_delivery': cascaded.coaching_note_share_delivery_soft += n; break;
-      case 'pd_deliverable':               cascaded.pd_deliverables_soft             += n; break;
-      case 'pd_reflection':                cascaded.pd_reflections_soft              += n; break;
-      case 'pd_deliverable_score':         cascaded.pd_deliverable_scores_soft       += n; break;
-      case 'feedback_item':                cascaded.feedback_items_soft              += n; break;
-      case 'focus_area':                   cascaded.focus_areas_soft                 += n; break;
+}
+
+/** Recompute the affected+cascaded summary from the manifest tables.
+ *  Used by loadBatch to self-heal a batch with affected_counts_json =
+ *  '__pending__' (or missing / malformed).  Also used by the concurrent-
+ *  execute fallback path. */
+function summarizeFromManifest(loaded: any): { affected: Record<EntityType, number>; cascaded: any } {
+  const affected: Record<EntityType, number> = emptyAffected();
+  const cascaded = emptyCascaded();
+  if (!loaded) return { affected, cascaded };
+  for (const r of (loaded.rows || [])) {
+    if (r.deleted_at_stamp) {
+      const et = r.entity_type as EntityType;
+      if (et in affected) affected[et] += 1;
     }
   }
-  // Notification / activity_log counts from the batch results.
-  // Layout indices in `results`: for each parent P (in order), the DELETE
-  // statements are at fixed offsets computed by appendParentBatchStatements.
-  // We recompute those offsets in the same order to sum meta.changes.
-  let cursor = 0;
-  for (const p of parentRows) {
-    const step = parentStatementCount(p.entity_type);
-    // The notification DELETE is second-to-last inside the parent block
-    // (E), activity_log DELETE is last (F).  See appendParentBatchStatements.
-    const notifIdx = cursor + step - 2;
-    const actIdx   = cursor + step - 1;
-    cascaded.notifications_hard += safeChanges(results, notifIdx);
-    cascaded.activity_log_hard  += safeChanges(results, actIdx);
-    cursor += step;
+  for (const c of (loaded.children || [])) {
+    if (!c.deleted_at_stamp) continue;
+    switch (c.child_kind as ChildKind) {
+      case 'coaching_note_audit':          cascaded.coaching_note_audit_soft         += 1; break;
+      case 'coaching_note_share_delivery': cascaded.coaching_note_share_delivery_soft += 1; break;
+      case 'pd_deliverable':               cascaded.pd_deliverables_soft             += 1; break;
+      case 'pd_reflection':                cascaded.pd_reflections_soft              += 1; break;
+      case 'pd_deliverable_score':         cascaded.pd_deliverable_scores_soft       += 1; break;
+      case 'feedback_item':                cascaded.feedback_items_soft              += 1; break;
+      case 'focus_area':                   cascaded.focus_areas_soft                 += 1; break;
+    }
   }
+  // For notifications / activity_log we count scope entries as an
+  // upper bound (the actual delete count equals the scope count
+  // whenever the batch executed successfully — which is true here
+  // because loadBatch is only called for status='executed'/'restored').
+  cascaded.notifications_hard = (loaded.notif_scope || []).filter((s: any) => s.scope_kind === 'notification').length;
+  cascaded.activity_log_hard  = (loaded.notif_scope || []).filter((s: any) => s.scope_kind === 'activity_log').length;
+  cascaded.ambiguous_notifications_preserved = (loaded.ambiguous_notifs || []).length;
+  return { affected, cascaded };
+}
 
-  const summary = { affected, cascaded };
-  await db.prepare(
-    `UPDATE practice_cleanup_batches SET affected_counts_json=? WHERE id=?`
-  ).bind(JSON.stringify(summary), batchId).run();
-
-  return { batch_id: batchId, ...summary };
+/** Current-state dep fingerprint helper used by executeCleanup's early
+ *  drift check.  Same shape as depFingerprintFromFrozenScope but reads
+ *  the live tables (children, notifications, activity_log) instead of
+ *  the frozen manifest — so a drift is visible to the caller for a
+ *  helpful error message. */
+async function currentDepFingerprint(db: D1Database, cands: Candidate[]): Promise<string> {
+  const perParentChildren = [];
+  const perParentNotifScope = [];
+  for (const c of cands) {
+    const kids = await gatherChildIdsWithPrior(db, c.entity_type, c.entity_id);
+    perParentChildren.push({ parent: c, kids });
+    const ambIds = new Set(
+      c.entity_type === 'pd_enrollment'
+        ? (await detectAmbiguousNotifs(db, c.entity_id)).map(a => a.notification_id)
+        : []
+    );
+    const notifs = await db.prepare(
+      `SELECT id FROM notifications WHERE entity_type=? AND entity_id=? ORDER BY id`
+    ).bind(c.entity_type, c.entity_id).all<any>();
+    const activity = await db.prepare(
+      `SELECT id FROM activity_log WHERE entity_type=? AND entity_id=? ORDER BY id`
+    ).bind(c.entity_type, c.entity_id).all<any>();
+    const list: { parent: Candidate; kind: 'notification' | 'activity_log'; id: number }[] = [];
+    for (const r of ((notifs.results as any[]) || [])) {
+      const id = Number(r.id);
+      if (!ambIds.has(id)) list.push({ parent: c, kind: 'notification', id });
+    }
+    for (const r of ((activity.results as any[]) || [])) {
+      list.push({ parent: c, kind: 'activity_log', id: Number(r.id) });
+    }
+    perParentNotifScope.push(list);
+  }
+  return depFingerprintFromFrozenScope(cands, perParentChildren, perParentNotifScope);
 }
 
 function emptyAffected(): Record<EntityType, number> {
@@ -671,77 +902,83 @@ function safeChanges(results: D1Result[] | any, idx: number): number {
   }
 }
 
-/** Number of statements this parent contributes to the SINGLE cleanup batch.
- *  Used to compute the notification/activity DELETE indices post-batch.
- *  Structure per parent:
- *    A. child-manifest INSERT ... SELECT statements (varies by kind)
- *    B. child soft-delete UPDATE statements (matches A count)
- *    C. parent soft-delete UPDATE (1)
- *    D. manifest UPDATE for parent (1)
- *    E. notifications DELETE (1)
- *    F. activity_log DELETE (1)
+/** Per-parent block count in the execute batch is FIXED at 6:
+ *    A. children soft-delete (ONE update per parent, ids from manifest)
+ *    B. parent soft-delete (1)
+ *    C. row-manifest stamp (1)
+ *    D. child-manifest stamp (1)
+ *    E. notifications DELETE (1, ids from notif_scope)
+ *    F. activity_log DELETE  (1, ids from notif_scope)
+ *  The batch also has: statement 0 = execution_lock INSERT, then Z1 =
+ *  open_claim DELETE, Z2 = status flip.  Total = 1 + 6*parents + 2.
  */
-function parentStatementCount(entityType: EntityType): number {
-  const childKindCount =
-    entityType === 'coaching_note'          ? 2  // audit + ledger
-    : entityType === 'pd_enrollment'        ? 3  // deliv + refl + scores
-    : entityType === 'observation'          ? 2  // feedback + focus
-    : 0;                                          // external_pd_submission
-  return childKindCount * 2 + 4;                 // A + B + C + D + E + F
-}
-
-/** Build the per-parent statement group described above and append to
- *  `stmts`.  All INSERTs, UPDATEs, and DELETEs use a shared batchStamp so
- *  restore can prove ownership. */
 function appendParentBatchStatements(
   db: D1Database, stmts: D1PreparedStatement[],
   batchId: number, batchStamp: string,
   entityType: EntityType, entityId: number,
 ): void {
-  // (A) child-manifest INSERT ... SELECTs + (B) child soft-delete UPDATEs.
-  // A and B run in the same transaction so they see the same row set.
-  const childBlocks: Array<{
-    kind: ChildKind; table: string; whereCol: string;
-  }> = entityType === 'coaching_note' ? [
-    { kind: 'coaching_note_audit',          table: 'coaching_note_audit',          whereCol: 'note_id' },
-    { kind: 'coaching_note_share_delivery', table: 'coaching_note_share_delivery', whereCol: 'note_id' },
-  ] : entityType === 'pd_enrollment' ? [
-    { kind: 'pd_deliverable',       table: 'pd_deliverables',       whereCol: 'enrollment_id' },
-    { kind: 'pd_reflection',        table: 'pd_reflections',        whereCol: 'enrollment_id' },
-    { kind: 'pd_deliverable_score', table: 'pd_deliverable_scores', whereCol: 'enrollment_id' },
-  ] : entityType === 'observation' ? [
-    { kind: 'feedback_item', table: 'feedback_items', whereCol: 'observation_id' },
-    { kind: 'focus_area',    table: 'focus_areas',    whereCol: 'opened_observation_id' },
-  ] : [];
+  // (A) Soft-delete children restricted to the FROZEN scope.  A single
+  // UPDATE per parent handles all child kinds because we filter by
+  // "id IN (SELECT child_id FROM practice_cleanup_child WHERE
+  // batch_id=? AND parent_entity_type=? AND parent_entity_id=? AND
+  // child_kind IN (kinds for this parent))" applied to each table
+  // separately.  We keep one UPDATE statement per child_table so the
+  // meta.changes readback attributes correctly.  But since the counts
+  // are recomputed from the manifest tables post-batch, we can fold
+  // ALL child tables into a single "UPDATE ... WHERE id IN (…)" per
+  // table.  Loop over the tables and emit one UPDATE per table.
+  const spec: Array<{ kind: ChildKind; table: string }> =
+      entityType === 'coaching_note' ? [
+        { kind: 'coaching_note_audit',          table: 'coaching_note_audit' },
+        { kind: 'coaching_note_share_delivery', table: 'coaching_note_share_delivery' },
+      ]
+    : entityType === 'pd_enrollment' ? [
+        { kind: 'pd_deliverable',       table: 'pd_deliverables' },
+        { kind: 'pd_reflection',        table: 'pd_reflections' },
+        { kind: 'pd_deliverable_score', table: 'pd_deliverable_scores' },
+      ]
+    : entityType === 'observation' ? [
+        { kind: 'feedback_item', table: 'feedback_items' },
+        { kind: 'focus_area',    table: 'focus_areas' },
+      ]
+    : [];
 
-  // (A) INSERT ... SELECT for each child kind — captures the exact row
-  // set inside the transaction.  ON CONFLICT DO NOTHING keeps retries
-  // idempotent.
-  for (const cb of childBlocks) {
-    stmts.push(
-      db.prepare(
-        `INSERT INTO practice_cleanup_child
-           (batch_id, parent_entity_type, parent_entity_id, child_kind, child_id, prior_deleted_at, deleted_at_stamp)
-         SELECT ?, ?, ?, ?, id, NULL, ?
-           FROM ${cb.table}
-          WHERE ${cb.whereCol}=? AND deleted_at IS NULL
-         ON CONFLICT DO NOTHING`
-      ).bind(batchId, entityType, entityId, cb.kind, batchStamp, entityId),
-    );
-  }
-  // (B) UPDATE the same rows.  WHERE deleted_at IS NULL guarantees we
-  // touch exactly the same rows we just inserted into the manifest
-  // (both statements see the same view within the transaction).
-  for (const cb of childBlocks) {
-    stmts.push(
-      db.prepare(
-        `UPDATE ${cb.table} SET deleted_at=?
-          WHERE ${cb.whereCol}=? AND deleted_at IS NULL`
-      ).bind(batchStamp, entityId),
-    );
+  // We emit ONE consolidated child UPDATE per parent — that filters
+  // ALL the parent's child rows across every relevant child_table by
+  // the manifest ids.  Since a table can only be referenced by one
+  // child_kind for a given parent_entity_type, this is safe.  We
+  // implement it as a single statement whose target table is a UNION-
+  // like SQL trick: instead, emit one UPDATE per child_table for
+  // simplicity (still all in one db.batch() = one transaction).
+  //
+  // The number of these UPDATE statements varies by parent type, which
+  // makes the results-index math brittle.  To keep counts recomputation
+  // simple we pad the batch so EVERY parent contributes exactly the
+  // same NUMBER of statements.  We do this by always emitting one
+  // no-op filler statement when a parent has fewer child tables than
+  // the maximum (3, for pd_enrollment).
+  const MAX_CHILD_TABLES = 3;
+  const filler = () => db.prepare(`SELECT 1 WHERE 0=1`); // deterministic no-op
+  for (let i = 0; i < MAX_CHILD_TABLES; i++) {
+    if (i < spec.length) {
+      const cb = spec[i];
+      stmts.push(
+        db.prepare(
+          `UPDATE ${cb.table} SET deleted_at=?
+            WHERE deleted_at IS NULL
+              AND id IN (
+                SELECT child_id FROM practice_cleanup_child
+                 WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+                   AND child_kind=?
+              )`
+        ).bind(batchStamp, batchId, entityType, entityId, cb.kind),
+      );
+    } else {
+      stmts.push(filler());
+    }
   }
 
-  // (C) parent soft-delete UPDATE.
+  // (B) parent soft-delete UPDATE.
   stmts.push(
     db.prepare(
       `UPDATE ${tableFor(entityType)} SET deleted_at=?
@@ -749,39 +986,51 @@ function appendParentBatchStatements(
     ).bind(batchStamp, entityId),
   );
 
-  // (D) manifest UPDATE — mark this row as "we owned the delete" and
-  // record the exact stamp so restore can prove ownership.
+  // (C) manifest UPDATE for the parent row — one-winner guard via
+  // "AND deleted_at_stamp IS NULL" so a losing concurrent execute
+  // cannot overwrite the stamp.
   stmts.push(
     db.prepare(
       `UPDATE practice_cleanup_row
           SET prior_deleted_at=NULL, deleted_at_stamp=?
-        WHERE batch_id=? AND entity_type=? AND entity_id=?`
+        WHERE batch_id=? AND entity_type=? AND entity_id=?
+          AND deleted_at_stamp IS NULL`
     ).bind(batchStamp, batchId, entityType, entityId),
   );
 
-  // (E) notifications DELETE.  For pd_enrollment we exclude notifications
-  // recorded in the ambiguous table for this batch — those were pre-
-  // inserted to practice_cleanup_ambiguous_notif and must survive.
-  if (entityType === 'pd_enrollment') {
-    stmts.push(
-      db.prepare(
-        `DELETE FROM notifications
-          WHERE entity_type='pd_enrollment' AND entity_id=?
-            AND id NOT IN (SELECT notification_id FROM practice_cleanup_ambiguous_notif WHERE batch_id=?)`
-      ).bind(entityId, batchId),
-    );
-  } else {
-    stmts.push(
-      db.prepare(
-        `DELETE FROM notifications WHERE entity_type=? AND entity_id=?`
-      ).bind(entityType, entityId),
-    );
-  }
-  // (F) activity_log DELETE.
+  // (D) manifest UPDATE for the parent's child rows — one-winner guard.
   stmts.push(
     db.prepare(
-      `DELETE FROM activity_log WHERE entity_type=? AND entity_id=?`
-    ).bind(entityType, entityId),
+      `UPDATE practice_cleanup_child
+          SET deleted_at_stamp=?
+        WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+          AND deleted_at_stamp IS NULL`
+    ).bind(batchStamp, batchId, entityType, entityId),
+  );
+
+  // (E) notifications DELETE — restricted to the FROZEN scope
+  // (populated at preview time; late-added notifs are NOT in this set).
+  stmts.push(
+    db.prepare(
+      `DELETE FROM notifications
+        WHERE id IN (
+          SELECT scope_id FROM practice_cleanup_notif_scope
+           WHERE batch_id=? AND scope_kind='notification'
+             AND parent_entity_type=? AND parent_entity_id=?
+        )`
+    ).bind(batchId, entityType, entityId),
+  );
+
+  // (F) activity_log DELETE — same pattern.
+  stmts.push(
+    db.prepare(
+      `DELETE FROM activity_log
+        WHERE id IN (
+          SELECT scope_id FROM practice_cleanup_notif_scope
+           WHERE batch_id=? AND scope_kind='activity_log'
+             AND parent_entity_type=? AND parent_entity_id=?
+        )`
+    ).bind(batchId, entityType, entityId),
   );
 }
 
@@ -1007,6 +1256,15 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
     childIndex.push({ kind: c.child_kind });
   }
 
+  // Release the execution lock — allows a fresh preview on the same
+  // parents (via re-tag) to execute cleanly.  Kept inside the same
+  // batch so lock release is atomic with the restore writes.
+  stmts.push(
+    db.prepare(
+      `DELETE FROM practice_cleanup_execution_lock WHERE batch_id=?`
+    ).bind(batchId),
+  );
+
   // Status flip — guarded by status='executed' so a repeat call is a no-op.
   stmts.push(
     db.prepare(
@@ -1018,7 +1276,8 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
 
   const results = await db.batch(stmts);
 
-  // Reconcile counts from the batch results.
+  // Reconcile counts from the batch results.  Layout: parentUpdates[0..N),
+  // childUpdates[N..N+M), executionLockDelete[N+M], statusFlip[N+M+1].
   for (let i = 0; i < parentIndex.length; i++) {
     if (safeChanges(results, i) === 1) restored[parentIndex[i].et] += 1;
   }
@@ -1026,10 +1285,10 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
   for (let i = 0; i < childIndex.length; i++) {
     if (safeChanges(results, base + i) === 1) cascade_restored[childIndex[i].kind] += 1;
   }
-  // (status flip is last, safeChanges(results, base+childIndex.length) === 1
-  // when we won the race; if 0 the batch was already restored by another
-  // request — everything above is still safe because our UPDATEs required
-  // deleted_at=<stamp> which by then is NULL, so they no-op'd.)
+  // (execution_lock DELETE at base+childIndex.length is a no-op if the
+  // batch was already restored; status flip at base+childIndex.length+1
+  // returns changes=0 in that case; our per-row UPDATEs required
+  // deleted_at=<stamp> which by then is NULL so they safely no-op'd.)
 
   return { restored, cascade_restored };
 }
@@ -1066,12 +1325,50 @@ export async function loadBatch(db: D1Database, batchId: number): Promise<any> {
       WHERE batch_id=?
       ORDER BY parent_entity_type, parent_entity_id, child_kind, child_id`
   ).bind(batchId).all<any>();
-  return {
+  const notifScope = await db.prepare(
+    `SELECT parent_entity_type, parent_entity_id, scope_kind, scope_id, action
+       FROM practice_cleanup_notif_scope
+      WHERE batch_id=?
+      ORDER BY parent_entity_type, parent_entity_id, scope_kind, scope_id`
+  ).bind(batchId).all<any>();
+  const loaded = {
     batch: b,
     rows: (rows.results as any[]) || [],
     ambiguous_notifs: (ambiguous.results as any[]) || [],
     children: (children.results as any[]) || [],
+    notif_scope: (notifScope.results as any[]) || [],
   };
+
+  // Self-healing counts backfill (0018 item 3).  If the batch is executed
+  // or restored but affected_counts_json is missing / '__pending__' /
+  // malformed, recompute from the manifest and write back so the results
+  // page renders correctly and stays reachable.
+  const isExec = b.status === 'executed' || b.status === 'restored';
+  const hasUsableCounts = b.affected_counts_json
+    && b.affected_counts_json !== '__pending__'
+    && safeJsonParse(b.affected_counts_json) !== null;
+  if (isExec && !hasUsableCounts) {
+    const recomputed = summarizeFromManifest(loaded);
+    try {
+      await db.prepare(
+        `UPDATE practice_cleanup_batches SET affected_counts_json=? WHERE id=?`
+      ).bind(JSON.stringify(recomputed), batchId).run();
+      // Refresh the batch row so the returned object has the healed value.
+      loaded.batch = { ...loaded.batch, affected_counts_json: JSON.stringify(recomputed) };
+    } catch (e) {
+      // Even the self-heal write failed — leave affected_counts_json as-is;
+      // the results page's own null-safe rendering path handles it.
+      console.warn('practice_cleanup: loadBatch self-heal write failed (view falls back to null)', {
+        batchId, err: (e as any)?.message || e,
+      });
+    }
+  }
+  return loaded;
+}
+
+function safeJsonParse(s: string | null | undefined): any {
+  if (!s) return null;
+  try { return JSON.parse(s); } catch { return null; }
 }
 
 export async function listBatches(db: D1Database, limit = 25): Promise<any[]> {
