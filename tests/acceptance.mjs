@@ -1950,6 +1950,240 @@ suite('Case 29 — teacher-coach guided tour merges teacher + coach steps (Miran
 }
 
 // ==========================================================================
+suite('Case 30 — admin can create teacher / coach / teacher+can_coach, and each gets the correct tour');
+{
+  // End-to-end: super_admin uses POST /admin/users/create with each role
+  // variant, then we log in as each newly-created user and verify the
+  // guided-tour payload matches the intended workflow.  This is the
+  // full round-trip Dr. Rupak asked for — "assign coach, teacher, or
+  // coach + teacher and then the guided tour for anyone would adjust
+  // accordingly."
+  //
+  // We also exercise the UPDATE endpoint by flipping one user's
+  // can_coach on/off and re-checking the tour changes with them.
+  //
+  // Every user is created with password 'Alexander2026!' (the create
+  // handler's default).  We do NOT touch fixture users; Case 30 creates
+  // its own throwaway accounts under a case30- email prefix.
+
+  // Same payload extractor + anchor lists as Case 29.
+  function extractTourPayload(html) {
+    const m = html.match(/window\.__APS_TOUR__=(\{[\s\S]*?\});/);
+    if (!m) return null;
+    try { return JSON.parse(m[1]); } catch { return null; }
+  }
+  function tourSelectors(p) {
+    return ((p && p.steps) || []).map(s =>
+      (s.selector || '').replace(/^\[data-tour="/, '').replace(/"\]$/, '')
+    );
+  }
+  const TEACHER_ANCHORS = ['t-summary', 't-obs-list', 't-focus', 't-pd-home', 't-coaching-feedback'];
+  const COACH_ANCHORS   = ['co-teachers', 'co-notes'];
+  const CREATE_PW = 'Alexander2026!';
+
+  // Login helper for a user with the CREATE_PW default password (fixture
+  // users use TestPass1!, so we can't reuse the Client class's built-in
+  // login).  Returns a Client with a live cookie.
+  async function loginNewUser(email, label) {
+    const c = new Client(email, label);
+    const res = await fetch(`${BASE}/login`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ email, password: CREATE_PW }),
+    });
+    if (res.status !== 302) throw new Error(`${label} login: HTTP ${res.status}`);
+    const sc = res.headers.get('set-cookie') || '';
+    const m = sc.match(/(aps_session=[^;]+)/);
+    if (!m) throw new Error(`${label}: no session cookie`);
+    c.cookie = m[1];
+    return c;
+  }
+
+  // Reuse the fixture admin (super_admin, has POST /admin/users/create).
+  // -----------------------------------------------------------------
+  // Sub-case A: create role='teacher' (no can_coach)
+  // -----------------------------------------------------------------
+  const emailT = `case30-teacher-${Date.now()}@test.local`;
+  {
+    const r = await admin.post('/admin/users/create', new URLSearchParams({
+      email: emailT, first_name: 'Case30', last_name: 'Teacher',
+      role: 'teacher', title: '', phone: '', password: CREATE_PW,
+    }));
+    ok('30A: admin create teacher returns 302', r.status === 302, `HTTP ${r.status}`);
+    const row = db.prepare(`SELECT id, role, can_coach FROM users WHERE email=?`).get(emailT);
+    ok('30A: created user row exists', !!row, 'no DB row');
+    ok('30A: role stored as teacher', row?.role === 'teacher', `got '${row?.role}'`);
+    ok('30A: can_coach stored as 0', row?.can_coach === 0, `got ${row?.can_coach}`);
+    const client = await loginNewUser(emailT, 'Case30Teacher');
+    const page = await client.get('/teacher');
+    ok('30A: new teacher /teacher 200', page.status === 200, `HTTP ${page.status}`);
+    const payload = extractTourPayload(page.text);
+    ok('30A: tour payload present', !!payload);
+    ok('30A: role label = "Teacher"', payload?.roleLabel === 'Teacher', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of TEACHER_ANCHORS) ok(`30A: teacher tour includes ${a}`, sels.includes(a));
+    for (const a of COACH_ANCHORS)   ok(`30A: teacher tour does NOT include coach anchor ${a}`, !sels.includes(a));
+  }
+
+  // -----------------------------------------------------------------
+  // Sub-case B: create role='coach' (pure coach)
+  // -----------------------------------------------------------------
+  const emailC = `case30-coach-${Date.now()}@test.local`;
+  {
+    const r = await admin.post('/admin/users/create', new URLSearchParams({
+      email: emailC, first_name: 'Case30', last_name: 'Coach',
+      role: 'coach', title: '', phone: '', password: CREATE_PW,
+    }));
+    ok('30B: admin create coach returns 302', r.status === 302, `HTTP ${r.status}`);
+    const row = db.prepare(`SELECT id, role, can_coach FROM users WHERE email=?`).get(emailC);
+    ok('30B: role stored as coach', row?.role === 'coach', `got '${row?.role}'`);
+    ok('30B: can_coach stored as 0 (redundant for pure coach)', row?.can_coach === 0);
+    const client = await loginNewUser(emailC, 'Case30Coach');
+    const page = await client.get('/coach');
+    ok('30B: new coach /coach 200', page.status === 200, `HTTP ${page.status}`);
+    const payload = extractTourPayload(page.text);
+    ok('30B: tour payload present', !!payload);
+    ok('30B: role label = "Instructional Coach"',
+       payload?.roleLabel === 'Instructional Coach', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of COACH_ANCHORS)   ok(`30B: coach tour includes ${a}`, sels.includes(a));
+    for (const a of TEACHER_ANCHORS) ok(`30B: coach tour does NOT include teacher anchor ${a}`, !sels.includes(a));
+  }
+
+  // -----------------------------------------------------------------
+  // Sub-case C: create role='teacher' + can_coach=1 (teacher-coach)
+  // -----------------------------------------------------------------
+  const emailTC = `case30-teachercoach-${Date.now()}@test.local`;
+  {
+    const r = await admin.post('/admin/users/create', new URLSearchParams({
+      email: emailTC, first_name: 'Case30', last_name: 'TeacherCoach',
+      role: 'teacher', title: '', phone: '', password: CREATE_PW,
+      can_coach: '1',
+    }));
+    ok('30C: admin create teacher+can_coach returns 302', r.status === 302, `HTTP ${r.status}`);
+    const row = db.prepare(`SELECT id, role, can_coach FROM users WHERE email=?`).get(emailTC);
+    ok('30C: role stored as teacher', row?.role === 'teacher');
+    ok('30C: can_coach stored as 1', row?.can_coach === 1, `got ${row?.can_coach}`);
+    const client = await loginNewUser(emailTC, 'Case30TeacherCoach');
+    const page = await client.get('/teacher');
+    ok('30C: new teacher-coach /teacher 200', page.status === 200, `HTTP ${page.status}`);
+    const payload = extractTourPayload(page.text);
+    ok('30C: tour payload present', !!payload);
+    ok('30C: role label = "Teacher & Instructional Coach"',
+       payload?.roleLabel === 'Teacher & Instructional Coach', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of TEACHER_ANCHORS) ok(`30C: merged tour includes teacher anchor ${a}`, sels.includes(a));
+    for (const a of COACH_ANCHORS)   ok(`30C: merged tour includes coach anchor ${a}`, sels.includes(a));
+    ok('30C: merged tour has 10+ steps', (payload?.steps || []).length >= 10,
+       `got ${(payload?.steps || []).length}`);
+    // /coach must also render (teacher-coach has access to that route).
+    const cp = await client.get('/coach');
+    ok('30C: teacher-coach /coach 200 (coach access granted)', cp.status === 200, `HTTP ${cp.status}`);
+  }
+
+  // -----------------------------------------------------------------
+  // Sub-case D: edit — flip teacher (sub-case A) TO teacher+can_coach.
+  //  Verifies POST /admin/users/:id/update honors can_coach on edit and
+  //  that the newly-elevated user's tour flips to the merged shape.
+  // -----------------------------------------------------------------
+  {
+    const rowBefore = db.prepare(`SELECT id, can_coach FROM users WHERE email=?`).get(emailT);
+    ok('30D: pre-flip teacher row exists', !!rowBefore);
+    ok('30D: pre-flip can_coach=0', rowBefore.can_coach === 0);
+    // Get their primary school so the edit payload keeps them assigned.
+    const uid = rowBefore.id;
+    const update = await admin.post(`/admin/users/${uid}/update`, new URLSearchParams({
+      first_name: 'Case30', last_name: 'Teacher',
+      email: emailT, role: 'teacher', title: '', phone: '',
+      active: '1', can_coach: '1',
+    }));
+    ok('30D: admin update returns 302', update.status === 302, `HTTP ${update.status}`);
+    const rowAfter = db.prepare(`SELECT can_coach FROM users WHERE id=?`).get(uid);
+    ok('30D: post-flip can_coach=1', rowAfter.can_coach === 1, `got ${rowAfter.can_coach}`);
+    // Re-login with fresh session and verify tour flipped to teacher-coach.
+    const client = await loginNewUser(emailT, 'Case30TeacherFlipped');
+    const page = await client.get('/teacher');
+    const payload = extractTourPayload(page.text);
+    ok('30D: post-flip tour role label = "Teacher & Instructional Coach"',
+       payload?.roleLabel === 'Teacher & Instructional Coach', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of TEACHER_ANCHORS) ok(`30D: flipped tour includes teacher anchor ${a}`, sels.includes(a));
+    for (const a of COACH_ANCHORS)   ok(`30D: flipped tour includes coach anchor ${a}`, sels.includes(a));
+  }
+
+  // -----------------------------------------------------------------
+  // Sub-case E: edit — revoke can_coach on the teacher-coach (C).
+  //  Verifies POST /admin/users/:id/update DROPS coaching when the
+  //  can_coach box is unchecked, and the tour reverts to teacher-only.
+  //  (Omitting the checkbox from the form body is exactly what the
+  //  browser does when the box isn't checked.)
+  // -----------------------------------------------------------------
+  {
+    const uid = db.prepare(`SELECT id FROM users WHERE email=?`).get(emailTC).id;
+    const update = await admin.post(`/admin/users/${uid}/update`, new URLSearchParams({
+      first_name: 'Case30', last_name: 'TeacherCoach',
+      email: emailTC, role: 'teacher', title: '', phone: '',
+      active: '1', // NO can_coach — simulates unchecked checkbox
+    }));
+    ok('30E: admin revoke can_coach returns 302', update.status === 302, `HTTP ${update.status}`);
+    const rowAfter = db.prepare(`SELECT can_coach FROM users WHERE id=?`).get(uid);
+    ok('30E: post-revoke can_coach=0', rowAfter.can_coach === 0, `got ${rowAfter.can_coach}`);
+    const client = await loginNewUser(emailTC, 'Case30TCRevoked');
+    const page = await client.get('/teacher');
+    const payload = extractTourPayload(page.text);
+    ok('30E: post-revoke role label = "Teacher"',
+       payload?.roleLabel === 'Teacher', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of COACH_ANCHORS) ok(`30E: revoked tour does NOT include coach anchor ${a}`, !sels.includes(a));
+    // And /coach must now 403 for this user (coach access revoked).
+    const cp = await client.get('/coach');
+    ok('30E: /coach returns 403 after revoke (got HTTP ' + cp.status + ')',
+       cp.status === 403);
+  }
+
+  // -----------------------------------------------------------------
+  // Sub-case F: edit — change role from teacher(can_coach=1) to 'coach'.
+  //  Server should clear can_coach (redundant for pure coach), and
+  //  tour should become the pure-coach walkthrough.
+  //  Uses the coach account created in 30B (currently role='coach').
+  //  We flip it teacher→coach in one step to also cover role migration.
+  //  (Recreate a fresh teacher-coach first because 30E already revoked
+  //  emailTC.)
+  // -----------------------------------------------------------------
+  const emailF = `case30-flip-${Date.now()}@test.local`;
+  {
+    // Seed as teacher-coach.
+    const c1 = await admin.post('/admin/users/create', new URLSearchParams({
+      email: emailF, first_name: 'Case30', last_name: 'FlipMe',
+      role: 'teacher', title: '', phone: '', password: CREATE_PW,
+      can_coach: '1',
+    }));
+    ok('30F: seed teacher-coach returns 302', c1.status === 302);
+    const uid = db.prepare(`SELECT id FROM users WHERE email=?`).get(emailF).id;
+    // Now flip role → coach (checkbox still submitted, but server MUST
+    // coerce can_coach=0 because role is no longer teacher).
+    const upd = await admin.post(`/admin/users/${uid}/update`, new URLSearchParams({
+      first_name: 'Case30', last_name: 'FlipMe',
+      email: emailF, role: 'coach', title: '', phone: '',
+      active: '1', can_coach: '1', // deliberately still checked
+    }));
+    ok('30F: admin flip teacher→coach returns 302', upd.status === 302);
+    const row = db.prepare(`SELECT role, can_coach FROM users WHERE id=?`).get(uid);
+    ok('30F: role stored as coach', row.role === 'coach', `got '${row.role}'`);
+    ok('30F: can_coach coerced to 0 despite form checkbox still checked',
+       row.can_coach === 0, `got ${row.can_coach}`);
+    const client = await loginNewUser(emailF, 'Case30FlippedToCoach');
+    const page = await client.get('/coach');
+    const payload = extractTourPayload(page.text);
+    ok('30F: post-flip role label = "Instructional Coach"',
+       payload?.roleLabel === 'Instructional Coach', `got '${payload?.roleLabel}'`);
+    const sels = tourSelectors(payload);
+    for (const a of COACH_ANCHORS)   ok(`30F: coach tour includes ${a}`, sels.includes(a));
+    for (const a of TEACHER_ANCHORS) ok(`30F: coach tour does NOT include teacher anchor ${a}`, !sels.includes(a));
+  }
+}
+
+// ==========================================================================
 suite('Case 27 — RESET PRACTICE DATA sweeps coaching_notes (+audit + share-delivery); observations preserved');
 {
   // Seed a fresh coaching note authored by CoachOne for Alice, share it,

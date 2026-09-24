@@ -2112,8 +2112,13 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           {/* Sept 23, 2026 — coaching capability opt-in.  Only applies to
               role='teacher'; ignored server-side when role is anything else.
               Turning this on gives the teacher My Coaching + PD Review nav
-              in ADDITION to their existing teacher workspace. */}
-          <label class="md:col-span-4 flex items-start gap-2 p-2 border border-slate-200 rounded bg-slate-50">
+              in ADDITION to their existing teacher workspace.
+              Sept 24, 2026 — carries the aps-can-coach-toggle class so the
+              show/hide JS at the bottom of the page keeps this checkbox
+              visible only when Role = Teacher is selected.  Starts hidden
+              (no role picked yet) so an admin creating an appraiser or
+              coach doesn't wonder why the checkbox is there. */}
+          <label class="md:col-span-4 aps-can-coach-toggle hidden flex items-start gap-2 p-2 border border-slate-200 rounded bg-slate-50">
             <input type="checkbox" name="can_coach" value="1" class="mt-1" />
             <span class="text-xs text-slate-700">
               <strong>Also grant coaching capability</strong> (only meaningful if Role = Teacher)<br/>
@@ -2208,17 +2213,18 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
                       </label>
                       <label class="flex items-center gap-2 mt-5"><input type="checkbox" name="active" checked={!!u.active} /> Active</label>
                       {/* Sept 23, 2026 — coaching capability toggle in the edit form.
-                          Shown only for role='teacher' users because it's a no-op for
-                          pure coaches (their role already grants coaching).  Turning
-                          on grants My Coaching + PD Review in the nav; turning off
-                          revokes coaching route access on the NEXT request (existing
-                          coaching_notes rows are preserved, per Section 4/5). */}
-                      {u.role === 'teacher' && (
-                        <label class="flex items-center gap-2 mt-5" title="Grants coaching capability without changing the teacher role or workspace.">
-                          <input type="checkbox" name="can_coach" value="1" checked={!!u.can_coach} />
-                          <span class="text-xs">Can coach (add coaching workspace)</span>
-                        </label>
-                      )}
+                          The checkbox is ALWAYS rendered so switching the Role
+                          dropdown to 'teacher' can show it live without a
+                          page reload (inline JS below does the show/hide).
+                          Server-side, canCoach is coerced to 0 for any role
+                          other than 'teacher', so leaving it checked on a
+                          non-teacher save is a no-op.  Sept 24, 2026 fix. */}
+                      <label
+                        class={`flex items-center gap-2 mt-5 aps-can-coach-toggle ${u.role === 'teacher' ? '' : 'hidden'}`}
+                        title="Grants coaching capability without changing the teacher role or workspace. Only applies when Role = Teacher.">
+                        <input type="checkbox" name="can_coach" value="1" checked={!!u.can_coach} />
+                        <span class="text-xs">Can coach (add coaching workspace)</span>
+                      </label>
                       <div class="md:col-span-4 flex flex-wrap gap-2"><button class="bg-aps-navy text-white px-3 py-1 rounded text-xs"><i class="fas fa-save mr-1"></i>Save</button></div>
                     </form>
                     <div class="mt-2 flex flex-wrap items-center gap-2 bg-amber-50 p-2 rounded text-xs">
@@ -2268,6 +2274,49 @@ function UsersPage({ user, rows, schools, q, roleFilter, msg }: any) {
           </tbody>
         </table></div>
       </Card>
+      {/* Sept 24, 2026 — progressive-enhancement JS that shows/hides the
+          "Can coach (add coaching workspace)" checkbox in each edit row
+          based on the current Role dropdown value.  Without this, an admin
+          who edited an existing coach into a teacher had to save + reload
+          before the checkbox appeared.  Server-side already coerces
+          canCoach=0 for any role other than 'teacher' (line ~147), so a
+          non-teacher save with the box still checked is a safe no-op.
+          Same handler runs on the CREATE form for consistency. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        (function () {
+          function sync(form) {
+            var role = form.querySelector('select[name="role"]');
+            var toggles = form.querySelectorAll('.aps-can-coach-toggle');
+            if (!role || !toggles.length) return;
+            var isTeacher = role.value === 'teacher';
+            toggles.forEach(function (t) {
+              t.classList.toggle('hidden', !isTeacher);
+            });
+          }
+          // Every form that has a Role dropdown + a can-coach toggle is a
+          // candidate.  Wire on load, on role-change, and on newly-inserted
+          // forms (the edit rows are inside <details> that browsers may
+          // lazy-render).
+          function wireAll() {
+            document.querySelectorAll('form').forEach(function (f) {
+              if (f.dataset.apsCanCoachWired) return;
+              var role = f.querySelector('select[name="role"]');
+              var toggle = f.querySelector('.aps-can-coach-toggle');
+              if (!role || !toggle) return;
+              f.dataset.apsCanCoachWired = '1';
+              role.addEventListener('change', function () { sync(f); });
+              sync(f);
+            });
+          }
+          if (document.readyState !== 'loading') wireAll();
+          else document.addEventListener('DOMContentLoaded', wireAll);
+          // Re-scan when any <details> row opens (admins expand a user's
+          // edit row on demand).
+          document.addEventListener('toggle', function (ev) {
+            if (ev.target && ev.target.tagName === 'DETAILS' && ev.target.open) wireAll();
+          }, true);
+        })();
+      ` }} />
     </Layout>
   );
 }
