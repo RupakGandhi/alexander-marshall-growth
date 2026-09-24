@@ -380,7 +380,7 @@ const coachSteps: TourStep[] = [
       </ul>
       <p><strong>Save draft</strong> keeps the entry private to you (and platform support, view-only). <strong>Share with teacher</strong> sends the teacher <em>one</em> notification and makes the entry visible to them — never to other coaches, principals, or district dashboards.</p>
       <p><strong>These entries are separate from formal observations.</strong> They do not score, do not enroll the teacher in PD, and do not appear in evaluation exports or reports.</p>`,
-    hint: 'Every field auto-saves — no separate "Save" button. Sharing a draft later works too; the notification only ever fires once per note.',
+    hint: 'Nothing is stored until you click a button — use "Save draft" to keep it private, "Share with teacher" to send it, or (on a previously-shared entry) "Save and share changes" to update it. Sharing a draft later works too; the notification only ever fires once per note.',
   },
   {
     page: '/coach',
@@ -391,8 +391,9 @@ const coachSteps: TourStep[] = [
       <ul>
         <li>The teacher gets a notification titled <em>"[Coach name] shared coaching feedback with you"</em>.</li>
         <li>Opening it drops them into their workspace at the <strong>"Non-evaluative coaching feedback"</strong> card — a read-only view of your strengths, growth, next step, and follow-up date.</li>
-        <li>Their view never shows drafts, private notes, or entries from other coaches — only what you explicitly shared.</li>
+        <li>Their view shows <strong>every shared entry from every coach assigned to them</strong>, in one list — so if a teacher has two coaches, both coaches' shared entries appear together. Drafts and private notes never surface there.</li>
       </ul>
+      <p><strong>What you (the coach) see is different:</strong> your workspace lists only <em>your own</em> entries for a given teacher. Another coach's entries on the same teacher are not visible to you — only to the teacher and to platform support.</p>
       <p>If a shared note needs to be redacted, contact your super administrator — the practice-cleanup workflow can remove a single entry along with its notification and audit trail.</p>`,
   },
   {
@@ -452,16 +453,16 @@ const teacherSteps: TourStep[] = [
     placement: 'auto',
     title: 'Non-evaluative coaching feedback',
     body: `
-      <p>If you have an instructional coach, this card shows the entries they've chosen to <strong>share</strong> with you — usually after a classroom visit or a coaching conversation. Each entry can include:</p>
+      <p>If you have one or more instructional coaches, this card shows every entry they've chosen to <strong>share</strong> with you — usually after a classroom visit or a coaching conversation. If more than one coach is assigned to you, their shared entries all appear here together, each labeled with the author's name. Each entry can include:</p>
       <ul>
         <li><strong>What your coach noticed</strong> (evidence from the visit).</li>
         <li><strong>Strengths</strong> — what worked well.</li>
         <li><strong>Growth</strong> — what could stretch your practice further.</li>
         <li><strong>Agreed next step</strong> and an optional <strong>follow-up date</strong>.</li>
       </ul>
-      <p><strong>This is not an evaluation.</strong> Coaching feedback does not affect your rubric scores, does not enroll you in PD, and is never visible to your principal, other coaches, or the district dashboard. Only you, the authoring coach, and platform support can see it.</p>
+      <p><strong>This is not an evaluation.</strong> Coaching feedback does not affect your rubric scores, does not enroll you in PD, and is never visible to your principal or the district dashboard. Only you, the authoring coach(es), and platform support can see it — and each coach sees only the entries they themselves authored, not the entries other coaches wrote for you.</p>
       <p>You'll get a notification the first time each entry is shared — tap the bell in the header to jump straight here.</p>`,
-    hint: 'Your coach can also keep private drafts you never see. Only entries they explicitly click "Share with teacher" appear here.',
+    hint: 'Your coach(es) can also keep private drafts you never see. Only entries a coach explicitly clicks "Share with teacher" appear here.',
   },
   {
     page: '/teacher/pd',
