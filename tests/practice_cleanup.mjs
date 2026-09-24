@@ -1955,6 +1955,256 @@ function safeJsonParse(s) {
 }
 
 // ==========================================================================
+suite('V24 (0018 item 1 sixth-review — DELAYED-DUPLICATE execute after restore does NOT re-delete records)');
+{
+  // Reproduces the exact defect the reviewer found against 495d5ab:
+  //   1. Request A passes early status/scope/dep-fingerprint checks and
+  //      snapshots the batch row (nonce N, status='preview').  Before A
+  //      reaches db.batch(), it is paused (e.g. Cloudflare Worker
+  //      request suspension / retry queue / process-level context
+  //      switch).
+  //   2. Request B for the same batch id lands and completes: acquires
+  //      execution_lock, soft-deletes parent + children, hard-deletes
+  //      notifications, flips status='executed', clears writer_nonce.
+  //   3. Admin restores the batch: parent + children un-soft-deleted,
+  //      status='restored'.  The 495d5ab code ALSO deletes the
+  //      execution_lock row (that was the defect).
+  //   4. Request A resumes and finally runs its db.batch().  In 495d5ab:
+  //      the lock INSERT succeeds (row was cleared), and every mutation
+  //      runs to completion because they had no batch-status guard —
+  //      records re-soft-deleted, batch still says 'restored', restore
+  //      button unreachable.
+  //   5. In this fix: the lock INSERT is now a conditional SELECT that
+  //      returns 0 rows (status<>'preview'), so no lock is acquired.
+  //      Even if the lock somehow WERE acquired, every mutation carries
+  //      "AND EXISTS (SELECT 1 FROM batches WHERE id=? AND status='preview'
+  //      AND writer_nonce=?)" which fails, making each UPDATE/DELETE a
+  //      0-row no-op.  Records stay live.  A fresh preview on the same
+  //      re-tagged records executes cleanly.
+  //
+  // Since Cloudflare Worker request pausing isn't reproducible from
+  // Node, we simulate step 4 by REPLAYING the exact SQL that A's
+  // db.batch() would have issued.  We capture (batchId, writerNonce)
+  // BEFORE B executes and use those values to construct the paused
+  // request's statements — a faithful reproduction of the code path.
+
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9240`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9240, ?, ?, '2026-09-24', 'V24 delayed-duplicate test', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  // Isolate: untag every other is_practice=1 row.
+  const othersV24 = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL AND id<>9240
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of othersV24) {
+    const tbl = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${tbl} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9240`).run();
+
+  // Preview the batch.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V24 delayed dup' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`V24: preview batch created (id=${bid})`, bid > 0);
+
+  // Simulate step 1: request A snapshots the batch state.  These are
+  // the exact values A's executeCleanup captures before its db.batch().
+  const snapshot = db.prepare(`SELECT writer_nonce FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  const A_nonce = snapshot.writer_nonce;
+  ok(`V24: A captured writer_nonce=${A_nonce?.slice(0, 8)}...`, !!A_nonce);
+
+  // Also capture the child + notif_scope ids from A's frozen manifest.
+  // These are what A's batch's UPDATE/DELETE statements target.
+  const A_childIds = db.prepare(`SELECT child_id FROM practice_cleanup_child WHERE batch_id=?`).all(bid).map(r => r.child_id);
+  const A_notifScope = db.prepare(`SELECT scope_id FROM practice_cleanup_notif_scope WHERE batch_id=? AND scope_kind='notification'`).all(bid).map(r => r.scope_id);
+  const A_actScope   = db.prepare(`SELECT scope_id FROM practice_cleanup_notif_scope WHERE batch_id=? AND scope_kind='activity_log'`).all(bid).map(r => r.scope_id);
+
+  // Step 2: request B lands and completes.
+  const rExecB = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V24 step 2: B execute succeeded (${rExecB.status})`, rExecB.status === 302);
+  const afterB = db.prepare(`SELECT status, writer_nonce FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V24 step 2: batch status='executed' after B`, afterB.status === 'executed');
+  ok(`V24 step 2: writer_nonce cleared after B`, afterB.writer_nonce === null);
+  const B_stamp = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9240`).get().deleted_at;
+  ok(`V24 step 2: parent soft-deleted with B's stamp (${B_stamp})`, !!B_stamp);
+
+  // Step 3: admin restores.
+  const rRestore = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  ok(`V24 step 3: restore succeeded (${rRestore.status})`, rRestore.status === 302);
+  const afterRestore = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V24 step 3: batch status='restored' after restore`, afterRestore.status === 'restored');
+  const parentAfterRestore = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9240`).get();
+  ok(`V24 step 3: parent un-soft-deleted (deleted_at=${parentAfterRestore.deleted_at})`, !parentAfterRestore.deleted_at);
+  // KEY invariant for this fix: execution_lock is RETAINED through restore.
+  const lockAfterRestore = db.prepare(`SELECT COUNT(*) AS n FROM practice_cleanup_execution_lock WHERE batch_id=?`).get(bid).n;
+  ok(`V24 step 3: execution_lock RETAINED through restore (${lockAfterRestore} row) — the sixth-review-item-1 invariant`,
+     lockAfterRestore === 1);
+
+  // Step 4: replay A's db.batch() statements.  These are the exact
+  // statements src/lib/practice_cleanup.ts appendParentBatchStatements
+  // emits.  If ANY of them succeed in mutating a row, the fix is
+  // incomplete.
+  //
+  // A's execution_lock INSERT is now conditional SELECT.  Reproduce it
+  // exactly:
+  let lockInsertError = null;
+  try {
+    const lockRes = db.prepare(
+      `INSERT INTO practice_cleanup_execution_lock (batch_id)
+       SELECT id FROM practice_cleanup_batches
+        WHERE id=? AND status='preview' AND writer_nonce=?`
+    ).run(bid, A_nonce);
+    // In better-sqlite3, .changes reflects rows inserted.
+    ok(`V24 step 4a: A's conditional lock INSERT affected 0 rows (batch not previewable) — got changes=${lockRes.changes}`,
+       lockRes.changes === 0);
+  } catch (e) {
+    lockInsertError = e;
+    // PRIMARY KEY violation is ALSO acceptable — it means the lock row
+    // from B is still there.
+    ok(`V24 step 4a: A's conditional lock INSERT failed with UNIQUE/PRIMARY KEY (retained lock) — msg='${(e.message || '').slice(0, 80)}'`,
+       /UNIQUE|PRIMARY KEY|constraint/i.test(e.message || ''));
+  }
+
+  // Now replay every mutation from appendParentBatchStatements with
+  // A's writerNonce.  Each must affect 0 rows because of the STATUS_GUARD.
+  // We'll use a synthetic A_stamp — it must NEVER end up written anywhere.
+  const A_stamp = `V24_A_STAMP_MUST_NOT_APPEAR #b${bid}`;
+
+  // (A) child soft-deletes (coaching_note has 2 child kinds).
+  const rChild1 = db.prepare(
+    `UPDATE coaching_note_audit SET deleted_at=?
+      WHERE deleted_at IS NULL
+        AND id IN (SELECT child_id FROM practice_cleanup_child
+                    WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+                      AND child_kind=?)
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(A_stamp, bid, 'coaching_note', 9240, 'coaching_note_audit', bid, A_nonce);
+  ok(`V24 step 4b: A's coaching_note_audit child UPDATE affected 0 rows (STATUS_GUARD blocked) — changes=${rChild1.changes}`,
+     rChild1.changes === 0);
+  const rChild2 = db.prepare(
+    `UPDATE coaching_note_share_delivery SET deleted_at=?
+      WHERE deleted_at IS NULL
+        AND id IN (SELECT child_id FROM practice_cleanup_child
+                    WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+                      AND child_kind=?)
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(A_stamp, bid, 'coaching_note', 9240, 'coaching_note_share_delivery', bid, A_nonce);
+  ok(`V24 step 4c: A's coaching_note_share_delivery child UPDATE affected 0 rows — changes=${rChild2.changes}`,
+     rChild2.changes === 0);
+
+  // (B) parent soft-delete.
+  const rParent = db.prepare(
+    `UPDATE coaching_notes SET deleted_at=?
+      WHERE id=? AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(A_stamp, 9240, bid, A_nonce);
+  ok(`V24 step 4d: A's parent UPDATE affected 0 rows (STATUS_GUARD blocked) — changes=${rParent.changes}`,
+     rParent.changes === 0);
+
+  // (C) manifest row stamp — MUST not overwrite B's stamp.
+  const rowStampBefore = db.prepare(`SELECT deleted_at_stamp FROM practice_cleanup_row WHERE batch_id=? AND entity_id=9240`).get(bid).deleted_at_stamp;
+  const rRow = db.prepare(
+    `UPDATE practice_cleanup_row
+        SET prior_deleted_at=NULL, deleted_at_stamp=?
+      WHERE batch_id=? AND entity_type=? AND entity_id=?
+        AND deleted_at_stamp IS NULL
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(A_stamp, bid, 'coaching_note', 9240, bid, A_nonce);
+  const rowStampAfter = db.prepare(`SELECT deleted_at_stamp FROM practice_cleanup_row WHERE batch_id=? AND entity_id=9240`).get(bid).deleted_at_stamp;
+  ok(`V24 step 4e: A's row-manifest stamp UPDATE affected 0 rows — changes=${rRow.changes}`,
+     rRow.changes === 0);
+  ok(`V24 step 4e: manifest deleted_at_stamp UNCHANGED (${rowStampAfter === rowStampBefore ? 'unchanged' : 'MUTATED'})`,
+     rowStampAfter === rowStampBefore);
+
+  // (D) child manifest stamp.
+  const rChildStamp = db.prepare(
+    `UPDATE practice_cleanup_child
+        SET deleted_at_stamp=?
+      WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
+        AND deleted_at_stamp IS NULL
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(A_stamp, bid, 'coaching_note', 9240, bid, A_nonce);
+  ok(`V24 step 4f: A's child-manifest stamp UPDATE affected 0 rows — changes=${rChildStamp.changes}`,
+     rChildStamp.changes === 0);
+
+  // (E) notifications DELETE.
+  const rNotifDel = db.prepare(
+    `DELETE FROM notifications
+      WHERE id IN (SELECT scope_id FROM practice_cleanup_notif_scope
+                    WHERE batch_id=? AND scope_kind='notification'
+                      AND parent_entity_type=? AND parent_entity_id=?)
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(bid, 'coaching_note', 9240, bid, A_nonce);
+  ok(`V24 step 4g: A's notifications DELETE affected 0 rows — changes=${rNotifDel.changes}`,
+     rNotifDel.changes === 0);
+
+  // (F) activity_log DELETE.
+  const rActDel = db.prepare(
+    `DELETE FROM activity_log
+      WHERE id IN (SELECT scope_id FROM practice_cleanup_notif_scope
+                    WHERE batch_id=? AND scope_kind='activity_log'
+                      AND parent_entity_type=? AND parent_entity_id=?)
+        AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+                     WHERE id=? AND status='preview' AND writer_nonce=?)`
+  ).run(bid, 'coaching_note', 9240, bid, A_nonce);
+  ok(`V24 step 4h: A's activity_log DELETE affected 0 rows — changes=${rActDel.changes}`,
+     rActDel.changes === 0);
+
+  // FINAL invariants: parent still live, batch still 'restored'.
+  const parentFinal = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9240`).get();
+  ok(`V24 FINAL: parent still LIVE (deleted_at=${parentFinal.deleted_at || 'null'}) — records were NOT re-deleted by delayed A`,
+     !parentFinal.deleted_at);
+  const batchFinal = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid).status;
+  ok(`V24 FINAL: batch status='restored' unchanged (${batchFinal})`, batchFinal === 'restored');
+  // No stray A_stamp anywhere.
+  const strayCount = db.prepare(`SELECT COUNT(*) AS n FROM coaching_notes WHERE deleted_at LIKE ?`).get('V24_A_STAMP%').n
+    + db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_audit WHERE deleted_at LIKE ?`).get('V24_A_STAMP%').n
+    + db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_share_delivery WHERE deleted_at LIKE ?`).get('V24_A_STAMP%').n
+    + db.prepare(`SELECT COUNT(*) AS n FROM practice_cleanup_row WHERE deleted_at_stamp LIKE ?`).get('V24_A_STAMP%').n
+    + db.prepare(`SELECT COUNT(*) AS n FROM practice_cleanup_child WHERE deleted_at_stamp LIKE ?`).get('V24_A_STAMP%').n;
+  ok(`V24 FINAL: A's stamp never appears anywhere in DB (${strayCount} stray rows)`, strayCount === 0);
+  void lockInsertError;
+
+  // Step 6: verify a FRESH preview on the re-tagged same record still
+  // works — restoring the old batch does not require releasing its lock.
+  db.prepare(`UPDATE coaching_notes SET is_practice=1 WHERE id=9240`).run();
+  const rFreshPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V24 fresh after retained lock' }));
+  ok(`V24 step 6: fresh preview succeeded despite retained lock on old batch (${rFreshPrev.status})`,
+     rFreshPrev.status === 302 && (rFreshPrev.location || '').includes('/batches/'));
+  const freshBid = Number((rFreshPrev.location || '').split('/batches/')[1]);
+  ok(`V24 step 6: fresh preview got a NEW batch id (${freshBid} !== ${bid})`, freshBid !== bid);
+  const rFreshExec = await admin.post(`/admin/data/practice-cleanup/batches/${freshBid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V24 step 6: fresh batch execute succeeded (${rFreshExec.status})`, rFreshExec.status === 302);
+  const freshStatus = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(freshBid).status;
+  ok(`V24 step 6: fresh batch status='executed' (${freshStatus})`, freshStatus === 'executed');
+  const parentAfterFresh = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9240`).get().deleted_at;
+  ok(`V24 step 6: parent soft-deleted by the fresh batch (deleted_at=${parentAfterFresh})`, !!parentAfterFresh);
+  // Fresh restore also works.
+  const rFreshRestore = await admin.post(`/admin/data/practice-cleanup/batches/${freshBid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  ok(`V24 step 6: fresh batch restore succeeded (${rFreshRestore.status})`, rFreshRestore.status === 302);
+  const parentAfterFreshRestore = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9240`).get().deleted_at;
+  ok(`V24 step 6: parent restored again by fresh batch (deleted_at=${parentAfterFreshRestore || 'null'})`,
+     !parentAfterFreshRestore);
+}
+
+// ==========================================================================
 console.log('\n============================================================');
 console.log(`  ${passed} passed · ${failed} failed`);
 if (failed) {

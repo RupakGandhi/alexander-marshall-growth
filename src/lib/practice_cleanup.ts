@@ -1,6 +1,30 @@
 // ============================================================================
 // practice_cleanup.ts — Practice-data cleanup workflow (super-admin only)
 // ----------------------------------------------------------------------------
+// Sixth-round correction (Sept 24, 2026 — item 1): the execution_lock
+// row is now RETAINED through restoration.  A delayed duplicate of the
+// ORIGINAL execute request (paused before its db.batch() ran) could
+// otherwise wake up after restore completes, acquire a fresh lock, and
+// re-soft-delete the just-restored records.
+//
+// Two mechanisms close this window (belt-and-suspenders):
+//   (a) restoreBatch NO LONGER deletes practice_cleanup_execution_lock.
+//       A restored batch is terminal — it will never re-execute — so
+//       keeping the lock in place is harmless and a delayed duplicate's
+//       PRIMARY KEY INSERT is rejected.
+//   (b) Every mutation in appendParentBatchStatements AND the conditional
+//       lock INSERT itself carry
+//         AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+//                      WHERE id=? AND status='preview' AND writer_nonce=?)
+//       — a transaction-level status guard.  Even if a delayed request
+//       somehow acquired a lock, every write in its batch would touch
+//       0 rows because the batch's status is no longer 'preview' and
+//       its writer_nonce has been cleared by the winner's status flip.
+//
+// A fresh preview (against re-tagged records after restore) receives a
+// NEW batch_id, which has its OWN execution_lock slot — the old batch's
+// retained lock does not block it.
+//
 // Fourth-round rewrite (Sept 24, 2026 late) — migration 0018 corrects
 // three remaining defects on top of the 0015/0016/0017 work.  Design:
 //
@@ -661,15 +685,28 @@ export async function executeCleanup(
 
   const stmts: D1PreparedStatement[] = [];
 
-  // (0) One-winner claim.
+  // (0) One-winner claim — conditional on the batch STILL being in
+  // preview state with our writer_nonce.  A delayed duplicate whose
+  // batch has since executed + restored would see status='restored' and
+  // writer_nonce=NULL — the SELECT returns 0 rows, so the INSERT is a
+  // no-op.  This alone doesn't abort the batch (SQLite doesn't fail on
+  // 0-row inserts), so every subsequent mutation ALSO carries an EXISTS
+  // guard (see appendParentBatchStatements) that makes each write
+  // no-op when the batch has moved.  The two mechanisms are belt-and-
+  // suspenders: even if a delayed request acquires the lock somehow,
+  // its mutations still no-op; and even if the EXISTS guards were
+  // somehow bypassed, the lock's PRIMARY KEY prevents two live executes
+  // from co-existing.
   stmts.push(
     db.prepare(
-      `INSERT INTO practice_cleanup_execution_lock (batch_id) VALUES (?)`
-    ).bind(batchId),
+      `INSERT INTO practice_cleanup_execution_lock (batch_id)
+       SELECT id FROM practice_cleanup_batches
+        WHERE id=? AND status='preview' AND writer_nonce=?`
+    ).bind(batchId, batch.writer_nonce),
   );
 
   for (const p of parentRows) {
-    appendParentBatchStatements(db, stmts, batchId, batchStamp, p.entity_type, p.entity_id);
+    appendParentBatchStatements(db, stmts, batchId, batch.writer_nonce, batchStamp, p.entity_type, p.entity_id);
   }
 
   // (Z1) release the preview ownership claim.
@@ -902,21 +939,42 @@ function safeChanges(results: D1Result[] | any, idx: number): number {
   }
 }
 
-/** Per-parent block count in the execute batch is FIXED at 6:
- *    A. children soft-delete (ONE update per parent, ids from manifest)
- *    B. parent soft-delete (1)
- *    C. row-manifest stamp (1)
- *    D. child-manifest stamp (1)
- *    E. notifications DELETE (1, ids from notif_scope)
- *    F. activity_log DELETE  (1, ids from notif_scope)
+/** Per-parent block count in the execute batch is FIXED at 8:
+ *    A×3. children soft-delete UPDATEs (one per child_table, PADDED
+ *         with SELECT-no-op fillers so every parent contributes the
+ *         same number of statements — simplifies index math)
+ *    B.   parent soft-delete (1)
+ *    C.   row-manifest stamp (1)
+ *    D.   child-manifest stamp (1)
+ *    E.   notifications DELETE (1, ids from notif_scope)
+ *    F.   activity_log DELETE  (1, ids from notif_scope)
  *  The batch also has: statement 0 = execution_lock INSERT, then Z1 =
- *  open_claim DELETE, Z2 = status flip.  Total = 1 + 6*parents + 2.
+ *  open_claim DELETE, Z2 = status flip.  Total = 1 + 8*parents + 2.
+ *
+ *  DELAYED-DUPLICATE DEFENCE (Sept 24, 2026 — sixth review, item 1).
+ *  Every mutation (A, B, C, D, E, F) carries an additional AND EXISTS
+ *  (SELECT 1 FROM practice_cleanup_batches WHERE id=<batch> AND
+ *   status='preview' AND writer_nonce=<nonce>) clause.  If a delayed
+ *  duplicate execute of the ORIGINAL request wakes up AFTER the
+ *  batch has already been executed (and possibly restored), the batch
+ *  row's status is no longer 'preview' and its writer_nonce is NULL;
+ *  every mutation's EXISTS check fails, every UPDATE/DELETE affects
+ *  0 rows, and the delayed batch commits nothing.  Belt-and-suspenders:
+ *  the execution_lock also guards against a second live execute
+ *  acquiring the batch.
  */
 function appendParentBatchStatements(
   db: D1Database, stmts: D1PreparedStatement[],
-  batchId: number, batchStamp: string,
+  batchId: number, writerNonce: string,
+  batchStamp: string,
   entityType: EntityType, entityId: number,
 ): void {
+  // Transaction-level status guard, used as an AND EXISTS clause on every
+  // mutation below.  Bound with (batchId, writerNonce) at each usage.
+  const STATUS_GUARD = `EXISTS (
+    SELECT 1 FROM practice_cleanup_batches
+     WHERE id=? AND status='preview' AND writer_nonce=?
+  )`;
   // (A) Soft-delete children restricted to the FROZEN scope.  A single
   // UPDATE per parent handles all child kinds because we filter by
   // "id IN (SELECT child_id FROM practice_cleanup_child WHERE
@@ -962,6 +1020,9 @@ function appendParentBatchStatements(
   for (let i = 0; i < MAX_CHILD_TABLES; i++) {
     if (i < spec.length) {
       const cb = spec[i];
+      // (A) each child-table UPDATE also carries the STATUS_GUARD so a
+      // delayed-duplicate request whose batch has moved out of preview
+      // affects 0 rows.
       stmts.push(
         db.prepare(
           `UPDATE ${cb.table} SET deleted_at=?
@@ -970,46 +1031,53 @@ function appendParentBatchStatements(
                 SELECT child_id FROM practice_cleanup_child
                  WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
                    AND child_kind=?
-              )`
-        ).bind(batchStamp, batchId, entityType, entityId, cb.kind),
+              )
+              AND ${STATUS_GUARD}`
+        ).bind(batchStamp, batchId, entityType, entityId, cb.kind, batchId, writerNonce),
       );
     } else {
       stmts.push(filler());
     }
   }
 
-  // (B) parent soft-delete UPDATE.
+  // (B) parent soft-delete UPDATE — STATUS_GUARD applies.
   stmts.push(
     db.prepare(
       `UPDATE ${tableFor(entityType)} SET deleted_at=?
-        WHERE id=? AND deleted_at IS NULL`
-    ).bind(batchStamp, entityId),
+        WHERE id=? AND deleted_at IS NULL AND ${STATUS_GUARD}`
+    ).bind(batchStamp, entityId, batchId, writerNonce),
   );
 
   // (C) manifest UPDATE for the parent row — one-winner guard via
   // "AND deleted_at_stamp IS NULL" so a losing concurrent execute
-  // cannot overwrite the stamp.
+  // cannot overwrite the stamp; STATUS_GUARD blocks delayed duplicates.
   stmts.push(
     db.prepare(
       `UPDATE practice_cleanup_row
           SET prior_deleted_at=NULL, deleted_at_stamp=?
         WHERE batch_id=? AND entity_type=? AND entity_id=?
-          AND deleted_at_stamp IS NULL`
-    ).bind(batchStamp, batchId, entityType, entityId),
+          AND deleted_at_stamp IS NULL
+          AND ${STATUS_GUARD}`
+    ).bind(batchStamp, batchId, entityType, entityId, batchId, writerNonce),
   );
 
-  // (D) manifest UPDATE for the parent's child rows — one-winner guard.
+  // (D) manifest UPDATE for the parent's child rows — one-winner guard
+  // + STATUS_GUARD.
   stmts.push(
     db.prepare(
       `UPDATE practice_cleanup_child
           SET deleted_at_stamp=?
         WHERE batch_id=? AND parent_entity_type=? AND parent_entity_id=?
-          AND deleted_at_stamp IS NULL`
-    ).bind(batchStamp, batchId, entityType, entityId),
+          AND deleted_at_stamp IS NULL
+          AND ${STATUS_GUARD}`
+    ).bind(batchStamp, batchId, entityType, entityId, batchId, writerNonce),
   );
 
   // (E) notifications DELETE — restricted to the FROZEN scope
   // (populated at preview time; late-added notifs are NOT in this set).
+  // STATUS_GUARD ensures a delayed duplicate does not re-delete
+  // (in practice already 0-row after restore since the rows are gone,
+  // but this keeps semantic parity with the other mutations).
   stmts.push(
     db.prepare(
       `DELETE FROM notifications
@@ -1017,8 +1085,9 @@ function appendParentBatchStatements(
           SELECT scope_id FROM practice_cleanup_notif_scope
            WHERE batch_id=? AND scope_kind='notification'
              AND parent_entity_type=? AND parent_entity_id=?
-        )`
-    ).bind(batchId, entityType, entityId),
+        )
+          AND ${STATUS_GUARD}`
+    ).bind(batchId, entityType, entityId, batchId, writerNonce),
   );
 
   // (F) activity_log DELETE — same pattern.
@@ -1029,8 +1098,9 @@ function appendParentBatchStatements(
           SELECT scope_id FROM practice_cleanup_notif_scope
            WHERE batch_id=? AND scope_kind='activity_log'
              AND parent_entity_type=? AND parent_entity_id=?
-        )`
-    ).bind(batchId, entityType, entityId),
+        )
+          AND ${STATUS_GUARD}`
+    ).bind(batchId, entityType, entityId, batchId, writerNonce),
   );
 }
 
@@ -1256,14 +1326,24 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
     childIndex.push({ kind: c.child_kind });
   }
 
-  // Release the execution lock — allows a fresh preview on the same
-  // parents (via re-tag) to execute cleanly.  Kept inside the same
-  // batch so lock release is atomic with the restore writes.
-  stmts.push(
-    db.prepare(
-      `DELETE FROM practice_cleanup_execution_lock WHERE batch_id=?`
-    ).bind(batchId),
-  );
+  // Delayed-duplicate defence (Sept 24, 2026 — sixth review, item 1).
+  // The execution_lock row for this batch is INTENTIONALLY LEFT IN PLACE.
+  // Rationale: a delayed duplicate of the ORIGINAL execute request
+  // (paused before its db.batch() ran) can wake up AFTER restore
+  // completes.  If we cleared the lock, that request's first-statement
+  // lock INSERT would succeed and its subsequent mutation statements
+  // would re-soft-delete the just-restored records.  Since a restored
+  // batch is terminal (it can never be re-executed — a fresh preview
+  // gets a NEW batch_id and its own lock slot), keeping the lock in
+  // place is harmless and closes the delayed-duplicate window.
+  //
+  // Every mutation in appendParentBatchStatements ALSO carries an
+  // "AND EXISTS (SELECT 1 FROM practice_cleanup_batches
+  // WHERE id=? AND status='preview' AND writer_nonce=?)" transaction-
+  // level status guard, so even if a delayed request DID somehow
+  // acquire a fresh lock, every write in its batch would no-op because
+  // the batch's status is no longer 'preview' and its writer_nonce is
+  // NULL.  The two mechanisms are belt-and-suspenders.
 
   // Status flip — guarded by status='executed' so a repeat call is a no-op.
   stmts.push(
@@ -1277,7 +1357,8 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
   const results = await db.batch(stmts);
 
   // Reconcile counts from the batch results.  Layout: parentUpdates[0..N),
-  // childUpdates[N..N+M), executionLockDelete[N+M], statusFlip[N+M+1].
+  // childUpdates[N..N+M), statusFlip[N+M].  (No execution_lock DELETE —
+  // see above rationale.)
   for (let i = 0; i < parentIndex.length; i++) {
     if (safeChanges(results, i) === 1) restored[parentIndex[i].et] += 1;
   }
@@ -1285,9 +1366,8 @@ export async function restoreBatch(db: D1Database, batchId: number, actorId: num
   for (let i = 0; i < childIndex.length; i++) {
     if (safeChanges(results, base + i) === 1) cascade_restored[childIndex[i].kind] += 1;
   }
-  // (execution_lock DELETE at base+childIndex.length is a no-op if the
-  // batch was already restored; status flip at base+childIndex.length+1
-  // returns changes=0 in that case; our per-row UPDATEs required
+  // (status flip at base+childIndex.length returns changes=0 when a
+  // concurrent restore already ran; our per-row UPDATEs required
   // deleted_at=<stamp> which by then is NULL so they safely no-op'd.)
 
   return { restored, cascade_restored };
