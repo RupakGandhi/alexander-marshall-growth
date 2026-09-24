@@ -318,6 +318,25 @@ const appraiserSteps: TourStep[] = [
       <p>Click <em>verified</em> (success notification fires to the teacher) or ask for a revision with a note. No email, no external LMS.</p>`,
   },
   {
+    // Sept 24, 2026 — External PD review queue + bulk-assign.
+    // Added after the Sept 24 admin+coaches training where Aaron Allard
+    // requested the bulk-assign flow: "if all of our primary teachers
+    // participated in the CLA training, we could just put a bulk CLA
+    // training this many hours, then check the teachers that were in
+    // attendance and it adds it to their PD list."
+    page: '/appraiser/external-pd',
+    noHighlight: true,
+    title: 'External PD — approve submissions AND bulk-record group events',
+    body: `
+      <p>This page is the home for external professional development (conferences, workshops, curriculum training — anything outside our LMS). It does two things:</p>
+      <ul>
+        <li><strong>Review queue</strong> — when a teacher submits their own external PD from their <em>My PD LMS</em> page, it lands here as <em>Awaiting review</em>. Click <em>Open</em> to see the details, then <em>approve</em> (optionally adjusting hours), <em>request revision</em>, or <em>decline</em>. Approved hours automatically count toward each teacher's unified PD-hours total.</li>
+        <li><strong>Bulk-assign card (top of page)</strong> — for group PD events your teachers attended together (district CLA training, in-service days, curriculum workshops). Fill in the activity ONCE — title, hours, provider — then tick every teacher who attended. One click records it as <em>approved</em> external PD on each teacher's file and sends each of them a notification. No need to ask every teacher to submit it individually.</li>
+      </ul>
+      <p>You only see teachers on your own caseload. If a teacher you expected is missing from the bulk-assign list, check that they have an active <em>appraiser</em> assignment to you on the Admin → Assignments page.</p>`,
+    hint: 'Bulk-assign lands hours as approved immediately — you\'re both the recorder and the reviewer for events you witnessed, so there is no separate approval step.',
+  },
+  {
     page: '/appraiser',
     selector: '#aps-bell-btn',
     placement: 'bottom',

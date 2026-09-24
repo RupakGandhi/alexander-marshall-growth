@@ -2184,6 +2184,241 @@ suite('Case 30 — admin can create teacher / coach / teacher+can_coach, and eac
 }
 
 // ==========================================================================
+suite('Case 31 — principal bulk-assigns external PD to multiple teachers (Aaron Allard training request)');
+{
+  // Sept 24, 2026 — Aaron Allard's request from the admin+coaches
+  // training: give principals a way to record ONE group PD event (e.g.
+  // district CLA training) for many teachers at once, instead of
+  // asking each teacher to submit it themselves.  Implementation
+  // details:
+  //   * POST /appraiser/external-pd/bulk-assign
+  //   * Inserts one external_pd_submissions row per selected teacher
+  //     directly in status='approved' with approved_hours=hours.
+  //   * Silently skips teachers not on the principal's caseload, so
+  //     an authorization bypass attempt returns a partial success
+  //     message instead of a server error.
+  //   * Fires one external_pd_approved notification per teacher.
+  //
+  // Fixture setup: principal (id 2) has appraiser assignments to
+  // teachers 10 (Alice), 11 (Bob), 12 (Carol), 13 (Dan), 14 (Plain),
+  // 20 (Unrelated).  Teacher 20 (Unrelated) is on principal's list —
+  // switch to id 3 (PureCoach) or the admin (1) for the "not on
+  // caseload" negative test.
+  const principal = await new Client('principal@test','Principal').login();
+
+  const BULK_TITLE = `CLA Reading Curriculum Training — Case 31 ${Date.now()}`;
+  const BULK_HOURS = 3.5;
+  const targets = [IDS.alice, IDS.bob, IDS.carol]; // 3 teachers principal DOES coach
+  const notOnCaseload = IDS.pureCoach; // role='coach', principal has no appraiser assignment for them
+
+  // Baseline: notification and submissions counts BEFORE the bulk call.
+  const preRowsPerTeacher = {};
+  const preNotifsPerTeacher = {};
+  for (const tid of [...targets, notOnCaseload]) {
+    preRowsPerTeacher[tid] = db.prepare(
+      `SELECT COUNT(*) AS n FROM external_pd_submissions WHERE teacher_id=? AND deleted_at IS NULL`
+    ).get(tid).n;
+    preNotifsPerTeacher[tid] = db.prepare(
+      `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='external_pd_approved'`
+    ).get(tid).n;
+  }
+
+  // -----------------------------------------------------------------
+  // 31A: happy path — bulk-assign to 3 teachers on caseload
+  // -----------------------------------------------------------------
+  {
+    const form = new URLSearchParams();
+    form.append('title', BULK_TITLE);
+    form.append('provider', 'CLA');
+    form.append('start_date', '2026-09-20');
+    form.append('end_date', '2026-09-24');
+    form.append('hours', String(BULK_HOURS));
+    form.append('description', 'District-wide CLA reading curriculum training.');
+    form.append('domain_alignment', 'B,C');
+    for (const tid of targets) form.append('teacher_ids', String(tid));
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('31A: bulk-assign returns 302', r.status === 302, `HTTP ${r.status}`);
+    ok('31A: redirect toast reports "for 3 teachers"',
+       locHas(r.location, 'for 3 teachers'), `loc=${r.location}`);
+  }
+
+  // 31A verifications: each target has exactly ONE new row in status='approved'.
+  for (const tid of targets) {
+    const row = db.prepare(
+      `SELECT id, title, status, approved_hours, hours, reviewed_by, review_note, domain_alignment
+         FROM external_pd_submissions
+        WHERE teacher_id=? AND title=? AND deleted_at IS NULL`
+    ).get(tid, BULK_TITLE);
+    ok(`31A teacher ${tid}: row inserted`, !!row);
+    ok(`31A teacher ${tid}: status=approved`, row?.status === 'approved', `got '${row?.status}'`);
+    ok(`31A teacher ${tid}: approved_hours=${BULK_HOURS}`,
+       Number(row?.approved_hours) === BULK_HOURS, `got ${row?.approved_hours}`);
+    ok(`31A teacher ${tid}: reviewed_by=principal`, row?.reviewed_by === IDS.principal);
+    ok(`31A teacher ${tid}: review_note names principal`,
+       (row?.review_note || '').includes('Peggy Principal'),
+       `got '${row?.review_note}'`);
+    ok(`31A teacher ${tid}: domain_alignment JSON contains B and C`,
+       (row?.domain_alignment || '').includes('B') && (row?.domain_alignment || '').includes('C'));
+
+    // Exactly one new notification.
+    const postNotifs = db.prepare(
+      `SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='external_pd_approved'`
+    ).get(tid).n;
+    ok(`31A teacher ${tid}: exactly one new external_pd_approved notification`,
+       postNotifs === preNotifsPerTeacher[tid] + 1,
+       `${preNotifsPerTeacher[tid]} → ${postNotifs}`);
+    // Notification body names the principal + title + hours.
+    const notif = db.prepare(
+      `SELECT title, body FROM notifications
+        WHERE user_id=? AND kind='external_pd_approved'
+        ORDER BY id DESC LIMIT 1`
+    ).get(tid);
+    ok(`31A teacher ${tid}: notification body mentions the bulk title`,
+       (notif?.body || '').includes(BULK_TITLE),
+       `body='${notif?.body?.slice(0,120)}...'`);
+  }
+
+  // 31A row-count invariant: exactly ONE row per target (no dupes).
+  for (const tid of targets) {
+    const n = db.prepare(
+      `SELECT COUNT(*) AS n FROM external_pd_submissions
+        WHERE teacher_id=? AND title=? AND deleted_at IS NULL`
+    ).get(tid, BULK_TITLE).n;
+    ok(`31A teacher ${tid}: exactly ONE row for this bulk title (got ${n})`, n === 1);
+  }
+
+  // -----------------------------------------------------------------
+  // 31B: authorization guard — principal tries to include a teacher
+  // they DON'T supervise (PureCoach, id 3).  Server must silently
+  // skip that id, insert for allowed ids only, and report the skip.
+  // -----------------------------------------------------------------
+  {
+    const form = new URLSearchParams();
+    form.append('title', `31B mixed batch ${Date.now()}`);
+    form.append('hours', '1.0');
+    form.append('teacher_ids', String(IDS.alice));     // allowed
+    form.append('teacher_ids', String(notOnCaseload)); // NOT allowed
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('31B: mixed batch returns 302', r.status === 302);
+    ok('31B: toast says "for 1 teacher" (skipped the unauthorized one)',
+       locHas(r.location, 'for 1 teacher'), `loc=${r.location}`);
+    ok('31B: toast reports the skipped-authorization count',
+       locHas(r.location, 'Skipped 1 teacher') && locHas(r.location, 'not on your caseload'),
+       `loc=${r.location}`);
+    const rowForBadTeacher = db.prepare(
+      `SELECT COUNT(*) AS n FROM external_pd_submissions
+        WHERE teacher_id=? AND title LIKE '31B mixed batch%' AND deleted_at IS NULL`
+    ).get(notOnCaseload).n;
+    ok('31B: NO row inserted for the unauthorized teacher', rowForBadTeacher === 0);
+  }
+
+  // -----------------------------------------------------------------
+  // 31C: all-unauthorized batch — a principal targeting ONLY teachers
+  // not on their caseload gets a friendly rejection, zero rows written.
+  // -----------------------------------------------------------------
+  {
+    const preAll = db.prepare(`SELECT COUNT(*) AS n FROM external_pd_submissions WHERE deleted_at IS NULL`).get().n;
+    const form = new URLSearchParams();
+    form.append('title', `31C rejection ${Date.now()}`);
+    form.append('hours', '1.0');
+    form.append('teacher_ids', String(notOnCaseload));
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('31C: all-unauthorized returns 302', r.status === 302);
+    ok('31C: toast explains "None of the selected teachers are on your caseload"',
+       locHas(r.location, 'None of the selected teachers are on your caseload'),
+       `loc=${r.location}`);
+    const postAll = db.prepare(`SELECT COUNT(*) AS n FROM external_pd_submissions WHERE deleted_at IS NULL`).get().n;
+    ok('31C: zero rows written (no partial insert)', postAll === preAll,
+       `${preAll} → ${postAll}`);
+  }
+
+  // -----------------------------------------------------------------
+  // 31D: input validation — empty title / bad hours / no teachers.
+  // -----------------------------------------------------------------
+  {
+    // Missing title
+    const preAll = db.prepare(`SELECT COUNT(*) AS n FROM external_pd_submissions WHERE deleted_at IS NULL`).get().n;
+    const r1 = await principal.post('/appraiser/external-pd/bulk-assign', new URLSearchParams({
+      hours: '1', teacher_ids: String(IDS.alice),
+    }));
+    ok('31D: missing title returns 302 with error toast',
+       r1.status === 302 && locHas(r1.location, 'Title is required'), `loc=${r1.location}`);
+    // Zero hours
+    const r2 = await principal.post('/appraiser/external-pd/bulk-assign', new URLSearchParams({
+      title: '31D zero hours', hours: '0', teacher_ids: String(IDS.alice),
+    }));
+    ok('31D: zero hours returns 302 with valid-hour toast',
+       r2.status === 302 && locHas(r2.location, 'Enter a valid hour value'), `loc=${r2.location}`);
+    // No teachers selected
+    const r3 = await principal.post('/appraiser/external-pd/bulk-assign', new URLSearchParams({
+      title: '31D no teachers', hours: '1',
+    }));
+    ok('31D: no teachers returns 302 with "Pick at least one" toast',
+       r3.status === 302 && locHas(r3.location, 'Pick at least one teacher'), `loc=${r3.location}`);
+    // No writes happened during any of the three rejects.
+    const postAll = db.prepare(`SELECT COUNT(*) AS n FROM external_pd_submissions WHERE deleted_at IS NULL`).get().n;
+    ok('31D: zero writes across all three validation rejects', postAll === preAll,
+       `${preAll} → ${postAll}`);
+  }
+
+  // -----------------------------------------------------------------
+  // 31E: GET /appraiser/external-pd renders the bulk-assign card AND
+  // populates its teacher select with the principal's caseload only.
+  // -----------------------------------------------------------------
+  {
+    const r = await principal.get('/appraiser/external-pd');
+    ok('31E: /appraiser/external-pd returns 200', r.status === 200, `HTTP ${r.status}`);
+    ok('31E: page renders "Bulk-assign external PD" heading',
+       r.text.includes('Bulk-assign external PD to multiple teachers'));
+    ok('31E: page renders the bulk-assign form action',
+       r.text.includes('action="/appraiser/external-pd/bulk-assign"'));
+    // Principal is assigned to teachers 10,11,12,13,14,20 → all should
+    // appear in the multi-select.  A teacher NOT on their caseload
+    // (super_admin id=1) must NOT appear.
+    const selectMatch = r.text.match(/<select[^>]*name="teacher_ids"[^>]*>([\s\S]*?)<\/select>/);
+    ok('31E: teacher_ids multi-select is present', !!selectMatch, 'no select found');
+    if (selectMatch) {
+      const options = selectMatch[1];
+      // Plain (id 14) was hard-deleted by Case 17 and is gone from the
+      // users table, so we don't assert her presence.  Alice/Bob/Carol/
+      // Dan/Unrelated (10,11,12,13,20) all remain and are on the
+      // principal's caseload (fixture line 163).
+      for (const tid of [IDS.alice, IDS.bob, IDS.carol, IDS.dan, IDS.unrelated]) {
+        ok(`31E: teacher id ${tid} present in select`,
+           new RegExp(`<option value="${tid}"`).test(options),
+           `teacher_ids options=${options.slice(0,300)}...`);
+      }
+      ok('31E: admin (id 1) NOT in the multi-select (not a teacher)',
+         !/value="1"/.test(options));
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // 31F: authorization — a NON-appraiser (a plain teacher) hitting the
+  // bulk endpoint must be forbidden.  The requireRole gate at the top
+  // of appraiser.tsx enforces this; verify it hasn't regressed.
+  //
+  // Case 17 earlier soft-fallback-deleted Alice + revoked her sessions,
+  // and Plain was hard-deleted, so we log in with a FRESH Bob client
+  // for this negative case.  Bob (id 11) is a pure teacher (role=teacher,
+  // can_coach=0), which is exactly the negative case we want.
+  // -----------------------------------------------------------------
+  {
+    const bobFresh = await new Client('bob@test', 'BobBulkNeg').login();
+    const r = await bobFresh.post('/appraiser/external-pd/bulk-assign', new URLSearchParams({
+      title: '31F privilege escalation', hours: '1', teacher_ids: String(IDS.carol),
+    }));
+    ok('31F: teacher POST to bulk-assign is forbidden (403)',
+       r.status === 403, `HTTP ${r.status}`);
+    const leaked = db.prepare(
+      `SELECT COUNT(*) AS n FROM external_pd_submissions
+        WHERE title = '31F privilege escalation'`
+    ).get().n;
+    ok('31F: no row written despite teacher attempt', leaked === 0);
+  }
+}
+
+// ==========================================================================
 suite('Case 27 — RESET PRACTICE DATA sweeps coaching_notes (+audit + share-delivery); observations preserved');
 {
   // Seed a fresh coaching note authored by CoachOne for Alice, share it,

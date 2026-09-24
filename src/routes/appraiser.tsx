@@ -726,12 +726,43 @@ app.post('/observations/:id/delete', async (c) => {
 app.get('/external-pd', async (c) => {
   const user = c.get('user')!;
   const status = c.req.query('status') || undefined;
+  const msg = c.req.query('msg');
   // Appraisers see only their assigned teachers; super_admin sees everything.
   const rows = await listExternalPdQueue(c.env.DB, {
     status,
     appraiserId: user.role === 'super_admin' ? undefined : user.id,
   });
-  return c.html(<ExternalPdQueue user={user} rows={rows} filterStatus={status} />);
+  // Sept 24, 2026 — teachers list feeds the bulk-assign multi-select
+  // rendered at the top of the page.  Appraisers see only teachers
+  // assigned to them; super_admin sees every active teacher.  Sorted
+  // by last name, then first — the same order the observations page
+  // and Data Management dropdowns use.
+  const bulkTeachers = user.role === 'super_admin'
+    ? await c.env.DB.prepare(
+        `SELECT u.id, u.first_name, u.last_name, s.name AS school_name
+           FROM users u
+           LEFT JOIN schools s ON s.id = u.school_id
+          WHERE u.role = 'teacher' AND u.active = 1
+          ORDER BY u.last_name, u.first_name`
+      ).all<any>()
+    : await c.env.DB.prepare(
+        `SELECT DISTINCT u.id, u.first_name, u.last_name, s.name AS school_name
+           FROM assignments a
+           JOIN users u ON u.id = a.teacher_id
+           LEFT JOIN schools s ON s.id = u.school_id
+          WHERE a.staff_id = ? AND a.relationship = 'appraiser' AND a.active = 1
+            AND u.active = 1
+          ORDER BY u.last_name, u.first_name`
+      ).bind(user.id).all<any>();
+  return c.html(
+    <ExternalPdQueue
+      user={user}
+      rows={rows}
+      filterStatus={status}
+      msg={msg}
+      bulkTeachers={(bulkTeachers.results as any[]) || []}
+    />
+  );
 });
 
 app.get('/external-pd/:id', async (c) => {
@@ -814,6 +845,148 @@ app.post('/external-pd/:id/review', async (c) => {
 
   await logActivity(c.env.DB, user.id, 'external_pd_submission', id, 'review_' + newStatus, { approved_hours: approvedHours, note });
   return c.redirect(`/appraiser/external-pd/${id}?msg=${encodeURIComponent('Decision recorded — teacher notified.')}`);
+});
+
+// ---------------------------------------------------------------------------
+// Sept 24, 2026 — Bulk-assign external PD to multiple teachers.
+// Requested by Aaron Allard during the Sept 24 admin+coaches training:
+// "if all of our primary teachers participated in the CLA training, we
+// could just put a bulk CLA training this many hours, then check the
+// teachers that were in attendance and it adds it to their PD list."
+//
+// Behavior:
+//   * Principal fills in one PD entry (title/provider/dates/hours/description)
+//     + selects one or many teachers from a multi-select scoped to their own
+//     caseload (super_admin sees every teacher).
+//   * We INSERT one external_pd_submissions row per selected teacher in
+//     status='approved', with approved_hours=hours, reviewed_by=<principal>,
+//     reviewed_at=CURRENT_TIMESTAMP.  A principal recording a group PD event
+//     they witnessed is BOTH the recorder and the reviewer, so we skip the
+//     submit→review round-trip.  Teachers can still see the entry on their
+//     home page and it counts toward their unified PD-hours total, same as
+//     any other approved external PD.
+//   * Each teacher gets ONE notification ("Your principal added external
+//     PD to your record").
+//   * Every insert is authorization-checked: we only insert for teachers
+//     the principal has an active 'appraiser' assignment for (super_admin
+//     bypasses the assignment check).  Ids not authorized are silently
+//     skipped and reported in the redirect toast.
+//   * activity_log + admin_audit-style summary via logActivity per insert.
+// ---------------------------------------------------------------------------
+app.post('/external-pd/bulk-assign', async (c) => {
+  const user = c.get('user')!;
+  const body = await c.req.parseBody({ all: true });
+  const title = String(body.title || '').trim();
+  const provider = String(body.provider || '').trim() || null;
+  const start_date = String(body.start_date || '').trim() || null;
+  const end_date = String(body.end_date || '').trim() || null;
+  const hoursRaw = String(body.hours || '').trim();
+  const hoursNum = Number(hoursRaw);
+  const description = String(body.description || '').trim() || null;
+  const certificate_url = String(body.certificate_url || '').trim() || null;
+  const domain_alignment = String(body.domain_alignment || '').trim() || null;
+  // teacher_ids arrives as a repeated form field; parseBody({all:true}) gives
+  // an array (or a single value if only one option was picked).
+  const raw = body.teacher_ids;
+  const teacherIds: number[] = (Array.isArray(raw) ? raw : (raw != null ? [raw] : []))
+    .map((v: any) => Number(v))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  // Basic input validation.  We prefer redirects with a msg over 400s so the
+  // principal stays on their own workflow.
+  if (!title) {
+    return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent('Title is required.') + '#bulk');
+  }
+  if (!Number.isFinite(hoursNum) || hoursNum <= 0 || hoursNum > 200) {
+    return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent('Enter a valid hour value between 0 and 200.') + '#bulk');
+  }
+  if (teacherIds.length === 0) {
+    return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent('Pick at least one teacher.') + '#bulk');
+  }
+  // Round to 0.25h to match the internal-credit granularity used by the
+  // single-submission review path (line 774 above).
+  const hours = Math.round(hoursNum * 4) / 4;
+  // Normalize the domain_alignment textbox ("A,B") into the same JSON array
+  // shape the teacher submit path writes.  Empty string → NULL.
+  const domainsJson = domain_alignment
+    ? JSON.stringify(domain_alignment.split(',').map((s) => s.trim()).filter(Boolean))
+    : null;
+
+  // Authorization filter: super_admin gets to insert for any teacher; a
+  // regular appraiser is limited to teachers with an active appraiser
+  // assignment to them.  Ids that fail the check are silently skipped and
+  // reported to the principal so they know something was rejected.
+  let allowedIds: number[] = teacherIds;
+  let skippedForAuth = 0;
+  if (user.role !== 'super_admin') {
+    const placeholders = teacherIds.map(() => '?').join(',');
+    const authorized = await c.env.DB.prepare(
+      `SELECT DISTINCT teacher_id FROM assignments
+        WHERE staff_id = ? AND relationship = 'appraiser' AND active = 1
+          AND teacher_id IN (${placeholders})`
+    ).bind(user.id, ...teacherIds).all<any>();
+    const authSet = new Set(((authorized.results as any[]) || []).map((r) => Number(r.teacher_id)));
+    allowedIds = teacherIds.filter((id) => authSet.has(id));
+    skippedForAuth = teacherIds.length - allowedIds.length;
+  }
+  if (allowedIds.length === 0) {
+    return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent(
+      'None of the selected teachers are on your caseload — nothing recorded.'
+    ) + '#bulk');
+  }
+
+  // Insert one row per teacher, in status='approved', pre-reviewed by the
+  // principal.  The unified-hours summary (src/lib/db.ts) sums
+  // external_pd_submissions.approved_hours WHERE status='approved', so
+  // each teacher's PD-hours total ticks up immediately without an extra
+  // review click.  We also insert an activity_log row per teacher and
+  // fire one notification per teacher.
+  let inserted = 0;
+  const { notify } = await import('../lib/notifications');
+  for (const tid of allowedIds) {
+    const res = await c.env.DB.prepare(
+      `INSERT INTO external_pd_submissions
+         (teacher_id, title, provider, start_date, end_date, hours,
+          domain_alignment, description, certificate_url,
+          status, submitted_at, reviewed_by, reviewed_at,
+          review_note, approved_hours)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, ?, ?)`
+    ).bind(
+      tid, title, provider, start_date, end_date, hours,
+      domainsJson, description, certificate_url,
+      user.id, `Bulk-recorded by ${user.first_name} ${user.last_name}`, hours,
+    ).run();
+    const subId = Number((res.meta as any)?.last_row_id || 0);
+    if (!subId) continue;
+    inserted++;
+    // Notify the teacher.  One notification per new row; the teacher's
+    // inbox shows both these bulk-recorded entries and their own
+    // self-submitted approvals in the same "external_pd_approved"
+    // notification stream.
+    await notify(c.env.DB, {
+      user_id: tid,
+      kind: 'external_pd_approved',
+      title: 'External PD added to your record',
+      body: `${user.first_name} ${user.last_name} recorded "${title}" (${hours.toFixed(2)}h) on your behalf.`,
+      url: '/teacher#external-pd',
+      entity_type: 'external_pd_submission', entity_id: subId, actor_user_id: user.id,
+    }, c.env);
+    await logActivity(c.env.DB, user.id, 'external_pd_submission', subId, 'bulk_assign', {
+      teacher_id: tid, hours, title,
+    });
+  }
+
+  // Human-readable summary for the toast.  Named the skipped bucket
+  // explicitly so a principal who picked a wrong id sees WHY it didn't
+  // land, rather than a silent "assigned to 3 teachers" that hides
+  // authorization drops.
+  const parts: string[] = [
+    `Recorded "${title}" (${hours.toFixed(2)}h) for ${inserted} teacher${inserted === 1 ? '' : 's'}.`,
+  ];
+  if (skippedForAuth > 0) {
+    parts.push(`Skipped ${skippedForAuth} teacher${skippedForAuth === 1 ? '' : 's'} not on your caseload.`);
+  }
+  return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent(parts.join(' ')));
 });
 
 export default app;
@@ -1957,7 +2130,8 @@ function extPdPill(status: string) {
   }
 }
 
-function ExternalPdQueue({ user, rows, filterStatus }: any) {
+function ExternalPdQueue({ user, rows, filterStatus, msg, bulkTeachers }: any) {
+  bulkTeachers = bulkTeachers || [];
   const submitted = rows.filter((r: any) => r.status === 'submitted');
   const revising  = rows.filter((r: any) => r.status === 'needs_revision');
   const approved  = rows.filter((r: any) => r.status === 'approved');
@@ -1969,6 +2143,99 @@ function ExternalPdQueue({ user, rows, filterStatus }: any) {
         Conferences, workshops, and outside-LMS PD that your teachers attended. Approved hours count toward each teacher's unified PD-hours total
         alongside internal LMS modules.
       </p>
+
+      {msg ? <div class="mb-4 p-3 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
+
+      {/* Sept 24, 2026 — Bulk-assign external PD.  Requested by Aaron
+          Allard during the Sept 24 training: give principals a way to
+          record ONE group PD event (e.g. district CLA training) for
+          many teachers at once instead of asking each teacher to submit
+          it themselves.  Collapsed by default so the review queue below
+          is still the primary content on this page. */}
+      <a id="bulk"></a>
+      <Card title="Bulk-assign external PD to multiple teachers" icon="fas fa-users" class="mb-4">
+        <p class="text-sm text-slate-600 mb-3">
+          For group PD events your teachers attended together (curriculum training, in-service days, district workshops). Fill in the activity once, tick the teachers who attended, and the hours are added to each teacher's record as <strong>approved</strong> immediately — no separate review step needed. Each teacher gets a notification.
+        </p>
+        {bulkTeachers.length === 0 ? (
+          <p class="text-sm text-slate-500 italic">You don't have any teachers assigned to you yet. Ask your super administrator to add appraiser assignments on the <a href="/admin/assignments" class="text-aps-blue hover:underline">Assignments</a> page.</p>
+        ) : (
+        <details class="border border-slate-200 rounded bg-slate-50">
+          <summary class="cursor-pointer px-3 py-2 text-sm font-medium text-aps-navy hover:bg-slate-100">
+            <i class="fas fa-chevron-right mr-1"></i>Open bulk-assign form ({bulkTeachers.length} teacher{bulkTeachers.length === 1 ? '' : 's'} available)
+          </summary>
+          <form method="post" action="/appraiser/external-pd/bulk-assign" class="p-3 grid md:grid-cols-3 gap-3 text-sm"
+                onsubmit="try{this.querySelectorAll('button[type=submit]').forEach(b=>{b.disabled=true;b.dataset.oldText=b.innerText;b.innerText='Saving…';});}catch(e){}">
+            <label class="md:col-span-2">
+              <span class="block text-xs font-medium text-slate-700 mb-1">Activity title <span class="text-red-600">*</span></span>
+              <input name="title" required maxLength={200} placeholder="e.g., CLA Reading Curriculum Training — Day 1"
+                     class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label>
+              <span class="block text-xs font-medium text-slate-700 mb-1">Hours per teacher <span class="text-red-600">*</span></span>
+              <input name="hours" type="number" step="0.25" min="0.25" max="200" required placeholder="e.g., 3.5"
+                     class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label>
+              <span class="block text-xs font-medium text-slate-700 mb-1">Provider <span class="text-slate-400 font-normal">(optional)</span></span>
+              <input name="provider" maxLength={200} placeholder="e.g., CLA, NDCEL, ASCD"
+                     class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label>
+              <span class="block text-xs font-medium text-slate-700 mb-1">Start date <span class="text-slate-400 font-normal">(optional)</span></span>
+              <input name="start_date" type="date" class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label>
+              <span class="block text-xs font-medium text-slate-700 mb-1">End date <span class="text-slate-400 font-normal">(optional)</span></span>
+              <input name="end_date" type="date" class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label class="md:col-span-3">
+              <span class="block text-xs font-medium text-slate-700 mb-1">Description <span class="text-slate-400 font-normal">(optional)</span></span>
+              <textarea name="description" rows={2} maxLength={4000}
+                        placeholder="Short summary of the training / how it aligns to instruction"
+                        class="w-full border border-slate-300 rounded px-2 py-1.5 font-body"></textarea>
+            </label>
+            <label class="md:col-span-2">
+              <span class="block text-xs font-medium text-slate-700 mb-1">Domain alignment <span class="text-slate-400 font-normal">(optional, comma-separated codes like A,B)</span></span>
+              <input name="domain_alignment" maxLength={200} placeholder="A,B,C"
+                     class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <label>
+              <span class="block text-xs font-medium text-slate-700 mb-1">Certificate / link <span class="text-slate-400 font-normal">(optional)</span></span>
+              <input name="certificate_url" type="url" maxLength={500} placeholder="https://…"
+                     class="w-full border border-slate-300 rounded px-2 py-1.5" />
+            </label>
+            <div class="md:col-span-3">
+              <div class="flex items-center justify-between mb-1">
+                <span class="block text-xs font-medium text-slate-700">Teachers who attended <span class="text-red-600">*</span> <span class="text-slate-400 font-normal">(Ctrl/⌘-click for many)</span></span>
+                <div class="text-xs">
+                  <button type="button"
+                          onclick="var s=this.closest('div').parentElement.querySelector('select[name=teacher_ids]');Array.from(s.options).forEach(o=>o.selected=true);"
+                          class="text-aps-blue hover:underline">Select all</button>
+                  <span class="text-slate-400 mx-1">·</span>
+                  <button type="button"
+                          onclick="var s=this.closest('div').parentElement.querySelector('select[name=teacher_ids]');Array.from(s.options).forEach(o=>o.selected=false);"
+                          class="text-aps-blue hover:underline">Clear</button>
+                </div>
+              </div>
+              <select name="teacher_ids" multiple required
+                      size={Math.min(12, Math.max(4, bulkTeachers.length))}
+                      class="w-full border border-slate-300 rounded px-2 py-1.5">
+                {bulkTeachers.map((t: any) => (
+                  <option value={t.id}>{t.last_name}, {t.first_name}{t.school_name ? ` — ${t.school_name}` : ''}</option>
+                ))}
+              </select>
+            </div>
+            <div class="md:col-span-3 flex items-center gap-3">
+              <button type="submit" class="bg-aps-navy hover:bg-aps-blue text-white px-4 py-2 rounded text-sm">
+                <i class="fas fa-users mr-1"></i>Record for selected teachers
+              </button>
+              <span class="text-[11px] text-slate-500">Each selected teacher will get one notification. Hours land as <strong>approved</strong> external PD immediately.</span>
+            </div>
+          </form>
+        </details>
+        )}
+      </Card>
 
       <div class="mb-4 flex flex-wrap gap-2 text-xs">
         <a href="/appraiser/external-pd" class={`px-3 py-1.5 rounded border ${!filterStatus ? 'bg-aps-navy text-white border-aps-navy' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>All ({rows.length})</a>
