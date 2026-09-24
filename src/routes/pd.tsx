@@ -56,7 +56,14 @@ teacherPd.get('/', async (c) => {
     : await stmt.all();
 
   const plans = await c.env.DB.prepare(
-    `SELECT p.*, (SELECT COUNT(*) FROM pd_plan_items WHERE plan_id = p.id) AS n_items
+    // Practice-cleanup: count only plan items whose enrollment is still live.
+    // A plan that only refers to cleaned enrollments should show n_items=0,
+    // not the stale count that includes soft-deleted rows.
+    `SELECT p.*, (
+         SELECT COUNT(*) FROM pd_plan_items pi
+           JOIN pd_enrollments e ON e.id = pi.enrollment_id
+          WHERE pi.plan_id = p.id AND e.deleted_at IS NULL
+       ) AS n_items
        FROM pd_plans p WHERE p.teacher_id = ? ORDER BY p.created_at DESC`
   ).bind(user.id).all();
 
@@ -193,10 +200,12 @@ teacherPd.get('/plans/:id', async (c) => {
   const plan = await c.env.DB.prepare(`SELECT * FROM pd_plans WHERE id = ? AND teacher_id = ?`).bind(id, user.id).first<any>();
   if (!plan) return c.text('Not found', 404);
   const items = await c.env.DB.prepare(
+    // Filter soft-deleted enrollments so a plan doesn't display references
+    // to cleaned practice enrollments.
     `SELECT e.id AS enrollment_id, e.status, m.title AS module_title, m.est_minutes,
             i.code AS icode, i.name AS iname, d.code AS dcode
        FROM pd_plan_items p
-       JOIN pd_enrollments e ON e.id = p.enrollment_id
+       JOIN pd_enrollments e ON e.id = p.enrollment_id AND e.deleted_at IS NULL
        JOIN pd_modules m ON m.id = e.module_id
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id

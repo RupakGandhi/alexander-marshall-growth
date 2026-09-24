@@ -158,23 +158,64 @@ export async function getObservation(db: D1Database, id: number) {
  * so drafts in progress never leak into leadership views.
  */
 export async function getTeacherPerformanceSummary(db: D1Database, teacherId: number) {
-  // Per-domain averages and counts
+  // Per-domain averages and counts.
+  //
+  // Sept 24, 2026 REGRESSION FIX.  The previous implementation:
+  //
+  //     LEFT JOIN framework_indicators i ON i.domain_id = d.id
+  //     LEFT JOIN observation_scores s   ON s.indicator_id = i.id
+  //     LEFT JOIN observations o         ON o.id = s.observation_id AND o.deleted_at IS NULL
+  //     WHERE (o.teacher_id = ? OR o.teacher_id IS NULL)
+  //       AND (o.status IN ('published','acknowledged') OR o.status IS NULL)
+  //
+  // …joined every score for every teacher on the indicator (no `o.teacher_id = ?`
+  // constraint on the score join), then used the permissive
+  // `o.teacher_id IS NULL` case — meant only to preserve empty domains for
+  // teachers with zero scores — to also admit rows where `o.*` was NULLed by
+  // the LEFT JOIN's `deleted_at IS NULL` predicate.  Net effect:
+  //
+  //   * A retained score of 4 for teacher A and a deleted score of 1 for
+  //     teacher B produced avg 2.5 for teacher A (B's raw score row leaked
+  //     via `o.teacher_id IS NULL`).
+  //   * An unrelated teacher with no scores received avg 1.0 (deleted-obs
+  //     score rows still counted).
+  //
+  // Correct pattern: aggregate the requested teacher's active/published
+  // scores in a subquery keyed by indicator_id, then LEFT JOIN that
+  // aggregation onto framework_domains so empty domains (0 scores for this
+  // teacher) still appear with zero counts.  Zero cross-teacher leakage and
+  // zero deleted-observation leakage.
   const domains = await db.prepare(
     `SELECT d.id AS domain_id, d.code AS domain_code, d.name AS domain_name, d.sort_order,
-            COUNT(s.id) AS score_count,
-            AVG(s.level) AS avg_level,
-            SUM(CASE WHEN s.level = 4 THEN 1 ELSE 0 END) AS n4,
-            SUM(CASE WHEN s.level = 3 THEN 1 ELSE 0 END) AS n3,
-            SUM(CASE WHEN s.level = 2 THEN 1 ELSE 0 END) AS n2,
-            SUM(CASE WHEN s.level = 1 THEN 1 ELSE 0 END) AS n1
-     FROM framework_domains d
-     LEFT JOIN framework_indicators i ON i.domain_id = d.id
-     LEFT JOIN observation_scores s ON s.indicator_id = i.id
-     LEFT JOIN observations o ON o.id = s.observation_id AND o.deleted_at IS NULL
-     WHERE (o.teacher_id = ? OR o.teacher_id IS NULL)
-       AND (o.status IN ('published','acknowledged') OR o.status IS NULL)
-     GROUP BY d.id, d.code, d.name, d.sort_order
-     ORDER BY d.sort_order`
+            COALESCE(SUM(agg.score_count), 0) AS score_count,
+            CASE WHEN COALESCE(SUM(agg.score_count), 0) = 0
+                 THEN NULL
+                 ELSE SUM(agg.level_sum) * 1.0 / SUM(agg.score_count)
+            END AS avg_level,
+            COALESCE(SUM(agg.n4), 0) AS n4,
+            COALESCE(SUM(agg.n3), 0) AS n3,
+            COALESCE(SUM(agg.n2), 0) AS n2,
+            COALESCE(SUM(agg.n1), 0) AS n1
+       FROM framework_domains d
+       LEFT JOIN framework_indicators i ON i.domain_id = d.id
+       LEFT JOIN (
+         SELECT s.indicator_id                                             AS indicator_id,
+                COUNT(*)                                                   AS score_count,
+                SUM(s.level)                                               AS level_sum,
+                SUM(CASE WHEN s.level = 4 THEN 1 ELSE 0 END)               AS n4,
+                SUM(CASE WHEN s.level = 3 THEN 1 ELSE 0 END)               AS n3,
+                SUM(CASE WHEN s.level = 2 THEN 1 ELSE 0 END)               AS n2,
+                SUM(CASE WHEN s.level = 1 THEN 1 ELSE 0 END)               AS n1
+           FROM observation_scores s
+           JOIN observations o ON o.id = s.observation_id
+          WHERE o.teacher_id = ?
+            AND o.deleted_at IS NULL
+            AND o.status IN ('published','acknowledged')
+            AND s.level IS NOT NULL
+          GROUP BY s.indicator_id
+       ) agg ON agg.indicator_id = i.id
+       GROUP BY d.id, d.code, d.name, d.sort_order
+       ORDER BY d.sort_order`
   ).bind(teacherId).all();
 
   // Recent ratings: latest score per indicator (across published/acknowledged)

@@ -8,8 +8,9 @@ import {
   listExternalPdQueue, getNumericSetting, setSetting, recentAdminAudit, logAdminAudit,
 } from '../lib/db';
 import {
-  listPracticeCandidates, togglePracticeFlag, executeCleanup, restoreBatch,
-  loadBatch, listBatches,
+  listPracticeCandidates, togglePracticeFlag,
+  previewBatch, executeCleanup, restoreBatch,
+  loadBatch, listBatches, resolveAmbiguousNotif,
   type EntityType,
 } from '../lib/practice_cleanup';
 // Aug 16, 2026 — Fix: /admin/users/create called `notify(...)` without importing it,
@@ -1440,14 +1441,27 @@ app.get('/data/audit-log', async (c) => {
 // enforces this; every mutation additionally records to admin_audit_log)
 // ----------------------------------------------------------------------------
 // See src/lib/practice_cleanup.ts for the design + dependency map.  The
-// workflow is:
+// workflow is a TWO-PHASE preview→confirm→results (F6 correction):
 //   1. GET  /admin/data/practice-cleanup        — landing page: mark rows,
 //                                                 review scope, past batches
 //   2. POST /admin/data/practice-cleanup/mark   — toggle is_practice on a row
-//   3. POST /admin/data/practice-cleanup/execute — soft-delete every tagged
-//                                                  row + its dependencies
-//   4. GET  /admin/data/practice-cleanup/batches/:id  — results view
-//   5. POST /admin/data/practice-cleanup/batches/:id/restore — undo
+//   3. POST /admin/data/practice-cleanup/preview — freeze reviewed scope into
+//                                                  a preview batch; redirect
+//                                                  to the confirm screen
+//   4. GET  /admin/data/practice-cleanup/batches/:id — confirm screen (if
+//                                                  status='preview') OR the
+//                                                  results view + restore
+//                                                  (if status='executed' /
+//                                                  'restored')
+//   5. POST /admin/data/practice-cleanup/batches/:id/execute — bind confirm
+//                                                  to the reviewed batch;
+//                                                  rejects if scope drifted
+//   6. POST /admin/data/practice-cleanup/batches/:id/restore — undo
+//   7. POST /admin/data/practice-cleanup/batches/:id/ambiguous-notif/:nid —
+//                                                  admin manually resolves
+//                                                  one historical-ambiguous
+//                                                  pd_enrollment notification
+//                                                  ('delete' or 'keep')
 // ============================================================================
 
 // Landing page: pick candidates + review current scope + see past batches.
@@ -1538,46 +1552,98 @@ app.post('/data/practice-cleanup/mark', async (c) => {
   ) + '#scope');
 });
 
-// Execute cleanup — soft-delete every currently-tagged row + its cascade.
-// Phrase guard: "CLEAN PRACTICE DATA".
-app.post('/data/practice-cleanup/execute', async (c) => {
+// F6 phase 1 — PREVIEW: freeze the currently-tagged is_practice=1 set into
+// a preview batch and redirect to its confirm screen.  Nothing is deleted
+// yet.  The scope reviewed on the confirm screen is EXACTLY the set that
+// executes; if a second tab tags more records between preview and execute,
+// executeCleanup() will reject with 'scope_changed' and force a refreshed
+// preview.
+app.post('/data/practice-cleanup/preview', async (c) => {
   const user = c.get('user')!;
   const body = await c.req.parseBody();
-  const confirm = String(body.confirm || '').trim().toUpperCase();
   const note = String(body.note || '').trim() || null;
+  try {
+    const result = await previewBatch(c.env.DB, user.id, note);
+    await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_preview', {
+      entityType: 'bulk', rowCount: result.candidates.length,
+      detail: `Preview batch #${result.batch_id}: froze ${result.candidates.length} reviewed record(s). Awaiting confirm.`,
+      filters: { batch_id: result.batch_id, scope_hash: result.scope_hash },
+    });
+    return c.redirect(`/admin/data/practice-cleanup/batches/${result.batch_id}`);
+  } catch (e: any) {
+    const msg = e?.message === 'nothing_to_clean'
+      ? 'Nothing tagged as practice. Mark records first, then preview.'
+      : ('Preview failed: ' + (e?.message || 'unknown error'));
+    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(msg));
+  }
+});
+
+// Batch page — dispatches to CONFIRM (status='preview') or RESULTS
+// (status='executed'/'restored').
+app.get('/data/practice-cleanup/batches/:id', async (c) => {
+  const user = c.get('user')!;
+  const msg = c.req.query('msg');
+  const id = Number(c.req.param('id'));
+  const data = await loadBatch(c.env.DB, id);
+  if (!data) return c.notFound();
+  // Compute a "current-scope" fingerprint mismatch flag so the confirm screen
+  // can warn the admin BEFORE they submit if the tagged set has drifted.
+  let scope_current_matches: boolean | null = null;
+  if (data.batch.status === 'preview' && data.batch.scope_hash) {
+    const currentCands = await listPracticeCandidates(c.env.DB);
+    const currentHash = scopeFingerprintFromCandidatesLocal(currentCands);
+    scope_current_matches = currentHash === data.batch.scope_hash;
+  }
+  return c.html(
+    <PracticeCleanupBatchPage
+      user={user}
+      batch={data.batch}
+      rows={data.rows}
+      ambiguous_notifs={data.ambiguous_notifs}
+      children={data.children}
+      msg={msg}
+      scope_current_matches={scope_current_matches}
+    />
+  );
+});
+
+// F6 phase 2 — EXECUTE: bound to a specific preview batch id.  Rejects if
+// the current is_practice=1 set no longer matches the batch's frozen
+// scope_hash.  Phrase guard: "CLEAN PRACTICE DATA".
+app.post('/data/practice-cleanup/batches/:id/execute', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
   if (confirm !== 'CLEAN PRACTICE DATA') {
-    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
       'You must type "CLEAN PRACTICE DATA" exactly to confirm.'
-    ) + '#execute');
+    ));
   }
   try {
-    const result = await executeCleanup(c.env.DB, user.id, note);
+    const result = await executeCleanup(c.env.DB, user.id, id);
     const total =
       result.affected.coaching_note +
       result.affected.pd_enrollment +
       result.affected.external_pd_submission +
       result.affected.observation;
+    const ambCount = result.cascaded.ambiguous_notifications_preserved;
     await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_execute', {
       entityType: 'bulk', rowCount: total,
-      detail: `Batch #${result.batch_id}: cleaned ${total} parent record${total === 1 ? '' : 's'} + cascade.`,
+      detail: `Batch #${result.batch_id}: cleaned ${total} parent record${total === 1 ? '' : 's'} + cascade${ambCount ? ` (also detected ${ambCount} historical-ambiguous PD notification${ambCount === 1 ? '' : 's'} preserved for review)` : ''}.`,
       filters: { batch_id: result.batch_id },
     });
     return c.redirect(`/admin/data/practice-cleanup/batches/${result.batch_id}`);
   } catch (e: any) {
-    const msg = e?.message === 'nothing_to_clean'
-      ? 'Nothing tagged as practice. Mark records first, then confirm.'
+    const msg =
+      e?.message === 'batch_not_found'         ? 'Batch not found.'
+      : e?.message === 'already_executed'      ? 'This batch was already executed. Load it to see the results.'
+      : e?.message === 'already_restored'      ? 'This batch was executed and then restored. It cannot be executed again — create a fresh preview.'
+      : e?.message === 'batch_not_previewable' ? 'This batch is no longer in a preview state.'
+      : e?.message === 'scope_changed'         ? 'The tagged set has changed since you reviewed it. Reload the preview and confirm the current scope, then run again.'
       : ('Cleanup failed: ' + (e?.message || 'unknown error'));
-    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(msg));
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg));
   }
-});
-
-// Results view for a specific batch (also linked from the past-batches list).
-app.get('/data/practice-cleanup/batches/:id', async (c) => {
-  const user = c.get('user')!;
-  const id = Number(c.req.param('id'));
-  const data = await loadBatch(c.env.DB, id);
-  if (!data) return c.notFound();
-  return c.html(<PracticeCleanupBatchPage user={user} batch={data.batch} rows={data.rows} />);
 });
 
 // Restore a previously-executed batch.  Phrase guard: "RESTORE BATCH".
@@ -1600,11 +1666,11 @@ app.post('/data/practice-cleanup/batches/:id/restore', async (c) => {
       result.restored.observation;
     await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_restore', {
       entityType: 'bulk', rowCount: total,
-      detail: `Batch #${id}: restored ${total} parent record${total === 1 ? '' : 's'} + cascade. Notifications and activity_log rows were NOT re-created (they were hard-deleted at execute time).`,
+      detail: `Batch #${id}: restored ${total} parent record${total === 1 ? '' : 's'} + only the child rows this batch owned (per-child manifest). Notifications and activity_log rows were NOT re-created; the coaching-note delivery ledger IS restored so previously-delivered shared notes still report 'delivered'.`,
       filters: { batch_id: id },
     });
     return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
-      `Restored batch #${id}: ${total} parent record${total === 1 ? '' : 's'} + cascade.`
+      `Restored batch #${id}: ${total} parent record${total === 1 ? '' : 's'} + only this batch's own cascade.`
     ));
   } catch (e: any) {
     const msg = e?.message === 'batch_not_found' ? 'Batch not found.'
@@ -1613,6 +1679,52 @@ app.post('/data/practice-cleanup/batches/:id/restore', async (c) => {
     return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg));
   }
 });
+
+// F7 second half — admin manually resolves ONE historical-ambiguous
+// pd_enrollment notification detected during this batch's execute.
+// Decision is either 'delete' (the row was a real practice notification)
+// or 'keep' (leave it in the recipient's inbox). Recorded on the
+// ambiguous-notif row for a paper trail.
+app.post('/data/practice-cleanup/batches/:id/ambiguous-notif/:nid', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const nid = Number(c.req.param('nid'));
+  const body = await c.req.parseBody();
+  const decision = String(body.decision || '').toLowerCase() === 'delete' ? 'delete' : 'keep';
+  try {
+    const r = await resolveAmbiguousNotif(c.env.DB, id, nid, decision as any);
+    await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_ambiguous_resolve', {
+      entityType: 'notification', entityIds: [nid], rowCount: r.deleted,
+      detail: `Batch #${id}: admin ${decision === 'delete' ? 'deleted' : 'kept'} historical-ambiguous notification #${nid}.`,
+      filters: { batch_id: id, decision },
+    });
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
+      `Notification #${nid} ${decision === 'delete' ? 'deleted' : 'kept'}.`
+    ) + '#ambiguous');
+  } catch (e: any) {
+    const msg = e?.message === 'ambiguous_row_not_found'
+      ? 'Ambiguous notification row not found (already resolved?).'
+      : ('Resolve failed: ' + (e?.message || 'unknown error'));
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg) + '#ambiguous');
+  }
+});
+
+// Local copy of the scope-fingerprint fn used by practice_cleanup.ts.  We
+// intentionally duplicate the small helper here so this route module doesn't
+// import a *private* function from the lib — the two implementations MUST
+// stay in sync (there is a test that pins the format).
+function scopeFingerprintFromCandidatesLocal(cands: any[]): string {
+  const groups: Record<string, number[]> = {
+    coaching_note: [], pd_enrollment: [], external_pd_submission: [], observation: [],
+  };
+  for (const c of cands) (groups[c.entity_type] ||= []).push(Number(c.entity_id));
+  const abbr: Record<string, string> = {
+    coaching_note: 'ct', pd_enrollment: 'pe', external_pd_submission: 'ext', observation: 'obs',
+  };
+  return Object.keys(groups)
+    .map(k => `${abbr[k]}:${groups[k].slice().sort((a, b) => a - b).join(',')}`)
+    .join('|');
+}
 
 export default app;
 
@@ -2776,16 +2888,14 @@ function PracticeCleanupPage({ user, candidates, batches, browse, msg }: any) {
       <div class="mt-6">
         <Card title="Confirm & clean" icon="fas fa-broom">
           <p class="text-sm text-slate-600 mb-2">
-            Executing will <strong>soft-delete</strong> every tagged parent record above along with its dependent audit / ledger / deliverable / score / feedback / focus-area rows. Matching <strong>notifications</strong> and <strong>activity_log</strong> rows are removed permanently so cleaned practice notes don't leave alert history. A batch id will be created so you can undo the entire cleanup with one click.
+            <strong>Two-phase cleanup.</strong> Previewing will <em>freeze</em> the exact set of {totalCandidates} record{totalCandidates === 1 ? '' : 's'} above into a preview batch, then take you to a confirm screen. Nothing is deleted at preview. On the confirm screen you type <code class="bg-slate-100 px-1">CLEAN PRACTICE DATA</code> and only THEN are the tagged records + cascade soft-deleted. If a second admin or tab tags more records between preview and confirm, the confirm step will reject and force a refreshed preview — you never accidentally clean records you didn't review.
           </p>
-          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-shield-halved mr-1"></i>Preserved: user accounts, passwords, roles, coaching capabilities, assignments, schools, rubric, module content, credited hours on any record you did NOT tag, and every notification/activity entry that does not point at a tagged record.</p>
-          <form method="post" action="/admin/data/practice-cleanup/execute" onsubmit={`return confirm('Clean ${totalCandidates} tagged record(s) + cascade? This creates a batch you can undo from the results page.');`}>
+          <p class="text-xs text-slate-500 mb-3"><i class="fas fa-shield-halved mr-1"></i>Preserved: user accounts, passwords, roles, coaching capabilities, assignments, schools, rubric, module content, credited hours on any record you did NOT tag, and every notification/activity entry that does not point at a tagged record. Coaching-note delivery ledger rows are <em>soft-deleted</em> so restore reports 'delivered' correctly for previously-delivered shared notes.</p>
+          <form method="post" action="/admin/data/practice-cleanup/preview" onsubmit={`return confirm('Freeze ${totalCandidates} tagged record(s) into a preview batch? You will confirm the cleanup on the next screen.');`}>
             <label class="block text-xs text-slate-600 mb-1">Optional note (context for the audit log)</label>
             <input name="note" maxLength={200} placeholder="e.g. After Sept 24 all-staff training" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
-            <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAN PRACTICE DATA</code> to confirm</label>
-            <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
-            <button class="bg-rose-700 text-white px-3 py-1.5 rounded text-sm hover:bg-rose-800" disabled={totalCandidates === 0}>
-              <i class="fas fa-broom mr-1"></i>Clean {totalCandidates} tagged record{totalCandidates === 1 ? '' : 's'}
+            <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm hover:bg-amber-700" disabled={totalCandidates === 0}>
+              <i class="fas fa-eye mr-1"></i>Preview cleanup of {totalCandidates} tagged record{totalCandidates === 1 ? '' : 's'}
             </button>
           </form>
         </Card>
@@ -2900,8 +3010,17 @@ function BrowseTable({ title, icon, entity_type, rows, renderLabel }: any) {
 // ----------------------------------------------------------------------------
 // Practice-cleanup workflow — results / restore page
 // ----------------------------------------------------------------------------
-function PracticeCleanupBatchPage({ user, batch, rows }: any) {
+function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, children, msg, scope_current_matches }: any) {
   const summary = batch.affected_counts_json ? JSON.parse(batch.affected_counts_json) : null;
+  const isPreview  = batch.status === 'preview';
+  const isExecuted = batch.status === 'executed';
+  const isRestored = batch.status === 'restored';
+  // Group children by parent for readability.
+  const childrenByParent: Record<string, any[]> = {};
+  for (const ch of (children || [])) {
+    const key = `${ch.parent_entity_type}#${ch.parent_entity_id}`;
+    (childrenByParent[key] ||= []).push(ch);
+  }
   return (
     <Layout title={`Cleanup batch #${batch.id}`} user={user} activeNav="data">
       <div class="flex items-start justify-between mb-1">
@@ -2913,14 +3032,64 @@ function PracticeCleanupBatchPage({ user, batch, rows }: any) {
         {batch.executed_at ? <> · Executed: {formatDateTime(batch.executed_at)}</> : null}
         {batch.restored_at ? <> · Restored: {formatDateTime(batch.restored_at)} by {batch.restored_by_name || '—'}</> : null}
         <span class={`ml-3 inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${
-          batch.status === 'executed' ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-          : batch.status === 'restored' ? 'bg-slate-100 border-slate-300 text-slate-700'
+          isExecuted ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+          : isRestored ? 'bg-slate-100 border-slate-300 text-slate-700'
           : 'bg-amber-50 border-amber-300 text-amber-800'}`}>{batch.status}</span>
       </p>
       {batch.note ? <p class="text-sm italic text-slate-500 mb-4">Note: {batch.note}</p> : null}
+      {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
 
-      {/* Results summary */}
+      {/* Reviewed / enumerated selection — always visible so the admin can
+          see what's about to be cleaned or what WAS cleaned. */}
+      <Card title={`Reviewed records (${rows.length})`} icon="fas fa-list-ol">
+        <p class="text-xs text-slate-500 mb-3">
+          These are the exact records this batch will affect. On restore, only rows this batch OWNED will be un-soft-deleted (per-child manifest); rows previously deleted are left alone.
+        </p>
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
+            <tr><th class="py-2">Kind</th><th>Id</th><th>Label</th></tr>
+          </thead>
+          <tbody>
+            {(rows as any[]).map((r: any) => (
+              <tr class="border-b border-slate-100">
+                <td class="py-2 text-xs font-mono">{r.entity_type}</td>
+                <td class="text-xs font-mono">#{r.entity_id}</td>
+                <td class="text-xs text-slate-600">{r.label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </Card>
+
+      {/* CONFIRM — only shown when status='preview' */}
+      {isPreview ? (
+        <div class="mt-6">
+          <Card title="Confirm cleanup" icon="fas fa-broom">
+            {scope_current_matches === false ? (
+              <div class="mb-3 p-3 rounded bg-rose-50 border border-rose-300 text-rose-900 text-sm">
+                <i class="fas fa-triangle-exclamation mr-1"></i>
+                <strong>Scope changed.</strong> The tagged records have changed since this preview was created — the confirm step will reject execution. Return to the practice-cleanup page, review the current tagged set, and create a fresh preview.
+                <div class="mt-2"><a class="text-aps-blue hover:underline" href="/admin/data/practice-cleanup#scope">Return to practice cleanup →</a></div>
+              </div>
+            ) : (
+              <p class="text-sm text-slate-600 mb-2">
+                Confirming will soft-delete the {rows.length} reviewed record{rows.length === 1 ? '' : 's'} above along with their audit / delivery-ledger / deliverable / score / feedback / focus-area rows (all soft, restoreable). Matching notifications and activity_log rows are permanently removed. Historical-ambiguous PD notifications are <strong>not</strong> deleted — they are captured in this batch for you to review below.
+              </p>
+            )}
+            <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/execute`} onsubmit={`return confirm('Clean ${rows.length} reviewed record(s) + cascade? This creates the atomic soft-delete batch you can undo.');`}>
+              <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAN PRACTICE DATA</code> to confirm</label>
+              <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+              <button class="bg-rose-700 text-white px-3 py-1.5 rounded text-sm hover:bg-rose-800" disabled={scope_current_matches === false}>
+                <i class="fas fa-broom mr-1"></i>Confirm & clean {rows.length} reviewed record{rows.length === 1 ? '' : 's'}
+              </button>
+            </form>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Results summary — only when executed or restored */}
       {summary ? (
+        <div class="mt-6">
         <Card title="Affected rows (this batch)" icon="fas fa-list-check">
           <div class="grid md:grid-cols-2 gap-4 text-sm">
             <div>
@@ -2936,7 +3105,7 @@ function PracticeCleanupBatchPage({ user, batch, rows }: any) {
               <h3 class="font-display text-aps-navy mb-1">Cascade</h3>
               <ul class="space-y-1 text-slate-700">
                 <li>coaching_note_audit (soft): <strong>{summary.cascaded.coaching_note_audit_soft}</strong></li>
-                <li>coaching_note_share_delivery (hard): <strong>{summary.cascaded.coaching_note_share_delivery_hard}</strong></li>
+                <li>coaching_note_share_delivery (soft): <strong>{summary.cascaded.coaching_note_share_delivery_soft || 0}</strong></li>
                 <li>pd_deliverables (soft): <strong>{summary.cascaded.pd_deliverables_soft}</strong></li>
                 <li>pd_reflections (soft): <strong>{summary.cascaded.pd_reflections_soft}</strong></li>
                 <li>pd_deliverable_scores (soft): <strong>{summary.cascaded.pd_deliverable_scores_soft}</strong></li>
@@ -2944,42 +3113,91 @@ function PracticeCleanupBatchPage({ user, batch, rows }: any) {
                 <li>focus_areas (soft): <strong>{summary.cascaded.focus_areas_soft}</strong></li>
                 <li>notifications (hard): <strong>{summary.cascaded.notifications_hard}</strong></li>
                 <li>activity_log (hard): <strong>{summary.cascaded.activity_log_hard}</strong></li>
+                <li>ambiguous notifications <em>preserved</em> for review: <strong>{summary.cascaded.ambiguous_notifications_preserved || 0}</strong></li>
               </ul>
             </div>
           </div>
           <p class="text-xs text-slate-500 mt-3">
             <i class="fas fa-info-circle mr-1"></i>
-            Restore un-soft-deletes every parent + its soft-deleted cascade. It does NOT re-create the notifications or activity_log rows that were hard-deleted at execute time (those are derived; a restored note becomes visible again but the recipient's inbox isn't retroactively repopulated).
+            Restore un-soft-deletes every parent and only the child rows this batch actually deleted (per-child manifest). It does NOT re-create the notifications or activity_log rows that were hard-deleted at execute time. The coaching-note delivery ledger IS restored — previously-delivered shared notes report 'delivered' correctly and are not re-fired.
           </p>
         </Card>
+        </div>
       ) : null}
 
-      {/* Enumerated selection */}
-      <div class="mt-6">
-        <Card title={`Records in this batch (${rows.length})`} icon="fas fa-list-ol">
-          <div class="overflow-x-auto"><table class="w-full text-sm">
-            <thead class="text-left text-xs text-slate-500 border-b border-slate-200">
-              <tr><th class="py-2">Kind</th><th>Id</th><th>Label</th></tr>
-            </thead>
-            <tbody>
-              {(rows as any[]).map((r: any) => (
-                <tr class="border-b border-slate-100">
-                  <td class="py-2 text-xs font-mono">{r.entity_type}</td>
-                  <td class="text-xs font-mono">#{r.entity_id}</td>
-                  <td class="text-xs text-slate-600">{r.label}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table></div>
-        </Card>
-      </div>
+      {/* Per-child manifest (F4) — only when executed or restored */}
+      {(isExecuted || isRestored) && (children || []).length > 0 ? (
+        <div class="mt-6">
+          <Card title={`Per-child ownership manifest (${(children || []).length})`} icon="fas fa-diagram-project">
+            <p class="text-xs text-slate-500 mb-3">Every child row this batch actually soft-deleted, grouped by parent. Restore only touches rows here whose prior_deleted_at IS NULL (i.e., this batch was the deleter). Anything previously deleted stays deleted.</p>
+            <div class="overflow-x-auto"><table class="w-full text-xs">
+              <thead class="text-left text-slate-500 border-b border-slate-200">
+                <tr><th class="py-2">Parent</th><th>Child kind</th><th>Child id</th><th>Prior deleted_at</th></tr>
+              </thead>
+              <tbody>
+                {(children as any[]).map((ch: any) => (
+                  <tr class="border-b border-slate-100">
+                    <td class="py-1.5 font-mono">{ch.parent_entity_type}#{ch.parent_entity_id}</td>
+                    <td class="font-mono">{ch.child_kind}</td>
+                    <td class="font-mono">#{ch.child_id}</td>
+                    <td class="text-slate-600">{ch.prior_deleted_at || <span class="text-emerald-700">— (owned)</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          </Card>
+        </div>
+      ) : null}
 
-      {/* Restore */}
-      {batch.status === 'executed' ? (
+      {/* F7 second half — ambiguous historical notifications preserved */}
+      <a id="ambiguous"></a>
+      {(ambiguous_notifs || []).length > 0 ? (
+        <div class="mt-6">
+          <Card title={`Historical-ambiguous PD notifications (${(ambiguous_notifs || []).length})`} icon="fas fa-question-circle">
+            <p class="text-sm text-slate-600 mb-2">
+              These notifications were written under the pre-fix auto-enroll bug (entity_id = module_id instead of enrollment_id). Cleanup did <strong>not</strong> delete them because deleting them blindly could remove unrelated notifications for other teachers who happen to share the same module id. Review each one and decide:
+            </p>
+            <ul class="list-disc list-inside text-xs text-slate-600 mb-3">
+              <li><strong>Delete</strong> if this notification is clearly practice data (recipient was a training user, or the notification lists a training module).</li>
+              <li><strong>Keep</strong> if the recipient is a real teacher who should keep the inbox alert.</li>
+            </ul>
+            <div class="overflow-x-auto"><table class="w-full text-xs">
+              <thead class="text-left text-slate-500 border-b border-slate-200">
+                <tr><th class="py-2">Notif id</th><th>Recipient user</th><th>Kind</th><th>Title</th><th>entity_id (module)</th><th>Suspected enrollment</th><th></th></tr>
+              </thead>
+              <tbody>
+                {(ambiguous_notifs as any[]).map((n: any) => (
+                  <tr class="border-b border-slate-100 align-top">
+                    <td class="py-1.5 font-mono">#{n.notification_id}</td>
+                    <td class="font-mono">u#{n.user_id}</td>
+                    <td class="font-mono">{n.kind}</td>
+                    <td class="text-slate-600">{n.title}</td>
+                    <td class="font-mono">m#{n.entity_id}</td>
+                    <td class="font-mono">{n.suspected_parent_enrollment_id ? `e#${n.suspected_parent_enrollment_id}` : '—'}</td>
+                    <td class="text-right whitespace-nowrap">
+                      <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/ambiguous-notif/${n.notification_id}`} class="inline">
+                        <input type="hidden" name="decision" value="delete" />
+                        <button class="text-[11px] bg-rose-600 text-white px-2 py-0.5 rounded hover:bg-rose-700" onclick="return confirm('Delete this notification permanently? (Non-reversible.)')">Delete</button>
+                      </form>
+                      <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/ambiguous-notif/${n.notification_id}`} class="inline ml-1">
+                        <input type="hidden" name="decision" value="keep" />
+                        <button class="text-[11px] bg-slate-200 text-slate-800 px-2 py-0.5 rounded hover:bg-slate-300">Keep</button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Restore — only when executed */}
+      {isExecuted ? (
         <div class="mt-6">
           <Card title="Restore this batch" icon="fas fa-arrow-rotate-left">
             <p class="text-sm text-slate-600 mb-2">
-              Un-soft-delete every parent record and its soft-deleted cascade. Notifications and activity_log rows that were hard-deleted at execute time are NOT re-created.
+              Un-soft-delete each parent record and only the child rows this batch actually deleted. The coaching-note delivery ledger IS restored (previously-delivered shared notes will correctly report 'delivered' — no false failure, no duplicate first-share alert). Notifications and activity_log rows are NOT re-created.
             </p>
             <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/restore`} onsubmit="return confirm('Restore this batch? Records will become visible again in the affected views.')">
               <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">RESTORE BATCH</code> to confirm</label>

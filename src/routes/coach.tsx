@@ -126,8 +126,13 @@ app.get('/teachers/:id', async (c) => {
   // This closes the T1 gap where a successful notify() followed by a
   // ledger-UPDATE failure left the ledger stuck at 'attempting' and the
   // coach page said "Delivery in progress" indefinitely with no way out.
+  // F5 (Sept 24, 2026): filter soft-deleted ledger rows.  During a
+  // cleanup window the parent note is also soft-deleted (so this select
+  // never runs against it anyway), but on RESTORE the ledger row comes
+  // back with its prior status and this read continues to work.
   const deliveryStatus = `COALESCE((
-    SELECT sd.status FROM coaching_note_share_delivery sd WHERE sd.note_id = n.id
+    SELECT sd.status FROM coaching_note_share_delivery sd
+     WHERE sd.note_id = n.id AND sd.deleted_at IS NULL
   ), 'never') AS delivery_status_raw`;
   // Inbox-exists check for THIS specific note.  When true, the notification
   // is provably in the recipient's inbox regardless of what the ledger says.
@@ -454,8 +459,12 @@ async function coachNoteAlreadyDelivered(
       LIMIT 1`
   ).bind(teacherId, noteId).first<any>();
   if (nrow) return { delivered: true, via: 'notifications', notifId: Number(nrow.id) };
+  // F5 (Sept 24, 2026): filter soft-deleted ledger rows so a cleanup-window
+  // read never treats a cleaned note as "delivered".  On restore, the
+  // manifest un-soft-deletes the ledger row and this read reports its
+  // preserved status correctly.
   const lrow = await db.prepare(
-    `SELECT status, notif_id FROM coaching_note_share_delivery WHERE note_id=?`
+    `SELECT status, notif_id FROM coaching_note_share_delivery WHERE note_id=? AND deleted_at IS NULL`
   ).bind(noteId).first<any>();
   if (lrow && lrow.status === 'delivered') {
     return { delivered: true, via: 'ledger', notifId: lrow.notif_id != null ? Number(lrow.notif_id) : null };
@@ -690,8 +699,12 @@ async function retryShareNotification(
 async function shareDeliveryStatus(
   db: D1Database, noteId: number,
 ): Promise<'delivered'|'suppressed'|'failed'|'attempting'|'never'> {
+  // F5 (Sept 24, 2026): filter soft-deleted ledger rows.  A cleanup-window
+  // read for a soft-deleted note would in practice never reach this
+  // function (the parent note is filtered upstream), but the filter is
+  // defensive and matches the semantics of coachNoteAlreadyDelivered().
   const row = await db.prepare(
-    `SELECT status FROM coaching_note_share_delivery WHERE note_id=?`
+    `SELECT status FROM coaching_note_share_delivery WHERE note_id=? AND deleted_at IS NULL`
   ).bind(noteId).first<any>();
   return (row?.status as any) || 'never';
 }

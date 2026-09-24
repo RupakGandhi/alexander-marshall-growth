@@ -941,7 +941,7 @@ app.get('/pd/:id', async (c) => {
        LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
        LEFT JOIN users vb ON vb.id = e.verified_by
        LEFT JOIN users ab ON ab.id = e.assigned_by
-       WHERE e.id = ?`
+       WHERE e.id = ? AND e.deleted_at IS NULL`
   ).bind(id).first<any>();
   if (!row) return c.text('Not found', 404);
 

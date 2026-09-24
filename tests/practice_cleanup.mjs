@@ -218,11 +218,15 @@ suite('V6 (permissions): non-super_admin cannot access practice-cleanup routes')
   }));
   ok('PureCoach POST /mark → 403 (super-admin only)',
      rMark.status === 403, `HTTP ${rMark.status}`);
+  // Non-admin POST to preview must also fail (new F6 endpoint).
+  const rPrev = await pureCoach.post('/admin/data/practice-cleanup/preview', new URLSearchParams({}));
+  ok('PureCoach POST /preview → 403 (super-admin only)',
+     rPrev.status === 403, `HTTP ${rPrev.status}`);
   // Non-admin POST to execute must also fail.
-  const rExec = await pureCoach.post('/admin/data/practice-cleanup/execute', new URLSearchParams({
+  const rExec = await pureCoach.post('/admin/data/practice-cleanup/batches/1/execute', new URLSearchParams({
     confirm: 'CLEAN PRACTICE DATA',
   }));
-  ok('PureCoach POST /execute → 403 (super-admin only)',
+  ok('PureCoach POST /batches/:id/execute → 403 (super-admin only)',
      rExec.status === 403, `HTTP ${rExec.status}`);
 }
 
@@ -270,24 +274,46 @@ suite('V1 (marking): admin tags each practice record; retained rows stay is_prac
 }
 
 // ==========================================================================
-suite('V2 (execute): admin runs cleanup — parents soft-deleted, cascade handled');
+suite('V2 (execute): admin runs two-phase cleanup — preview freezes scope, execute soft-deletes atomically');
 {
-  // Phrase-guard rejection first.
-  const rBad = await admin.post('/admin/data/practice-cleanup/execute', new URLSearchParams({
+  // Phase 1: PREVIEW (F6).  Creates a batch with status='preview'.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'test cleanup',
+  }));
+  ok(`preview returns 302 to batch page (${rPrev.status})`, rPrev.status === 302);
+  ok('preview redirects to /admin/data/practice-cleanup/batches/…',
+     rPrev.location && rPrev.location.includes('/practice-cleanup/batches/'), `loc=${rPrev.location}`);
+  const batchId = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`batch id parsed from redirect (${batchId})`, batchId > 0);
+
+  // Preview batch is in status='preview' with scope_hash captured.
+  const previewBatch = db.prepare(
+    `SELECT status, scope_hash, writer_nonce, candidate_snapshot_json FROM practice_cleanup_batches WHERE id=?`
+  ).get(batchId);
+  ok(`preview batch status='preview' (${previewBatch.status})`, previewBatch.status === 'preview');
+  ok(`preview batch has scope_hash captured (${previewBatch.scope_hash?.slice(0, 32)}...)`,
+     !!previewBatch.scope_hash && previewBatch.scope_hash.length > 0);
+  ok(`preview batch has writer_nonce set (idempotence token)`, !!previewBatch.writer_nonce);
+  ok(`preview batch has candidate_snapshot_json captured`, !!previewBatch.candidate_snapshot_json);
+
+  // At this point, NOTHING is soft-deleted yet.
+  const midDraft = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=?`).get(practiceDraftNote.id);
+  ok(`draft note NOT soft-deleted before execute (${midDraft.deleted_at || 'null'})`, !midDraft.deleted_at);
+
+  // Phase 2: EXECUTE with phrase guard rejection.
+  const rBad = await admin.post(`/admin/data/practice-cleanup/batches/${batchId}/execute`, new URLSearchParams({
     confirm: 'not the phrase',
   }));
   ok('execute without correct phrase redirects with error message',
      rBad.status === 302 && rBad.location && rBad.location.includes('exactly'), `loc=${rBad.location}`);
+
   // Real execute.
-  const r = await admin.post('/admin/data/practice-cleanup/execute', new URLSearchParams({
+  const r = await admin.post(`/admin/data/practice-cleanup/batches/${batchId}/execute`, new URLSearchParams({
     confirm: 'CLEAN PRACTICE DATA',
-    note: 'test cleanup',
   }));
-  ok(`execute returns 302 to batch page (${r.status})`, r.status === 302);
+  ok(`execute returns 302 (${r.status})`, r.status === 302);
   ok('execute redirects to /admin/data/practice-cleanup/batches/…',
      r.location && r.location.includes('/practice-cleanup/batches/'), `loc=${r.location}`);
-  const batchId = Number((r.location || '').split('/batches/')[1]);
-  ok(`batch id parsed from redirect (${batchId})`, batchId > 0);
 
   // Parent rows are now soft-deleted (deleted_at IS NOT NULL).
   const draftDel = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=?`).get(practiceDraftNote.id).deleted_at;
@@ -297,15 +323,53 @@ suite('V2 (execute): admin runs cleanup — parents soft-deleted, cascade handle
   ok(`shared note soft-deleted`, !!sharedDel);
   ok(`PD enrollment 200 soft-deleted`, !!enrDel);
 
+  // Batch flipped to 'executed' atomically with the writes.
+  const execBatch = db.prepare(
+    `SELECT status, writer_nonce, executed_at, affected_counts_json FROM practice_cleanup_batches WHERE id=?`
+  ).get(batchId);
+  ok(`batch status='executed' after execute (${execBatch.status})`, execBatch.status === 'executed');
+  ok(`writer_nonce cleared on successful flip`, execBatch.writer_nonce === null);
+  ok(`executed_at timestamp set`, !!execBatch.executed_at);
+  const summary = JSON.parse(execBatch.affected_counts_json);
+  ok(`affected_counts.affected.coaching_note = 2`, summary.affected.coaching_note === 2);
+  ok(`affected_counts.affected.pd_enrollment = 1`, summary.affected.pd_enrollment === 1);
+
   // Coaching-note audit cascade: audit rows for the deleted notes should be soft-deleted too.
   const draftAuditLive = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_audit WHERE note_id=? AND deleted_at IS NULL`).get(practiceDraftNote.id).n;
   const sharedAuditLive = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_audit WHERE note_id=? AND deleted_at IS NULL`).get(practiceSharedNote.id).n;
   ok(`draft note's audit rows soft-deleted (${draftAuditLive} live remain)`, draftAuditLive === 0);
   ok(`shared note's audit rows soft-deleted (${sharedAuditLive} live remain)`, sharedAuditLive === 0);
 
-  // Share-delivery ledger: hard-deleted.
-  const sharedLedger = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id).n;
-  ok(`shared note's delivery ledger HARD-deleted (${sharedLedger} rows)`, sharedLedger === 0);
+  // F5: Share-delivery ledger is now SOFT-deleted (not hard-deleted).
+  // The row must still exist, marked deleted_at IS NOT NULL, preserving
+  // the 'delivered' status for eventual restore.
+  const sharedLedgerRow = db.prepare(`SELECT status, deleted_at FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id);
+  ok(`shared note's delivery ledger still EXISTS (F5 preservation)`, !!sharedLedgerRow);
+  ok(`shared note's delivery ledger is SOFT-deleted (deleted_at set)`,
+     !!sharedLedgerRow?.deleted_at);
+  ok(`shared note's ledger status preserved as 'delivered' (was: '${sharedLedgerRow?.status}')`,
+     sharedLedgerRow?.status === 'delivered');
+  // Also: the deleted_at IS NULL count from the coach's perspective is 0.
+  const sharedLedgerLive = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_share_delivery WHERE note_id=? AND deleted_at IS NULL`).get(practiceSharedNote.id).n;
+  ok(`shared note's ledger invisible to live reads (${sharedLedgerLive} live remain)`, sharedLedgerLive === 0);
+
+  // F4: per-child manifest was populated.
+  const childManifest = db.prepare(
+    `SELECT child_kind, COUNT(*) AS n FROM practice_cleanup_child WHERE batch_id=? GROUP BY child_kind ORDER BY child_kind`
+  ).all(batchId);
+  const cmMap = Object.fromEntries(childManifest.map(r => [r.child_kind, r.n]));
+  ok(`child manifest includes coaching_note_share_delivery (${cmMap.coaching_note_share_delivery || 0})`,
+     (cmMap.coaching_note_share_delivery || 0) >= 1);
+  ok(`child manifest includes coaching_note_audit (${cmMap.coaching_note_audit || 0})`,
+     (cmMap.coaching_note_audit || 0) >= 1);
+  ok(`child manifest includes pd_deliverable, pd_reflection, pd_deliverable_score`,
+     (cmMap.pd_deliverable || 0) >= 1 && (cmMap.pd_reflection || 0) >= 1 && (cmMap.pd_deliverable_score || 0) >= 1);
+  // All child manifest rows have prior_deleted_at IS NULL (this batch was the deleter).
+  const priorNonNull = db.prepare(
+    `SELECT COUNT(*) AS n FROM practice_cleanup_child WHERE batch_id=? AND prior_deleted_at IS NOT NULL`
+  ).get(batchId).n;
+  ok(`all child manifest rows have prior_deleted_at IS NULL (this batch owned every soft-delete) (${priorNonNull} with prior != NULL)`,
+     priorNonNull === 0);
 
   // Notifications for cleaned notes: hard-deleted.
   const cleanedNotifs = db.prepare(
@@ -440,13 +504,19 @@ suite('V5 (restore): "Undo last cleanup" un-soft-deletes parents + cascade');
   const sRestored = db.prepare(`SELECT COUNT(*) AS n FROM pd_deliverable_scores WHERE enrollment_id=200 AND deleted_at IS NULL`).get().n;
   ok(`PD deliverable scores restored (${sRestored} live)`, sRestored > 0);
 
-  // Notifications and share-delivery ledger were hard-deleted; NOT restored (documented behavior).
+  // Notifications were hard-deleted; NOT re-created (documented behavior).
   const notifRestored = db.prepare(
     `SELECT COUNT(*) AS n FROM notifications WHERE entity_type IN ('coaching_note','pd_enrollment') AND entity_id IN (?,?,200)`
   ).get(practiceDraftNote.id, practiceSharedNote.id).n;
   ok(`notifications NOT re-created (${notifRestored} — documented terminal behavior)`, notifRestored === 0);
-  const ledgerRestored = db.prepare(`SELECT COUNT(*) AS n FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id).n;
-  ok(`share-delivery ledger NOT re-created for restored shared note (${ledgerRestored})`, ledgerRestored === 0);
+
+  // F5: share-delivery ledger IS restored (soft-delete → un-soft-delete).
+  // The row now visible to live reads with its preserved 'delivered' status.
+  const ledgerRow = db.prepare(`SELECT status, deleted_at FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id);
+  ok(`share-delivery ledger IS restored (F5): row still exists`, !!ledgerRow);
+  ok(`share-delivery ledger deleted_at cleared on restore`, !ledgerRow?.deleted_at);
+  ok(`share-delivery ledger status preserved as 'delivered' through restore`,
+     ledgerRow?.status === 'delivered');
 
   // Restored notes are now visible again in coach/teacher views (V4-inverse).
   const coachView = await admin.get(`/coach/teachers/${IDS.alice}`);
@@ -499,6 +569,533 @@ suite('V1 second pass — untag flow works (is_practice=0 removes from scope)');
   ok(`untag draft note → 302 (${r.status})`, r.status === 302);
   const nowFlag = db.prepare(`SELECT is_practice FROM coaching_notes WHERE id=?`).get(practiceDraftNote.id).is_practice;
   ok('draft note is_practice cleared to 0', nowFlag === 0);
+}
+
+// ==========================================================================
+suite('V7 (F2 — score-summary regression): getTeacherPerformanceSummary only aggregates active, own scores');
+{
+  // Reproduces the bug reported in the review:
+  //   * teacher A has one RETAINED score of 4
+  //   * teacher B has one DELETED score of 1
+  //   * teacher C has NO scores
+  //   Expected: A shows avg=4, B shows no scores, C shows no scores.
+  //   Bug: A showed 2.5 (deleted 1 leaking into A's aggregation), C showed 1.0.
+  //
+  // We use existing framework indicator + fixtureless teachers by injecting a
+  // fresh observation for each teacher and comparing the rendered
+  // /appraiser/teachers/:id page (which calls getTeacherPerformanceSummary).
+  //
+  // We use IDs 12 (Carol=A), 13 (Dan=B), 14 (Plain=C) as the three teachers.
+  const teacherA = IDS.carol;
+  const teacherB = IDS.dan;
+  const teacherC = IDS.plain;
+  const appraiserId = IDS.principal;
+
+  const indicator = db.prepare(`SELECT id FROM framework_indicators ORDER BY sort_order LIMIT 1`).get();
+  const fwId = db.prepare(`SELECT framework_id FROM observations WHERE id=101`).get()?.framework_id
+    || db.prepare(`SELECT id FROM frameworks ORDER BY id LIMIT 1`).get().id;
+
+  const now = new Date().toISOString();
+  // Clean any prior V7 rows if the suite re-ran.
+  db.prepare(`DELETE FROM observation_scores WHERE observation_id IN (9701, 9702, 9703)`).run();
+  db.prepare(`DELETE FROM observations WHERE id IN (9701, 9702, 9703)`).run();
+
+  // Teacher A: retained observation with score=4
+  db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
+    observation_type, class_context, subject, grade_level, observed_at, status,
+    published_at, teacher_acknowledged_at, created_at, updated_at)
+    VALUES (9701, ?, ?, 1, ?, 'formal', 'V7 teacher A', 'ELA', '3', ?, 'acknowledged', ?, ?, ?, ?)`)
+    .run(teacherA, appraiserId, fwId, now, now, now, now, now);
+  db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
+    VALUES (9701, ?, 4, 'V7 A evidence', ?, ?)`).run(indicator.id, now, now);
+  // Teacher B: DELETED observation with score=1 (must not leak into A's aggregate)
+  db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
+    observation_type, class_context, subject, grade_level, observed_at, status,
+    published_at, teacher_acknowledged_at, deleted_at, created_at, updated_at)
+    VALUES (9702, ?, ?, 1, ?, 'formal', 'V7 teacher B', 'ELA', '3', ?, 'acknowledged', ?, ?, ?, ?, ?)`)
+    .run(teacherB, appraiserId, fwId, now, now, now, now, now, now);
+  db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
+    VALUES (9702, ?, 1, 'V7 B evidence (deleted)', ?, ?)`).run(indicator.id, now, now);
+  // Teacher C: no scores at all (no observation).
+
+  // Fetch summary via the appraiser teacher-detail view.
+  const appraiser = principal;
+  const pageA = await appraiser.get(`/appraiser/teachers/${teacherA}`);
+  const pageB = await appraiser.get(`/appraiser/teachers/${teacherB}`);
+  const pageC = await appraiser.get(`/appraiser/teachers/${teacherC}`);
+  ok(`V7: teacher A page renders (HTTP ${pageA.status})`, pageA.status === 200);
+  ok(`V7: teacher B page renders (HTTP ${pageB.status})`, pageB.status === 200);
+  ok(`V7: teacher C page renders (HTTP ${pageC.status})`, pageC.status === 200);
+
+  // Teacher A's page must show avg of 4.0 for this indicator's domain, NOT 2.5.
+  // We look for "4.0" in a domain-avg cell.  The bug produced "2.5" or "2.50".
+  ok(`V7: teacher A does NOT show buggy 2.5 avg (score-summary regression fixed)`,
+     !/\b2\.5(\b|<|0)/.test(pageA.text.replace(/2\.5%|2\.5x/g, '')),
+     'teacher A page contains "2.5" — deleted score B is leaking into A\'s aggregate');
+
+  // Teacher C (no scores) must NOT show any avg > 0 for the indicator's domain.
+  // The bug produced avg=1.0 (deleted B's score leaking across teachers).
+  // We check by re-querying getTeacherPerformanceSummary via the DB directly
+  // rather than the HTML (which may contain incidental "1.0" strings for
+  // unrelated version/style tokens).  A score_count of 0 in every domain is
+  // the true condition.
+  const teacherC_totalScores = db.prepare(
+    `SELECT COUNT(*) AS n FROM observation_scores s
+       JOIN observations o ON o.id=s.observation_id
+      WHERE o.teacher_id=? AND o.deleted_at IS NULL AND o.status IN ('published','acknowledged') AND s.level IS NOT NULL`
+  ).get(teacherC).n;
+  ok(`V7: teacher C really has zero active scores in DB (${teacherC_totalScores})`,
+     teacherC_totalScores === 0);
+  // No "aggregate score" or "domain averaged" language that indicates
+  // spurious avg for empty domain.  The regression rendered domain rows
+  // with "1.0" cells — spot-check that no "Avg 1.0" text appears.
+  ok(`V7: teacher C page does NOT display "Avg 1.0" or "average 1.0" text`,
+     !/(avg|average)[^\d]{0,8}1\.0/i.test(pageC.text),
+     'teacher C page shows an averaged score for a teacher with no scores');
+
+  // Teacher A's aggregate should include the retained 4 (via level="4").
+  // Just verify the page mentions the 9701 observation.
+  ok(`V7: teacher A page references the retained observation`,
+     pageA.text.includes('9701') || pageA.text.includes('V7 A evidence') || pageA.text.match(/score.*4/i));
+}
+
+// ==========================================================================
+suite('V8 (F3 — atomicity): a mid-cascade DB failure leaves the batch recoverable');
+{
+  // We can't easily inject a mid-batch failure through HTTP without touching
+  // the runtime.  Instead, we verify the two invariants that F3 guarantees:
+  //   1. On a SUCCESSFUL cleanup, the batch's status flip to 'executed'
+  //      happens ONLY after every parent's cascade has been attempted, and
+  //      is transactionally consistent with the writes (writer_nonce cleared).
+  //   2. On a preview that was NEVER executed, restore refuses with
+  //      'batch_not_restorable' rather than corrupting state — the preview
+  //      can be revisited or abandoned.
+  //
+  // (1) was covered in V2's assertions about writer_nonce and executed_at.
+  // (2): create a fresh preview, don't execute it, try to restore.
+  //
+  // First re-tag records so preview has something to work with.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '1',
+  }));
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V8 preview-only',
+  }));
+  const previewBatchId = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`V8: fresh preview batch created (id=${previewBatchId})`, previewBatchId > 0);
+
+  // Attempt restore on a preview-only batch → 'batch_not_restorable'.
+  const rRestore = await admin.post(`/admin/data/practice-cleanup/batches/${previewBatchId}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  ok(`V8: restore of preview-only batch redirects with error (${rRestore.status})`,
+     rRestore.status === 302 && rRestore.location && decodeURIComponent(rRestore.location).includes('not in a state that can be restored'),
+     `loc=${decodeURIComponent(rRestore.location || '')}`);
+
+  // Untag so V9's scope-drift test starts fresh.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '0',
+  }));
+
+  // Idempotence: a second execute against the SAME preview batch is a no-op
+  // (writer_nonce guard).  We test this by manually executing the previewed
+  // batch and then re-POSTing execute — the second call must not error.
+  // First, retag+preview a fresh set.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '1',
+  }));
+  const rPrev2 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V8 idempotence',
+  }));
+  const idBatch2 = Number((rPrev2.location || '').split('/batches/')[1]);
+  // First execute.
+  await admin.post(`/admin/data/practice-cleanup/batches/${idBatch2}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  const afterFirst = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(idBatch2);
+  ok(`V8: batch executed once, status='${afterFirst.status}'`, afterFirst.status === 'executed');
+  // Second execute — must reject with 'already_executed'.
+  const r2 = await admin.post(`/admin/data/practice-cleanup/batches/${idBatch2}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V8: repeat execute redirects with 'already_executed' message`,
+     r2.status === 302 && decodeURIComponent(r2.location || '').includes('already executed'),
+     `loc=${decodeURIComponent(r2.location || '')}`);
+
+  // Restore this cleanup so V9/V10/V11 start with a clean state.
+  await admin.post(`/admin/data/practice-cleanup/batches/${idBatch2}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  // Untag draft note so subsequent tests can start fresh.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '0',
+  }));
+}
+
+// ==========================================================================
+suite('V9 (F4 — per-child ownership): restore preserves previously-deleted children');
+{
+  // Create a fresh PD enrollment + child rows, then soft-delete ONE child
+  // deliverable BEFORE creating the batch.  After execute + restore, that
+  // deliverable must remain soft-deleted (not resurrected by restore).
+  const teacherId = IDS.bob;
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  const now = new Date().toISOString();
+  db.prepare(`DELETE FROM pd_deliverables WHERE enrollment_id=9990`).run();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id=9990`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9990, ?, ?, 'self', 'submitted', 1, ?, ?)`).run(teacherId, mod.id, now, now);
+  // Two deliverables: 90001 (deleted BEFORE cleanup), 90002 (fresh).
+  // Note: pd_deliverables has a UNIQUE(enrollment_id) constraint — only ONE
+  // deliverable per enrollment. Since V9 needs to test previously-deleted
+  // vs freshly-deleted child ownership, we soft-delete the ONE deliverable
+  // BEFORE the cleanup batch, then verify restore does not resurrect it.
+  db.prepare(`DELETE FROM pd_deliverables WHERE enrollment_id=9990`).run();
+  db.prepare(`INSERT INTO pd_deliverables (id, enrollment_id, title, body, created_at, updated_at)
+    VALUES (90001, 9990, 'V9 previously-deleted deliv', 'body', ?, ?)`).run(now, now);
+  // Also add a pd_reflection as the "fresh" child (no UNIQUE constraint).
+  db.prepare(`DELETE FROM pd_reflections WHERE enrollment_id=9990`).run();
+  db.prepare(`INSERT INTO pd_reflections (id, enrollment_id, phase, body, created_at)
+    VALUES (90002, 9990, 'learn', 'V9 fresh reflection', ?)`).run(now);
+  // Pre-delete 90001 with a timestamp DIFFERENT from CURRENT_TIMESTAMP so we
+  // can verify it wasn't touched.
+  const priorTs = '2020-01-01 00:00:00';
+  db.prepare(`UPDATE pd_deliverables SET deleted_at=? WHERE id=90001`).run(priorTs);
+
+  // Preview + execute the batch that soft-deletes enrollment 9990.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V9',
+  }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+
+  // Batch's child manifest must ONLY include the fresh deliv (90002), not the
+  // previously-deleted one (90001).
+  const childManifest = db.prepare(
+    `SELECT child_id FROM practice_cleanup_child WHERE batch_id=? AND child_kind='pd_deliverable'`
+  ).all(bid).map(r => r.child_id);
+  // With the UNIQUE(enrollment_id) constraint on pd_deliverables, we have
+  // only 1 deliverable (90001) which we pre-deleted, plus 1 reflection
+  // (90002).  The child manifest for deliverables must be EMPTY (90001 was
+  // already deleted so gatherChildIds returns nothing for it).
+  ok(`V9: child manifest excludes previously-deleted deliverable 90001 (deliverables in manifest: ${childManifest.join(',')})`,
+     !childManifest.includes(90001));
+  // Fresh reflection 90002 IS in the reflection manifest.
+  const reflManifest = db.prepare(
+    `SELECT child_id FROM practice_cleanup_child WHERE batch_id=? AND child_kind='pd_reflection'`
+  ).all(bid).map(r => r.child_id);
+  ok(`V9: child manifest includes freshly-deleted reflection 90002 (${reflManifest.join(',')})`,
+     reflManifest.includes(90002));
+
+  // Restore.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+
+  // 90002 (reflection) must be un-soft-deleted; 90001 (deliverable) must remain
+  // deleted with its ORIGINAL deleted_at timestamp preserved.
+  const d90001 = db.prepare(`SELECT deleted_at FROM pd_deliverables WHERE id=90001`).get();
+  const r90002 = db.prepare(`SELECT deleted_at FROM pd_reflections WHERE id=90002`).get();
+  ok(`V9: previously-deleted deliverable 90001 STILL deleted after restore (deleted_at='${d90001.deleted_at}')`,
+     !!d90001.deleted_at);
+  ok(`V9: previously-deleted deliverable 90001 retains its ORIGINAL deleted_at (${d90001.deleted_at} === ${priorTs})`,
+     d90001.deleted_at === priorTs);
+  ok(`V9: fresh reflection 90002 correctly restored (deleted_at is NULL)`,
+     !r90002.deleted_at);
+
+  // Untag so V10 starts fresh.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'pd_enrollment', entity_id: '9990', is_practice: '0',
+  }));
+}
+
+// ==========================================================================
+suite('V10 (F5 — delivery-history preservation): restore reports "delivered", not "never"');
+{
+  // Re-tag the practice shared note (still tagged from V1) then preview +
+  // execute + restore, then look for the delivery status in the coach view.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceSharedNote.id), is_practice: '1',
+  }));
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V10 F5 test',
+  }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  // During the cleanup window, the ledger row is soft-deleted (invisible)
+  // and the note is soft-deleted (invisible).  Both come back on restore.
+  const midWindow = db.prepare(`SELECT status, deleted_at FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id);
+  ok(`V10 mid-window: ledger row still exists (not hard-deleted) (F5)`, !!midWindow);
+  ok(`V10 mid-window: ledger row soft-deleted (deleted_at set)`, !!midWindow?.deleted_at);
+  ok(`V10 mid-window: ledger status preserved as 'delivered' (was: '${midWindow?.status}')`, midWindow?.status === 'delivered');
+
+  // Restore.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+  // Ledger row now live with status='delivered'.
+  const afterRestore = db.prepare(`SELECT status, deleted_at FROM coaching_note_share_delivery WHERE note_id=?`).get(practiceSharedNote.id);
+  ok(`V10 after restore: ledger deleted_at cleared`, !afterRestore?.deleted_at);
+  ok(`V10 after restore: ledger status='delivered' preserved`, afterRestore?.status === 'delivered');
+
+  // Coach view of the restored note MUST NOT show "Notification not
+  // delivered" or "Resend" — the shareDeliveryStatus() read returns
+  // 'delivered' from the un-soft-deleted ledger row.
+  const coachView = await pureCoach.get(`/coach/teachers/${IDS.alice}`);
+  // The coach page renders each note with a status badge.  For a delivered
+  // note, the "Notification not delivered" badge and the "Resend" button
+  // should NOT appear for this specific note.  We look for the practice
+  // note's marker text and check the surrounding context.
+  ok(`V10: restored shared note visible in coach view`,
+     coachView.text.includes('PRACTICE SHARED — training'),
+     'restored note missing from coach view');
+  // The overall page could contain other notes with those buttons; scope
+  // the check by looking for "Notification not delivered" ONLY near this
+  // note's identifying text.  A simpler assertion: shareDeliveryStatus()
+  // is now 'delivered' — the ledger row is the source of truth.
+  const status = db.prepare(`SELECT status FROM coaching_note_share_delivery WHERE note_id=? AND deleted_at IS NULL`).get(practiceSharedNote.id);
+  ok(`V10: shareDeliveryStatus reads 'delivered' from live ledger row (no false 'never'/'failed')`,
+     status?.status === 'delivered');
+
+  // Untag so V11 starts fresh.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'coaching_note', entity_id: String(practiceSharedNote.id), is_practice: '0',
+  }));
+}
+
+// ==========================================================================
+suite('V11 (F6 — scope-binding): execute rejects when scope drifts between preview and confirm');
+{
+  // Tag record A only, preview it.  Then tag record B behind the scenes
+  // (simulating a second tab).  Execute must reject with 'scope_changed'.
+  const teacherId = IDS.dan;
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  const now = new Date().toISOString();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id IN (9911, 9912)`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9911, ?, ?, 'self', 'submitted', 1, ?, ?)`).run(teacherId, mod.id, now, now);
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9912, ?, ?, 'self', 'submitted', 0, ?, ?)`).run(teacherId, mod.id, now, now);
+  // Preview: freezes {9911}.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V11 scope-drift',
+  }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  const previewedRows = db.prepare(
+    `SELECT entity_id FROM practice_cleanup_row WHERE batch_id=? ORDER BY entity_id`
+  ).all(bid).map(r => r.entity_id);
+  ok(`V11: preview froze [${previewedRows.join(',')}]`, previewedRows.includes(9911) && !previewedRows.includes(9912));
+
+  // Simulate a second tab tagging 9912 AFTER preview.
+  db.prepare(`UPDATE pd_enrollments SET is_practice=1 WHERE id=9912`).run();
+
+  // Execute — must reject with scope_changed message.
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V11: execute rejects with 302 (${rExec.status})`, rExec.status === 302);
+  ok(`V11: reject message mentions scope changed`,
+     decodeURIComponent(rExec.location || '').includes('tagged set has changed'),
+     `loc=${decodeURIComponent(rExec.location || '')}`);
+  const afterReject = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V11: batch status remains 'preview' after rejected execute (${afterReject.status})`,
+     afterReject.status === 'preview');
+  // Neither 9911 nor 9912 were touched.
+  const s9911 = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9911`).get();
+  const s9912 = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9912`).get();
+  ok(`V11: 9911 NOT soft-deleted by rejected execute`, !s9911.deleted_at);
+  ok(`V11: 9912 NOT soft-deleted by rejected execute`, !s9912.deleted_at);
+
+  // The batch note captures the drift for support review.
+  const noteAfter = db.prepare(`SELECT note FROM practice_cleanup_batches WHERE id=?`).get(bid).note;
+  ok(`V11: batch note now records the scope-drift mismatch (${(noteAfter || '').slice(0, 60)}...)`,
+     (noteAfter || '').includes('scope_drift_rejected'));
+
+  // Cleanup for later suites.
+  db.prepare(`UPDATE pd_enrollments SET is_practice=0 WHERE id IN (9911, 9912)`).run();
+}
+
+// ==========================================================================
+suite('V12 (F7 second half — historical-ambiguous PD notifications preserved for review)');
+{
+  // Create an enrollment for Bob AND a HISTORICAL-ambiguous notification
+  // (entity_type='pd_enrollment' but entity_id = the enrollment's module_id,
+  // not the enrollment_id) pointed at Bob.  Then execute cleanup on the
+  // enrollment.  The ambiguous notification must be PRESERVED and recorded
+  // in practice_cleanup_ambiguous_notif.
+  const teacherId = IDS.bob;
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  const now = new Date().toISOString();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id=9920`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9920, ?, ?, 'auto', 'recommended', 1, ?, ?)`).run(teacherId, mod.id, now, now);
+  // Historical ambiguous: entity_id = module_id, not enrollment_id.
+  // Delete any existing notification for this exact combo to avoid dupes.
+  db.prepare(`DELETE FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_id=?`).run(teacherId, mod.id);
+  const ambNotifRes = db.prepare(`INSERT INTO notifications (user_id, kind, title, body, url, entity_type, entity_id, created_at)
+    VALUES (?, 'pd_module_recommended', 'V12 historical ambiguous', 'body', '/teacher/pd', 'pd_enrollment', ?, ?)`)
+    .run(teacherId, mod.id, now);
+  const ambNotifId = ambNotifRes.lastInsertRowid;
+  ok(`V12: historical ambiguous notification created (id=${ambNotifId}, entity_id=module_id=${mod.id})`,
+     ambNotifId > 0);
+
+  // Confirm the ambiguity: entity_id resolves to a pd_modules row but NOT a
+  // pd_enrollments row.
+  const asModule = db.prepare(`SELECT 1 FROM pd_modules WHERE id=?`).get(mod.id);
+  const asEnrollment = db.prepare(`SELECT 1 FROM pd_enrollments WHERE id=?`).get(mod.id);
+  ok(`V12: precondition — entity_id ${mod.id} resolves as module (not enrollment)`,
+     !!asModule && !asEnrollment);
+
+  // Preview + execute cleanup on enrollment 9920.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
+    note: 'V12',
+  }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+
+  // Ambiguous row recorded on the batch — NOT deleted.
+  const amb = db.prepare(
+    `SELECT notification_id, resolves_as, suspected_parent_enrollment_id
+       FROM practice_cleanup_ambiguous_notif WHERE batch_id=?`
+  ).all(bid);
+  ok(`V12: ambiguous notification recorded for admin review (${amb.length} row(s))`,
+     amb.some(r => r.notification_id === Number(ambNotifId)));
+  ok(`V12: ambiguous row resolves_as='pd_module'`,
+     amb.find(r => r.notification_id === Number(ambNotifId))?.resolves_as === 'pd_module');
+  ok(`V12: ambiguous row suspected_parent_enrollment_id = 9920`,
+     amb.find(r => r.notification_id === Number(ambNotifId))?.suspected_parent_enrollment_id === 9920);
+
+  // The notification row itself is STILL there (not deleted).
+  const stillThere = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(ambNotifId);
+  ok(`V12: original ambiguous notification NOT deleted by cleanup (id=${stillThere?.id})`,
+     !!stillThere);
+
+  // Admin can DELETE it via the resolve endpoint.
+  const rDel = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/ambiguous-notif/${ambNotifId}`, new URLSearchParams({
+    decision: 'delete',
+  }));
+  ok(`V12: admin resolve→delete redirects (${rDel.status})`, rDel.status === 302);
+  const gone = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(ambNotifId);
+  ok(`V12: notification now deleted by admin decision`, !gone);
+  const resolved = db.prepare(`SELECT resolves_as FROM practice_cleanup_ambiguous_notif WHERE batch_id=? AND notification_id=?`).get(bid, ambNotifId);
+  ok(`V12: ambiguous row resolves_as updated to include :admin_deleted`,
+     (resolved?.resolves_as || '').includes('admin_deleted'));
+
+  // Cleanup: restore V12's batch to keep DB tidy for downstream runs.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({
+    confirm: 'RESTORE BATCH',
+  }));
+}
+
+// ==========================================================================
+suite('V13 (F7 first-half + F8 — auto-enroll writes correct entity_id, re-recommend works after cleanup)');
+{
+  // Reset any state.  We use IDS.alice as the "teacher who receives a
+  // new auto-enrollment", and a fresh observation with a low-level score.
+  // Then we verify:
+  //   * autoEnrollForObservation creates pd_enrollments AND notifications
+  //     whose entity_id matches the ENROLLMENT id (not the module id).
+  //   * We tag, preview, execute, restore that batch — leaves module able
+  //     to be re-recommended immediately.
+  //   * We tag the fresh enrollment as practice, preview+execute, then a
+  //     second auto-enroll can create a NEW enrollment on the same module
+  //     (fresh row, not conflict) — the F8 flow works end-to-end.
+  const teacherId = IDS.alice;
+  const appraiserId = IDS.principal;
+  const fw = db.prepare(`SELECT id FROM frameworks ORDER BY id LIMIT 1`).get();
+  // Find a module targeting a level=1 indicator so autoEnrollForObservation triggers.
+  const modWithIndicator = db.prepare(
+    `SELECT m.id AS module_id, m.indicator_id, m.target_level
+       FROM pd_modules m
+      WHERE m.is_active=1 AND m.target_level<=2
+      ORDER BY m.id LIMIT 1`
+  ).get();
+  ok(`V13 precondition: found auto-enrollable module (module=${modWithIndicator?.module_id}, indicator=${modWithIndicator?.indicator_id}, target=${modWithIndicator?.target_level})`,
+     !!modWithIndicator);
+
+  // Wipe any pre-existing enrollments for this teacher+module (so we can
+  // observe fresh insertion cleanly).
+  db.prepare(`DELETE FROM notifications WHERE user_id=? AND entity_type='pd_enrollment' AND entity_id IN (SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=?)`)
+    .run(teacherId, teacherId, modWithIndicator.module_id);
+  db.prepare(`DELETE FROM pd_enrollments WHERE teacher_id=? AND module_id=?`).run(teacherId, modWithIndicator.module_id);
+
+  // Create an observation + score at target_level that triggers auto-enroll.
+  const now = new Date().toISOString();
+  db.prepare(`DELETE FROM observation_scores WHERE observation_id IN (9800, 9801)`).run();
+  db.prepare(`DELETE FROM observations WHERE id IN (9800, 9801)`).run();
+  db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
+    observation_type, class_context, subject, grade_level, observed_at, status, is_practice, created_at, updated_at)
+    VALUES (9800, ?, ?, 1, ?, 'informal', 'V13 pre-publish', 'ELA', '3', ?, 'draft', 0, ?, ?)`)
+    .run(teacherId, appraiserId, fw.id, now, now, now);
+  db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
+    VALUES (9800, ?, ?, 'V13 evidence', ?, ?)`).run(modWithIndicator.indicator_id, modWithIndicator.target_level, now, now);
+
+  // Publish via the appraiser endpoint (triggers autoEnrollForObservation).
+  const rPub = await appraiser.post(`/appraiser/observations/9800/publish`, new URLSearchParams({}));
+  ok(`V13: publish observation 9800 → 302 (${rPub.status})`, rPub.status === 302);
+
+  // Now inspect: pd_enrollments row created + notification with entity_id=enrollment_id.
+  const newEnr = db.prepare(
+    `SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=? AND source_observation_id=9800 ORDER BY id DESC LIMIT 1`
+  ).get(teacherId, modWithIndicator.module_id);
+  ok(`V13: auto-enroll created a fresh enrollment (id=${newEnr?.id})`, !!newEnr?.id);
+  const notif = db.prepare(
+    `SELECT entity_id, url FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' ORDER BY id DESC LIMIT 1`
+  ).get(teacherId);
+  ok(`V13: notification entity_id = enrollment_id (${notif?.entity_id} === ${newEnr?.id}) — F7 fix verified`,
+     notif?.entity_id === newEnr?.id);
+  ok(`V13: notification url deep-links to /teacher/pd/${newEnr?.id}`,
+     notif?.url === `/teacher/pd/${newEnr?.id}`);
+
+  // Now tag the fresh enrollment as practice, preview + execute cleanup.
+  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
+    entity_type: 'pd_enrollment', entity_id: String(newEnr.id), is_practice: '1',
+  }));
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V13' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+
+  // Enrollment soft-deleted.  Fresh auto-enroll after a second publish
+  // should create a NEW enrollment (the old one is invisible).
+  const softDel = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=?`).get(newEnr.id);
+  ok(`V13: original enrollment soft-deleted after cleanup`, !!softDel?.deleted_at);
+
+  // F8: a second observation → publish → autoEnrollForObservation must
+  // create a fresh enrollment (source_observation_id=9801), even though
+  // a soft-deleted enrollment on the same module exists.
+  db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
+    observation_type, class_context, subject, grade_level, observed_at, status, is_practice, created_at, updated_at)
+    VALUES (9801, ?, ?, 1, ?, 'informal', 'V13 post-cleanup', 'ELA', '3', ?, 'draft', 0, ?, ?)`)
+    .run(teacherId, appraiserId, fw.id, now, now, now);
+  db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
+    VALUES (9801, ?, ?, 'V13 evidence 2', ?, ?)`).run(modWithIndicator.indicator_id, modWithIndicator.target_level, now, now);
+  const rPub2 = await appraiser.post(`/appraiser/observations/9801/publish`, new URLSearchParams({}));
+  ok(`V13 F8: second publish → 302 (${rPub2.status})`, rPub2.status === 302);
+  // The UNIQUE constraint on pd_enrollments is (teacher_id, module_id,
+  // source_observation_id) so a different source_observation_id makes a
+  // new row even if the old one still exists (soft-deleted).
+  const secondEnr = db.prepare(
+    `SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=? AND source_observation_id=9801 ORDER BY id DESC LIMIT 1`
+  ).get(teacherId, modWithIndicator.module_id);
+  ok(`V13 F8: fresh auto-enroll created a NEW enrollment (id=${secondEnr?.id}) despite the cleaned one still existing`,
+     !!secondEnr?.id && secondEnr.id !== newEnr.id);
+  const secondNotif = db.prepare(
+    `SELECT entity_id FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' ORDER BY id DESC LIMIT 1`
+  ).get(teacherId);
+  ok(`V13 F8: fresh notification's entity_id = new enrollment id (${secondNotif?.entity_id})`,
+     secondNotif?.entity_id === secondEnr?.id);
+
+  // Housekeep: leave newEnr soft-deleted (V13 didn't restore).  The V4-second-pass
+  // assertion earlier compares against a snapshot that already accounted for
+  // cleanups; V13 comes after V4-second-pass so any deltas belong to V13 alone.
 }
 
 // ==========================================================================

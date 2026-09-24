@@ -61,18 +61,27 @@ export async function autoEnrollForObservation(db: D1Database, observationId: nu
          ORDER BY id LIMIT 3`   // cap at 3 per cell so we don't drown teachers
     ).bind(r.indicator_id, r.level).all();
     for (const m of ((modules.results as any[]) || [])) {
+      // Sept 24, 2026 (F7 fix): use INSERT ... RETURNING id so we can bind
+      // the notification's entity_id to the ACTUAL enrollment id.  The
+      // previous code used INSERT OR IGNORE + last_row_id which returned 0
+      // on conflict, then fell back to `m.id` (the MODULE id).  That left
+      // 'pd_enrollment'-tagged notifications with a module_id payload —
+      // so the practice-cleanup cascade could either miss real practice
+      // notifications OR delete an unrelated notification whose entity_id
+      // happened to equal a module id.
       const ins = await db.prepare(
-        `INSERT OR IGNORE INTO pd_enrollments
+        `INSERT INTO pd_enrollments
            (teacher_id, module_id, source, source_observation_id, source_score_level, status)
-         VALUES (?, ?, 'auto', ?, ?, 'recommended')`
+         VALUES (?, ?, 'auto', ?, ?, 'recommended')
+         ON CONFLICT DO NOTHING
+         RETURNING id`
       ).bind(r.teacher_id, m.id, observationId, r.level).run();
-      if ((ins.meta as any)?.changes) {
+      const returnedRows = ((ins.results as any[]) || []);
+      const wasFreshInsert = returnedRows.length === 1;
+      if (wasFreshInsert) {
+        const enrollmentId = Number(returnedRows[0].id);
         created += 1;
         if (env) {
-          // Score-specific tone (Marshall-aligned):
-          //   1 → priority support (below acceptable performance)
-          //   2 → growth toward Effective (the standard)
-          // (Score 3 never reaches this path — AUTO_ENROLL_THRESHOLD = 2.)
           const body =
             r.level === 1
               ? 'Priority support recommended for this element. This research-based module was added to your PD LMS to help you move toward Effective practice.'
@@ -84,8 +93,11 @@ export async function autoEnrollForObservation(db: D1Database, observationId: nu
             kind: 'pd_module_recommended',
             title: `New PD module: ${m.title}`,
             body,
-            url: `/teacher/pd`,
-            entity_type: 'pd_enrollment', entity_id: m.id,
+            // Deep-link to the specific enrollment so a click on the alert
+            // opens the module workspace, not the generic PD list.
+            url: `/teacher/pd/${enrollmentId}`,
+            entity_type: 'pd_enrollment',
+            entity_id: enrollmentId,     // real enrollment id, not m.id
             actor_user_id: r.appraiser_id,
           }, env);
         }
@@ -520,16 +532,17 @@ export async function getEnrollment(db: D1Database, id: number) {
        JOIN framework_indicators i ON i.id = m.indicator_id
        JOIN framework_domains d ON d.id = i.domain_id
        LEFT JOIN frameworks fr ON fr.id = (SELECT id FROM frameworks WHERE is_active = 1 LIMIT 1)
-       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id
+       LEFT JOIN pd_deliverables de ON de.enrollment_id = e.id AND de.deleted_at IS NULL
        LEFT JOIN pedagogy_library pl_cur ON pl_cur.indicator_id = m.indicator_id AND pl_cur.level = m.target_level
        LEFT JOIN pedagogy_library pl_tgt ON pl_tgt.indicator_id = m.indicator_id AND pl_tgt.level = m.target_level + 1
-       WHERE e.id = ?`
+       WHERE e.id = ? AND e.deleted_at IS NULL`
   ).bind(id).first<any>();
 }
 
 export async function getReflections(db: D1Database, enrollmentId: number) {
   const r = await db.prepare(
-    `SELECT phase, body, created_at FROM pd_reflections WHERE enrollment_id = ? ORDER BY phase`
+    // Practice-cleanup soft-delete: pd_reflections now honors deleted_at.
+    `SELECT phase, body, created_at FROM pd_reflections WHERE enrollment_id = ? AND deleted_at IS NULL ORDER BY phase`
   ).bind(enrollmentId).all();
   return (r.results as any[]) || [];
 }

@@ -220,8 +220,10 @@ app.post('/observations/:id/autosave', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
   // Enforce: only the owning appraiser may auto-save, and only on drafts.
+  // Practice-cleanup: soft-deleted observations reject every write path;
+  // a stale form/browser tab cannot resurrect a cleaned record.
   const o = await c.env.DB.prepare(
-    `SELECT status, appraiser_id FROM observations WHERE id = ?`
+    `SELECT status, appraiser_id FROM observations WHERE id = ? AND deleted_at IS NULL`
   ).bind(id).first<any>();
   if (!o || o.appraiser_id !== user.id) return c.json({ ok: false, err: 'forbidden' }, 403);
   if (!['draft','scored'].includes(o.status)) return c.json({ ok: false, err: 'published' }, 409);
@@ -317,9 +319,9 @@ app.post('/observations/:id/score', async (c) => {
   const rawLevel = body.level;
   const level = (rawLevel === '' || rawLevel === undefined || rawLevel === null) ? null : Number(rawLevel);
   const note = String(body.evidence_note || '');
-  // verify ownership
+  // verify ownership; soft-deleted observations reject all score writes.
   const own = await c.env.DB.prepare(
-    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
   ).bind(id, user.id).first();
   if (!own) return c.text('Forbidden', 403);
   if (level == null) {
@@ -360,7 +362,7 @@ app.post('/observations/:id/bulk-score', async (c) => {
   const scope = String(body.scope || 'domain');                  // 'all' | 'domain'
   const domainCode = String(body.domain_code || '').toUpperCase();
   const own = await c.env.DB.prepare(
-    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
   ).bind(id, user.id).first();
   if (!own) return c.json({ ok: false, err: 'forbidden' }, 403);
   // Find indicators that are currently UNscored.  Scope to the observation's
@@ -561,7 +563,8 @@ app.post('/observations/:id/feedback/save', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
   const own = await c.env.DB.prepare(
-    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
+    // Soft-deleted observations reject feedback writes.
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
   ).bind(id, user.id).first();
   if (!own && user.role !== 'super_admin') return c.text('Forbidden', 403);
   const body = await c.req.parseBody();
@@ -589,7 +592,8 @@ app.post('/observations/:id/feedback/:itemId/delete', async (c) => {
   const id = Number(c.req.param('id'));
   const itemId = Number(c.req.param('itemId'));
   const own = await c.env.DB.prepare(
-    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=?`
+    // Soft-deleted observations reject feedback deletion.
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
   ).bind(id, user.id).first();
   if (!own && user.role !== 'super_admin') return c.text('Forbidden', 403);
   await c.env.DB.prepare(`DELETE FROM feedback_items WHERE id=? AND observation_id=?`).bind(itemId, id).run();
@@ -605,14 +609,17 @@ app.post('/observations/:id/publish', async (c) => {
   if (!sig || !sig.startsWith('data:image/')) {
     return c.redirect(`/appraiser/observations/${id}?msg=Signature+required+to+publish`);
   }
+  // Soft-deleted observations reject publish, so a stale editor tab cannot
+  // resurrect a cleaned observation into a fresh published state that would
+  // re-fire notifications, promote focus_areas, and re-auto-enroll PD.
   const own = await c.env.DB.prepare(
-    `SELECT * FROM observations WHERE id=? AND appraiser_id=?`
+    `SELECT * FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
   ).bind(id, user.id).first<any>();
   if (!own) return c.text('Forbidden', 403);
   await c.env.DB.prepare(
     `UPDATE observations SET appraiser_signature_data=?, appraiser_signed_at=CURRENT_TIMESTAMP,
        status='published', published_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-     WHERE id=?`
+     WHERE id=? AND deleted_at IS NULL`
   ).bind(sig, id).run();
 
   // Promote focus_area feedback items to teacher focus_areas
@@ -681,7 +688,7 @@ app.post('/observations/:id/publish', async (c) => {
 app.post('/observations/:id/delete', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
-  const own = await c.env.DB.prepare(`SELECT * FROM observations WHERE id=? AND appraiser_id=?`).bind(id, user.id).first<any>();
+  const own = await c.env.DB.prepare(`SELECT * FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`).bind(id, user.id).first<any>();
   if (!own) return c.text('Forbidden', 403);
   if (own.status !== 'draft' && own.status !== 'scored') return c.redirect(`/appraiser/observations/${id}?msg=Can+only+delete+drafts`);
   await c.env.DB.prepare(`DELETE FROM observations WHERE id=?`).bind(id).run();
