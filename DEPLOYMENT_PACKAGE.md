@@ -4,9 +4,17 @@
 production migration, application deploy, data change, or setting change is
 applied.
 
-**Pinned release commit:** `aed4bd8` on `feature/data-mgmt-practice-cleanup`
-(this file is updated in the same commit that releases the branch to
-production; do NOT deploy any other commit).
+**Pinned release commit:** tip of `feature/data-mgmt-practice-cleanup`
+at the branch push named in the release notes. Verify with:
+```bash
+git fetch origin
+git rev-parse origin/feature/data-mgmt-practice-cleanup
+```
+Every `git checkout <hash>` and every `--commit-hash <hash>` occurrence
+below must be that exact SHA. Do NOT deploy any other commit and do NOT
+merge the branch into `main` before the release. The examples below
+use `aed4bd8` as a stand-in for that SHA; **replace every occurrence
+before running any deploy step**.
 
 **Target D1 database:**    `alexander-marshall-growth-production`
 **Target Pages project:**  `alexander-marshall-growth`
