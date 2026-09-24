@@ -499,15 +499,106 @@ const teacherSteps: TourStep[] = [
 ];
 
 // ----------------------------------------------------------------------------
+// Teacher-coach merged tour
+//
+// Sept 24, 2026 — a `role='teacher'` user with `can_coach=1` (in production:
+// Tristae Allard, Miranda Quale) has TWO workspaces: their own teacher home
+// AND the coaching workspace at /coach.  The nav bar already reflects this
+// ("My Teaching" + "My Coaching" + "PD Review"), but the guided tour used to
+// return `teacherSteps` only — so a teacher-coach never got a walkthrough of
+// coaching notes, sharing, or the /coach caseload page they use every day.
+//
+// The merged tour stitches teacher + coach steps into one flow:
+//   1. A single teacher-coach intro (replaces both role-specific intros).
+//   2. Teacher body (teacher steps minus intro[0] and terminal "You're all
+//      set").
+//   3. A bridge step that hands off from the teacher side to the coach side.
+//   4. Coach body (coach steps minus intro[0] and terminal "You're all set").
+//   5. One combined "You're all set" outro that names both workspaces.
+//
+// Intro/outro identification is textual (title === "You're all set") so
+// future edits to the underlying arrays don't silently drop the terminal
+// step — if someone renames the outro, the helper leaves the array intact
+// and logs a warning at build time instead of silently emitting a duplicate.
+const TEACHER_COACH_OUTRO_TITLE = "You're all set";
+
+function stripIntroAndOutro(steps: TourStep[], label: string): TourStep[] {
+  // The first step is always introStep(…) — its title starts with "Welcome
+  // to the Marshall Growth Platform".  Terminal step has title === "You're
+  // all set".
+  const startsWithIntro = steps.length > 0 && /^Welcome to the/.test(steps[0].title);
+  const endsWithOutro = steps.length > 0 && steps[steps.length - 1].title === TEACHER_COACH_OUTRO_TITLE;
+  if (!startsWithIntro || !endsWithOutro) {
+    // Defensive: refuse to silently drop content if the invariants slipped.
+    // Merging with an unexpected structure could stutter or hang the tour.
+    console.warn(`tour.ts: ${label} steps have unexpected structure ` +
+      `(intro=${startsWithIntro}, outro=${endsWithOutro}) — returning as-is`);
+    return steps.slice();
+  }
+  return steps.slice(1, -1);
+}
+
+const teacherCoachSteps: TourStep[] = [
+  // 1. Combined intro — replaces the role-specific "Welcome / You're signed
+  //    in as a Teacher" line.  Names both hats up front so the user knows
+  //    what to expect.
+  {
+    page: '/teacher',
+    noHighlight: true,
+    title: 'Welcome to the Marshall Growth Platform',
+    body: `
+      <p>You wear two hats: you're a <strong>Teacher</strong> with your own observations, PD, and focus areas, and you're also an <strong>Instructional Coach</strong> for one or more teachers on your caseload.</p>
+      <p>This tour covers BOTH workspaces. We'll start with your teacher home (about 2 minutes), then hand off to your coaching workspace (about 2 more minutes). Use <strong>Next →</strong> and <strong>← Back</strong> to move through, or <strong>Skip</strong> at any time. You can always restart from <strong>Guided Tour</strong> at the top of the screen.</p>`,
+    hint: 'Keyboard shortcuts work too — press → for next, ← for back, Esc to close.',
+  },
+  // 2. Teacher body (drops teacher intro + teacher outro).
+  ...stripIntroAndOutro(teacherSteps, 'teacherSteps'),
+  // 3. Bridge to the coaching workspace.
+  {
+    page: '/teacher',
+    noHighlight: true,
+    title: "That's your teaching workspace — now your coaching workspace",
+    body: `
+      <p>That covers everything on the <strong>teacher</strong> side. Your <strong>My Teaching</strong>, <strong>Observations</strong>, <strong>Focus Areas</strong>, <strong>My PD LMS</strong>, and <strong>Exports</strong> nav items above all live in this workspace.</p>
+      <p>You also have <strong>My Coaching</strong> and <strong>PD Review</strong> in the nav — that's a completely separate workspace where you coach OTHER teachers. Next steps walk through that side, starting with your coaching caseload.</p>`,
+    hint: 'Nothing you do on the coaching side ever mixes with your own teacher record. Your coaching entries never score you, and your teacher observations never appear to the teachers you coach.',
+  },
+  // 4. Coach body (drops coach intro + coach outro).
+  ...stripIntroAndOutro(coachSteps, 'coachSteps'),
+  // 5. Combined outro naming both workspaces.
+  {
+    page: '/teacher',
+    noHighlight: true,
+    title: "You're all set",
+    body: `
+      <p>You've now seen both sides of your account:</p>
+      <ul>
+        <li><strong>My Teaching</strong> — your own observations, focus areas, PD LMS, and exports. Private to you, your appraiser, and district leadership.</li>
+        <li><strong>My Coaching</strong> — non-evaluative coaching feedback for the teachers on your caseload. Never touches evaluation, never visible to principals.</li>
+      </ul>
+      <p>Re-open this tour any time from the <strong>Guided Tour</strong> button at the top of the screen. Use <strong>Profile</strong> to change your password or notification preferences.</p>`,
+  },
+];
+
+// ----------------------------------------------------------------------------
 // Public getter
 // ----------------------------------------------------------------------------
-export function getTour(role: UserRole): TourStep[] {
+//
+// Sept 24, 2026 — accepts an optional `canCoach` flag so a teacher-coach
+// gets the merged teacher+coach tour instead of just the teacher tour.
+// Callers pass `user.role, user.can_coach` (see src/lib/layout.tsx).  Older
+// call sites that only pass a role still work — they get the pure-role
+// tour, matching pre-fix behavior for pure teachers / pure coaches.
+export function getTour(role: UserRole, canCoach?: number): TourStep[] {
   switch (role) {
     case 'super_admin':    return superAdminSteps;
     case 'superintendent': return superintendentSteps;
     case 'appraiser':      return appraiserSteps;
     case 'coach':          return coachSteps;
-    case 'teacher':        return teacherSteps;
+    case 'teacher':
+      // Teacher-coach (Miranda, Tristae): merged walkthrough of both
+      // workspaces.  Pure teachers get the unchanged teacher tour.
+      return canCoach === 1 ? teacherCoachSteps : teacherSteps;
     default:               return [];
   }
 }

@@ -41,11 +41,22 @@ export function Layout(props: { title: string; user: User | null; children: any;
   // `autoLaunchTour` prop the caller may still be passing (kept for type
   // compatibility) so no future code path can accidentally re-enable
   // auto-launch.
-  const tourSteps = user ? getTour(user.role as any) : [];
+  // Sept 24, 2026 — pass can_coach so teacher-coaches (Miranda, Tristae)
+  // get the merged teacher+coach tour instead of just the teacher tour.
+  // Pure teachers / pure coaches / other roles are unaffected.
+  const tourSteps = user ? getTour(user.role as any, user.can_coach) : [];
+  // Teacher-coaches get a role tag that names both hats in the tour
+  // engine's header ("Step N of M   Teacher & Instructional Coach").
+  // Everyone else gets the pure role label.
+  const displayRoleLabel = user
+    ? (user.role === 'teacher' && user.can_coach === 1
+       ? 'Teacher & Instructional Coach'
+       : roleLabel(user.role))
+    : '';
   const tourPayload = user && tourSteps.length ? {
     userId: user.id,
     role: user.role,
-    roleLabel: roleLabel(user.role),
+    roleLabel: displayRoleLabel,
     autoLaunch: false,
     steps: tourSteps,
   } : null;

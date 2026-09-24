@@ -1824,6 +1824,132 @@ suite('Case 23 — F5c: PD review-revise-verify-credit round-trip works and cred
 }
 
 // ==========================================================================
+suite('Case 29 — teacher-coach guided tour merges teacher + coach steps (Miranda/Tristae case)');
+{
+  // Sept 24, 2026 — a role='teacher' user with can_coach=1 (in prod:
+  // Tristae Allard, Miranda Quale) has BOTH a teacher workspace and a
+  // coaching workspace.  The tour used to return teacherSteps only,
+  // silently dropping the entire coaching walkthrough.  This case
+  // verifies:
+  //   * pure teacher (Alice, can_coach=0) still gets teacher-only tour
+  //   * pure coach (PureCoach, role='coach') still gets coach-only tour
+  //   * teacher-coach (CoachOne, role='teacher' AND can_coach=1) gets
+  //     the MERGED tour containing both role's key selectors, exactly
+  //     one "You're all set" outro, and the combined role label.
+  //
+  // The tour payload is inlined as window.__APS_TOUR__=<JSON>; on every
+  // authenticated page.  We parse it out of the HTML to inspect steps.
+  //
+  // Case 17 above triggers a soft-fallback delete of Alice which kills
+  // her sessions before restoring active=1.  Log her (and everyone else
+  // this case exercises) back in with FRESH clients so a stale cookie
+  // doesn't 302 us to /login and blank out the tour payload.
+  const aliceTour     = await new Client('alice@test',     'AliceTour').login();
+  const pureCoachTour = await new Client('pure.coach@test','PureCoachTour').login();
+  const coachOneTour  = await new Client('coach1@test',    'CoachOneTour').login();
+
+  // Extract the payload JSON from an HTML page's __APS_TOUR__ inline
+  // script.  Returns null if the marker isn't present.
+  function extractTourPayload(html) {
+    const m = html.match(/window\.__APS_TOUR__=(\{[\s\S]*?\});/);
+    if (!m) return null;
+    // The layout escapes '<' to '\u003c' inside the JSON so the closing
+    // </script> can't leak.  JSON.parse handles the \u003c form directly.
+    try { return JSON.parse(m[1]); } catch { return null; }
+  }
+
+  // Reference selectors from tour.ts that anchor teacher- and coach-side
+  // steps.  If either regresses (e.g. a merge accidentally drops one
+  // side), these lookups fail.
+  const TEACHER_ANCHORS = ['t-summary', 't-obs-list', 't-focus', 't-pd-home', 't-coaching-feedback'];
+  const COACH_ANCHORS   = ['co-teachers', 'co-notes'];
+
+  // -- Pure teacher (Alice, can_coach=0) --
+  {
+    const r = await aliceTour.get('/teacher');
+    ok('Alice /teacher 200', r.status === 200, `HTTP ${r.status}`);
+    const p = extractTourPayload(r.text);
+    ok('Alice: tour payload present', !!p, 'no __APS_TOUR__ marker');
+    ok('Alice: role label = "Teacher" (not the teacher-coach label)',
+       !!p && p.roleLabel === 'Teacher', `got '${p?.roleLabel}'`);
+    const selectors = ((p && p.steps) || []).map(s => (s.selector || '').replace(/^\[data-tour="/, '').replace(/"\]$/, ''));
+    for (const anchor of TEACHER_ANCHORS) {
+      ok(`Alice: teacher tour has ${anchor}`, selectors.includes(anchor),
+         `selectors=${JSON.stringify(selectors)}`);
+    }
+    for (const anchor of COACH_ANCHORS) {
+      ok(`Alice: teacher tour does NOT contain coach anchor ${anchor}`, !selectors.includes(anchor));
+    }
+    // Exactly one terminal step titled "You're all set".
+    const outroCount = ((p && p.steps) || []).filter(s => s.title === "You're all set").length;
+    ok(`Alice: exactly one "You're all set" outro (got ${outroCount})`, outroCount === 1);
+  }
+
+  // -- Pure coach (PureCoach, role='coach') --
+  {
+    const r = await pureCoachTour.get('/coach');
+    ok('PureCoach /coach 200', r.status === 200, `HTTP ${r.status}`);
+    const p = extractTourPayload(r.text);
+    ok('PureCoach: tour payload present', !!p, 'no __APS_TOUR__ marker');
+    ok('PureCoach: role label = "Instructional Coach"',
+       !!p && p.roleLabel === 'Instructional Coach', `got '${p?.roleLabel}'`);
+    const selectors = ((p && p.steps) || []).map(s => (s.selector || '').replace(/^\[data-tour="/, '').replace(/"\]$/, ''));
+    for (const anchor of COACH_ANCHORS) {
+      ok(`PureCoach: coach tour has ${anchor}`, selectors.includes(anchor),
+         `selectors=${JSON.stringify(selectors)}`);
+    }
+    for (const anchor of TEACHER_ANCHORS) {
+      ok(`PureCoach: coach tour does NOT contain teacher anchor ${anchor}`, !selectors.includes(anchor));
+    }
+    const outroCount = ((p && p.steps) || []).filter(s => s.title === "You're all set").length;
+    ok(`PureCoach: exactly one "You're all set" outro (got ${outroCount})`, outroCount === 1);
+  }
+
+  // -- Teacher-coach (CoachOne, role='teacher' AND can_coach=1) --
+  {
+    const r = await coachOneTour.get('/teacher');
+    ok('CoachOne /teacher 200', r.status === 200, `HTTP ${r.status}`);
+    const p = extractTourPayload(r.text);
+    ok('CoachOne: tour payload present', !!p, 'no __APS_TOUR__ marker');
+    ok('CoachOne: role label = "Teacher & Instructional Coach"',
+       !!p && p.roleLabel === 'Teacher & Instructional Coach', `got '${p?.roleLabel}'`);
+    const selectors = ((p && p.steps) || []).map(s => (s.selector || '').replace(/^\[data-tour="/, '').replace(/"\]$/, ''));
+    // MUST contain every teacher anchor.
+    for (const anchor of TEACHER_ANCHORS) {
+      ok(`CoachOne (teacher-coach): merged tour includes teacher anchor ${anchor}`, selectors.includes(anchor),
+         `selectors=${JSON.stringify(selectors)}`);
+    }
+    // MUST contain every coach anchor.
+    for (const anchor of COACH_ANCHORS) {
+      ok(`CoachOne (teacher-coach): merged tour includes coach anchor ${anchor}`, selectors.includes(anchor),
+         `selectors=${JSON.stringify(selectors)}`);
+    }
+    // Bridge step between the two halves must exist.
+    const bridgeStep = ((p && p.steps) || []).find(s =>
+      String(s.title || '').startsWith("That's your teaching workspace"));
+    ok('CoachOne (teacher-coach): bridge step present', !!bridgeStep);
+    // Exactly one intro (title starts with "Welcome to") and one outro
+    // ("You're all set") — no duplication from the two source tours.
+    const introCount = ((p && p.steps) || []).filter(s => /^Welcome to/.test(s.title)).length;
+    const outroCount = ((p && p.steps) || []).filter(s => s.title === "You're all set").length;
+    ok(`CoachOne (teacher-coach): exactly one intro step (got ${introCount})`, introCount === 1);
+    ok(`CoachOne (teacher-coach): exactly one outro step (got ${outroCount})`, outroCount === 1);
+    // Merged tour is meaningfully longer than the teacher tour alone.
+    // Teacher tour was ~9 steps; coach tour ~5 steps; merged should be
+    // teacher(7 body) + 1 intro + 1 bridge + coach(4 body) + 1 outro = ~14+.
+    ok(`CoachOne (teacher-coach): merged tour has 10+ steps (got ${(p?.steps || []).length})`,
+       (p?.steps || []).length >= 10);
+    // Same page must serve teacher-coach tour on both /teacher and /coach.
+    const r2 = await coachOneTour.get('/coach');
+    ok('CoachOne /coach 200', r2.status === 200, `HTTP ${r2.status}`);
+    const p2 = extractTourPayload(r2.text);
+    ok('CoachOne on /coach also gets teacher-coach payload (same length)',
+       !!p2 && p2.steps.length === (p?.steps || []).length,
+       `/teacher=${p?.steps?.length} /coach=${p2?.steps?.length}`);
+  }
+}
+
+// ==========================================================================
 suite('Case 27 — RESET PRACTICE DATA sweeps coaching_notes (+audit + share-delivery); observations preserved');
 {
   // Seed a fresh coaching note authored by CoachOne for Alice, share it,
