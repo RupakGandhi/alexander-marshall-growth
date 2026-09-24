@@ -254,9 +254,22 @@ app.post('/observations/:id/autosave', async (c) => {
 });
 
 // ---- Save scripted/private notes and meta
+//
+// Sept 24, 2026 (third-round item 4): reject saves against soft-deleted
+// observations.  Both UPDATE branches now filter deleted_at IS NULL AND
+// carry a pre-check on the active row so a stale editor tab whose
+// observation was cleaned cannot silently succeed (the UPDATE would find
+// zero rows and log a false success).
 app.post('/observations/:id/save', async (c) => {
   const user = c.get('user')!;
   const id = Number(c.req.param('id'));
+  // Pre-check: reject saves against cleaned observations BEFORE parsing
+  // the body.  Uses the same deleted_at IS NULL guard as every other
+  // write endpoint in this file.
+  const own = await c.env.DB.prepare(
+    `SELECT 1 FROM observations WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
+  ).bind(id, user.id).first<any>();
+  if (!own) return c.text('Forbidden', 403);
   const body = await c.req.parseBody();
   const scripted = String(body.scripted_notes || '');
   const priv = String(body.private_notes || '');
@@ -285,19 +298,24 @@ app.post('/observations/:id/save', async (c) => {
       observedAtSql = new Date(utcMs).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
     }
   }
+  // Both UPDATE branches also carry the deleted_at IS NULL guard so a
+  // race between the pre-check and the UPDATE (the observation gets
+  // cleaned by a concurrent admin) leaves the row untouched.  Since the
+  // pre-check already rejected the deleted case, this is defense in
+  // depth.
   if (observedAtSql) {
     await c.env.DB.prepare(
       `UPDATE observations SET scripted_notes=?, private_notes=?, overall_summary=?,
          class_context=?, subject=?, grade_level=?, location=?, duration_minutes=?,
          observed_at=?, updated_at=CURRENT_TIMESTAMP
-       WHERE id=? AND appraiser_id=?`
+       WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
     ).bind(scripted, priv, summary, context, subject, grade, loc, duration, observedAtSql, id, user.id).run();
   } else {
     await c.env.DB.prepare(
       `UPDATE observations SET scripted_notes=?, private_notes=?, overall_summary=?,
          class_context=?, subject=?, grade_level=?, location=?, duration_minutes=?,
          updated_at=CURRENT_TIMESTAMP
-       WHERE id=? AND appraiser_id=?`
+       WHERE id=? AND appraiser_id=? AND deleted_at IS NULL`
     ).bind(scripted, priv, summary, context, subject, grade, loc, duration, id, user.id).run();
   }
   await logActivity(c.env.DB, user.id, 'observation', id, 'save_notes');

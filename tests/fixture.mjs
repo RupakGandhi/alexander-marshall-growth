@@ -77,6 +77,14 @@ db.pragma('foreign_keys = ON');
 // ---- WIPE only the tables our test touches; leave migration state alone ---
 // Order matters (FK-safe teardown).
 const wipeTables = [
+  // Practice-cleanup workflow tables (migrations 0015-0017) — wipe first
+  // so leftover open_claim / manifest rows from a previous test run don't
+  // block new previews with 'concurrent_batch'.  ON DELETE CASCADE from
+  // practice_cleanup_batches cleans the manifest tables automatically,
+  // but we DELETE them explicitly for clarity + safety.
+  'practice_cleanup_ambiguous_notif', 'practice_cleanup_child',
+  'practice_cleanup_row', 'practice_cleanup_open_claim',
+  'practice_cleanup_batches',
   'coaching_note_share_delivery',  // migration 0014 — must wipe before coaching_notes (FK dependency)
   'coaching_note_audit', 'coaching_notes',
   'notifications', 'notification_preferences', 'push_subscriptions',

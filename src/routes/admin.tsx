@@ -9,8 +9,9 @@ import {
 } from '../lib/db';
 import {
   listPracticeCandidates, togglePracticeFlag,
-  previewBatch, executeCleanup, restoreBatch,
+  previewBatch, executeCleanup, restoreBatch, abandonPreview,
   loadBatch, listBatches, resolveAmbiguousNotif,
+  PRACTICE_CLEANUP_MAX_BATCH,
   type EntityType,
 } from '../lib/practice_cleanup';
 // Aug 16, 2026 — Fix: /admin/users/create called `notify(...)` without importing it,
@@ -1573,8 +1574,40 @@ app.post('/data/practice-cleanup/preview', async (c) => {
   } catch (e: any) {
     const msg = e?.message === 'nothing_to_clean'
       ? 'Nothing tagged as practice. Mark records first, then preview.'
+      : e?.message === 'batch_too_large'
+      ? `Preview refused: at most ${PRACTICE_CLEANUP_MAX_BATCH} records can be cleaned in one batch. Untag some records and preview again.`
+      : e?.message === 'concurrent_batch'
+      ? 'Another open preview batch already claims one or more of these records. Complete or abandon that preview first (see the Recent cleanup batches list), then try again.'
       : ('Preview failed: ' + (e?.message || 'unknown error'));
     return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(msg));
+  }
+});
+
+// Abandon a preview batch — releases the ownership claim so those parents
+// become available to a fresh preview.  Phrase guard: "ABANDON PREVIEW".
+app.post('/data/practice-cleanup/batches/:id/abandon', async (c) => {
+  const user = c.get('user')!;
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  const confirm = String(body.confirm || '').trim().toUpperCase();
+  if (confirm !== 'ABANDON PREVIEW') {
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(
+      'You must type "ABANDON PREVIEW" exactly to confirm.'
+    ));
+  }
+  try {
+    await abandonPreview(c.env.DB, id);
+    await logAdminAudit(c.env.DB, user.id, 'practice_cleanup_abandon', {
+      entityType: 'bulk', rowCount: 0,
+      detail: `Preview batch #${id}: abandoned; ownership claims released.`,
+      filters: { batch_id: id },
+    });
+    return c.redirect('/admin/data/practice-cleanup?msg=' + encodeURIComponent(`Preview batch #${id} abandoned.`));
+  } catch (e: any) {
+    const msg = e?.message === 'batch_not_found' ? 'Batch not found.'
+      : e?.message === 'not_a_preview' ? 'Only preview batches can be abandoned. This batch is already executed or restored.'
+      : ('Abandon failed: ' + (e?.message || 'unknown error'));
+    return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg));
   }
 });
 
@@ -1640,7 +1673,8 @@ app.post('/data/practice-cleanup/batches/:id/execute', async (c) => {
       : e?.message === 'already_executed'      ? 'This batch was already executed. Load it to see the results.'
       : e?.message === 'already_restored'      ? 'This batch was executed and then restored. It cannot be executed again — create a fresh preview.'
       : e?.message === 'batch_not_previewable' ? 'This batch is no longer in a preview state.'
-      : e?.message === 'scope_changed'         ? 'The tagged set has changed since you reviewed it. Reload the preview and confirm the current scope, then run again.'
+      : e?.message === 'scope_changed'         ? 'The tagged set or its dependencies changed since you reviewed it. Abandon this preview, review the current scope, and create a fresh preview.'
+      : e?.message === 'batch_too_large'       ? `Cleanup refused: at most ${PRACTICE_CLEANUP_MAX_BATCH} records per batch. Split into multiple runs.`
       : ('Cleanup failed: ' + (e?.message || 'unknown error'));
     return c.redirect(`/admin/data/practice-cleanup/batches/${id}?msg=` + encodeURIComponent(msg));
   }
@@ -3084,6 +3118,20 @@ function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, childre
               </button>
             </form>
           </Card>
+          <div class="mt-4">
+            <Card title="Or abandon this preview" icon="fas fa-xmark">
+              <p class="text-sm text-slate-600 mb-2">
+                Abandon this preview to release its ownership claims on the tagged records. The records themselves are untouched; is_practice tags remain. After abandoning you (or another admin) can create a new preview with a fresh scope.
+              </p>
+              <form method="post" action={`/admin/data/practice-cleanup/batches/${batch.id}/abandon`} onsubmit="return confirm('Abandon this preview? Records are untouched but you must create a new preview to clean them.')">
+                <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">ABANDON PREVIEW</code> to confirm</label>
+                <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
+                <button class="bg-slate-200 text-slate-800 px-3 py-1.5 rounded text-sm hover:bg-slate-300">
+                  <i class="fas fa-xmark mr-1"></i>Abandon preview
+                </button>
+              </form>
+            </Card>
+          </div>
         </div>
       ) : null}
 

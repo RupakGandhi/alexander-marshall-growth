@@ -692,22 +692,20 @@ suite('V8 (F3 — atomicity): a mid-cascade DB failure leaves the batch recovera
      rRestore.status === 302 && rRestore.location && decodeURIComponent(rRestore.location).includes('not in a state that can be restored'),
      `loc=${decodeURIComponent(rRestore.location || '')}`);
 
-  // Untag so V9's scope-drift test starts fresh.
-  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
-    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '0',
+  // Abandon the preview-only batch (releases its open_claim) so a fresh
+  // preview can claim the same tagged parent for the idempotence test.
+  await admin.post(`/admin/data/practice-cleanup/batches/${previewBatchId}/abandon`, new URLSearchParams({
+    confirm: 'ABANDON PREVIEW',
   }));
 
   // Idempotence: a second execute against the SAME preview batch is a no-op
-  // (writer_nonce guard).  We test this by manually executing the previewed
-  // batch and then re-POSTing execute — the second call must not error.
-  // First, retag+preview a fresh set.
-  await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
-    entity_type: 'coaching_note', entity_id: String(practiceDraftNote.id), is_practice: '1',
-  }));
+  // (writer_nonce guard).  Re-preview the still-tagged note.
   const rPrev2 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
     note: 'V8 idempotence',
   }));
   const idBatch2 = Number((rPrev2.location || '').split('/batches/')[1]);
+  ok(`V8: idempotence preview batch created (id=${idBatch2}, redirect=${rPrev2.location?.slice(0, 80)})`,
+     idBatch2 > 0);
   // First execute.
   await admin.post(`/admin/data/practice-cleanup/batches/${idBatch2}/execute`, new URLSearchParams({
     confirm: 'CLEAN PRACTICE DATA',
@@ -899,7 +897,7 @@ suite('V11 (F6 — scope-binding): execute rejects when scope drifts between pre
   }));
   ok(`V11: execute rejects with 302 (${rExec.status})`, rExec.status === 302);
   ok(`V11: reject message mentions scope changed`,
-     decodeURIComponent(rExec.location || '').includes('tagged set has changed'),
+     /tagged set.*changed|scope changed|changed since you reviewed/i.test(decodeURIComponent(rExec.location || '')),
      `loc=${decodeURIComponent(rExec.location || '')}`);
   const afterReject = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
   ok(`V11: batch status remains 'preview' after rejected execute (${afterReject.status})`,
@@ -950,10 +948,25 @@ suite('V12 (F7 second half — historical-ambiguous PD notifications preserved f
   ok(`V12: precondition — entity_id ${mod.id} resolves as module (not enrollment)`,
      !!asModule && !asEnrollment);
 
+  // Isolate this test: untag every other is_practice=1 row so preview
+  // picks up ONLY enrollment 9920.  Also release any leftover open_claim
+  // rows (from an earlier failed preview) that would block a fresh preview.
+  const otherRowsV12 = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL AND id<>9920
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of otherRowsV12) {
+    const t = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${t} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='pd_enrollment' AND entity_id=9920`).run();
+
   // Preview + execute cleanup on enrollment 9920.
   const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({
     note: 'V12',
   }));
+  ok(`V12: preview redirected to batch page (loc=${(rPrev.location || '').slice(0, 80)})`,
+     (rPrev.location || '').includes('/batches/'));
   const bid = Number((rPrev.location || '').split('/batches/')[1]);
   await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
     confirm: 'CLEAN PRACTICE DATA',
@@ -966,10 +979,19 @@ suite('V12 (F7 second half — historical-ambiguous PD notifications preserved f
   ).all(bid);
   ok(`V12: ambiguous notification recorded for admin review (${amb.length} row(s))`,
      amb.some(r => r.notification_id === Number(ambNotifId)));
-  ok(`V12: ambiguous row resolves_as='pd_module'`,
-     amb.find(r => r.notification_id === Number(ambNotifId))?.resolves_as === 'pd_module');
-  ok(`V12: ambiguous row suspected_parent_enrollment_id = 9920`,
-     amb.find(r => r.notification_id === Number(ambNotifId))?.suspected_parent_enrollment_id === 9920);
+  // The recorded resolves_as reflects DETECTION SIGNAL (why we preserved
+  // this row).  For our fixture the ambiguous notification's entity_id
+  // equals the module id (a legitimate module), and that module id is
+  // NOT itself a valid pd_enrollments id → 'pd_module'.  Additionally,
+  // the notification's user_id equals Bob (the enrollment owner), so the
+  // cross-teacher-collision signal does NOT fire.
+  const ambRow = amb.find(r => r.notification_id === Number(ambNotifId));
+  ok(`V12: ambiguous row resolves_as='pd_module' (detected via legacy module-id pattern)`,
+     ambRow?.resolves_as === 'pd_module');
+  // suspected_parent_enrollment_id records the enrollment WE WERE CLEANING
+  // (the batch's parent).  That is 9920 for this fixture.
+  ok(`V12: ambiguous row suspected_parent_enrollment_id = 9920 (the batch's parent enrollment)`,
+     ambRow?.suspected_parent_enrollment_id === 9920);
 
   // The notification row itself is STILL there (not deleted).
   const stillThere = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(ambNotifId);
@@ -996,20 +1018,15 @@ suite('V12 (F7 second half — historical-ambiguous PD notifications preserved f
 // ==========================================================================
 suite('V13 (F7 first-half + F8 — auto-enroll writes correct entity_id, re-recommend works after cleanup)');
 {
-  // Reset any state.  We use IDS.alice as the "teacher who receives a
-  // new auto-enrollment", and a fresh observation with a low-level score.
-  // Then we verify:
-  //   * autoEnrollForObservation creates pd_enrollments AND notifications
-  //     whose entity_id matches the ENROLLMENT id (not the module id).
-  //   * We tag, preview, execute, restore that batch — leaves module able
-  //     to be re-recommended immediately.
-  //   * We tag the fresh enrollment as practice, preview+execute, then a
-  //     second auto-enroll can create a NEW enrollment on the same module
-  //     (fresh row, not conflict) — the F8 flow works end-to-end.
-  const teacherId = IDS.alice;
+  // We use IDS.carol (a teacher not used for the shared/PD cleanup above)
+  // as the "teacher who receives a new auto-enrollment" so V13 doesn't
+  // collide with the notification counts snapshot from V4 second pass.
+  const teacherId = IDS.carol;
   const appraiserId = IDS.principal;
+  // A 1x1 transparent PNG data URI — valid appraiser_signature_data
+  // (publish requires a string starting with "data:image/").
+  const SIG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAAAXRSTlMAQObYZgAAAApJREFUCNdjYAAAAAIAAeIhvDMAAAAASUVORK5CYII=';
   const fw = db.prepare(`SELECT id FROM frameworks ORDER BY id LIMIT 1`).get();
-  // Find a module targeting a level=1 indicator so autoEnrollForObservation triggers.
   const modWithIndicator = db.prepare(
     `SELECT m.id AS module_id, m.indicator_id, m.target_level
        FROM pd_modules m
@@ -1019,13 +1036,25 @@ suite('V13 (F7 first-half + F8 — auto-enroll writes correct entity_id, re-reco
   ok(`V13 precondition: found auto-enrollable module (module=${modWithIndicator?.module_id}, indicator=${modWithIndicator?.indicator_id}, target=${modWithIndicator?.target_level})`,
      !!modWithIndicator);
 
-  // Wipe any pre-existing enrollments for this teacher+module (so we can
-  // observe fresh insertion cleanly).
+  // Isolate: untag every other is_practice=1 row so V13's own preview
+  // (after auto-enroll creates a new enrollment) only picks up the new
+  // enrollment.  Also clear leftover open_claim rows.
+  const otherRowsV13 = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+    UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of otherRowsV13) {
+    const t = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${t} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim`).run();
+
+  // Wipe any pre-existing enrollments for this teacher+module so we can
+  // observe fresh insertion cleanly.
   db.prepare(`DELETE FROM notifications WHERE user_id=? AND entity_type='pd_enrollment' AND entity_id IN (SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=?)`)
     .run(teacherId, teacherId, modWithIndicator.module_id);
   db.prepare(`DELETE FROM pd_enrollments WHERE teacher_id=? AND module_id=?`).run(teacherId, modWithIndicator.module_id);
 
-  // Create an observation + score at target_level that triggers auto-enroll.
   const now = new Date().toISOString();
   db.prepare(`DELETE FROM observation_scores WHERE observation_id IN (9800, 9801)`).run();
   db.prepare(`DELETE FROM observations WHERE id IN (9800, 9801)`).run();
@@ -1036,24 +1065,34 @@ suite('V13 (F7 first-half + F8 — auto-enroll writes correct entity_id, re-reco
   db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
     VALUES (9800, ?, ?, 'V13 evidence', ?, ?)`).run(modWithIndicator.indicator_id, modWithIndicator.target_level, now, now);
 
-  // Publish via the appraiser endpoint (triggers autoEnrollForObservation).
-  const rPub = await appraiser.post(`/appraiser/observations/9800/publish`, new URLSearchParams({}));
+  // Publish with a VALID signature payload so publish actually completes
+  // and autoEnrollForObservation() runs.  The field name is 'signature'
+  // per src/routes/appraiser.tsx line 626 (parseBody + startsWith('data:image/')).
+  const rPub = await principal.post(`/appraiser/observations/9800/publish`, new URLSearchParams({ signature: SIG }));
   ok(`V13: publish observation 9800 → 302 (${rPub.status})`, rPub.status === 302);
+  // Assert actual publication landed.
+  const pubRow = db.prepare(`SELECT status, published_at FROM observations WHERE id=9800`).get();
+  ok(`V13: observation 9800 status='published' (${pubRow?.status})`,
+     pubRow?.status === 'published' && !!pubRow?.published_at);
 
-  // Now inspect: pd_enrollments row created + notification with entity_id=enrollment_id.
+  // Assert new enrollment row.
   const newEnr = db.prepare(
     `SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=? AND source_observation_id=9800 ORDER BY id DESC LIMIT 1`
   ).get(teacherId, modWithIndicator.module_id);
   ok(`V13: auto-enroll created a fresh enrollment (id=${newEnr?.id})`, !!newEnr?.id);
+  // Filter notification by entity_id=newEnr.id so we assert the specific
+  // module's alert (auto-enroll may create multiple enrollments across
+  // sibling modules targeting the same indicator+level; each gets its
+  // own notification whose entity_id = its enrollment id).
   const notif = db.prepare(
-    `SELECT entity_id, url FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' ORDER BY id DESC LIMIT 1`
-  ).get(teacherId);
+    `SELECT entity_id, url FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' AND entity_id=?`
+  ).get(teacherId, newEnr.id);
   ok(`V13: notification entity_id = enrollment_id (${notif?.entity_id} === ${newEnr?.id}) — F7 fix verified`,
      notif?.entity_id === newEnr?.id);
   ok(`V13: notification url deep-links to /teacher/pd/${newEnr?.id}`,
      notif?.url === `/teacher/pd/${newEnr?.id}`);
 
-  // Now tag the fresh enrollment as practice, preview + execute cleanup.
+  // Tag + preview + execute cleanup of the new enrollment.
   await admin.post('/admin/data/practice-cleanup/mark', new URLSearchParams({
     entity_type: 'pd_enrollment', entity_id: String(newEnr.id), is_practice: '1',
   }));
@@ -1063,39 +1102,513 @@ suite('V13 (F7 first-half + F8 — auto-enroll writes correct entity_id, re-reco
     confirm: 'CLEAN PRACTICE DATA',
   }));
 
-  // Enrollment soft-deleted.  Fresh auto-enroll after a second publish
-  // should create a NEW enrollment (the old one is invisible).
   const softDel = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=?`).get(newEnr.id);
   ok(`V13: original enrollment soft-deleted after cleanup`, !!softDel?.deleted_at);
 
-  // F8: a second observation → publish → autoEnrollForObservation must
-  // create a fresh enrollment (source_observation_id=9801), even though
-  // a soft-deleted enrollment on the same module exists.
+  // F8: second publish creates fresh enrollment even though soft-deleted
+  // enrollment on same module exists.
   db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
     observation_type, class_context, subject, grade_level, observed_at, status, is_practice, created_at, updated_at)
     VALUES (9801, ?, ?, 1, ?, 'informal', 'V13 post-cleanup', 'ELA', '3', ?, 'draft', 0, ?, ?)`)
     .run(teacherId, appraiserId, fw.id, now, now, now);
   db.prepare(`INSERT INTO observation_scores (observation_id, indicator_id, level, evidence_note, created_at, updated_at)
     VALUES (9801, ?, ?, 'V13 evidence 2', ?, ?)`).run(modWithIndicator.indicator_id, modWithIndicator.target_level, now, now);
-  const rPub2 = await appraiser.post(`/appraiser/observations/9801/publish`, new URLSearchParams({}));
+  const rPub2 = await principal.post(`/appraiser/observations/9801/publish`, new URLSearchParams({ signature: SIG }));
   ok(`V13 F8: second publish → 302 (${rPub2.status})`, rPub2.status === 302);
-  // The UNIQUE constraint on pd_enrollments is (teacher_id, module_id,
-  // source_observation_id) so a different source_observation_id makes a
-  // new row even if the old one still exists (soft-deleted).
+  const pubRow2 = db.prepare(`SELECT status FROM observations WHERE id=9801`).get();
+  ok(`V13 F8: observation 9801 status='published' (${pubRow2?.status})`, pubRow2?.status === 'published');
+
   const secondEnr = db.prepare(
     `SELECT id FROM pd_enrollments WHERE teacher_id=? AND module_id=? AND source_observation_id=9801 ORDER BY id DESC LIMIT 1`
   ).get(teacherId, modWithIndicator.module_id);
   ok(`V13 F8: fresh auto-enroll created a NEW enrollment (id=${secondEnr?.id}) despite the cleaned one still existing`,
      !!secondEnr?.id && secondEnr.id !== newEnr.id);
   const secondNotif = db.prepare(
-    `SELECT entity_id FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' ORDER BY id DESC LIMIT 1`
-  ).get(teacherId);
+    `SELECT entity_id FROM notifications WHERE user_id=? AND kind='pd_module_recommended' AND entity_type='pd_enrollment' AND entity_id=?`
+  ).get(teacherId, secondEnr.id);
   ok(`V13 F8: fresh notification's entity_id = new enrollment id (${secondNotif?.entity_id})`,
      secondNotif?.entity_id === secondEnr?.id);
+}
 
-  // Housekeep: leave newEnr soft-deleted (V13 didn't restore).  The V4-second-pass
-  // assertion earlier compares against a snapshot that already accounted for
-  // cleanups; V13 comes after V4-second-pass so any deltas belong to V13 alone.
+// ==========================================================================
+suite('V14 (item 1 — full-batch atomicity: injected mid-batch failure rolls back EVERYTHING)');
+{
+  // Simulate a mid-batch DB failure using a temporary RAISE(ABORT) trigger
+  // that fires on the second parent's UPDATE.  We tag TWO parents (a
+  // coaching note and a PD enrollment), preview, install the trigger that
+  // aborts the pd_enrollments UPDATE, then execute.
+  //
+  // Expected:
+  //   * Execute throws / errors.
+  //   * First parent (coaching note) is NOT soft-deleted (rollback).
+  //   * Its children are NOT soft-deleted (rollback).
+  //   * Second parent (pd_enrollment) is NOT soft-deleted (trigger prevented).
+  //   * Batch remains at status='preview' (rollback of status flip).
+  //   * open_claim rows still present (rollback releases them, but batch
+  //     itself remains at preview so a retry can decide to abandon).
+  //   * Retry against same batch id after removing the trigger completes
+  //     successfully.
+
+  // Create fresh isolated parents so this test doesn't collide.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9950`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, next_step, status, is_practice, created_at, updated_at)
+    VALUES (9950, ?, ?, '2026-09-24', 'V14 mid-batch atomicity test', '', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id=9951`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9951, ?, ?, 'self', 'submitted', 1, ?, ?)`).run(t, mod.id, now, now);
+
+  // Ensure clean slate — no lingering claims from earlier tests.
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9950`).run();
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='pd_enrollment' AND entity_id=9951`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V14 atomicity' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  ok(`V14: preview created (id=${bid})`, bid > 0);
+
+  // Install a trigger that aborts the pd_enrollments UPDATE we're about
+  // to run.  BEFORE UPDATE OF deleted_at ON pd_enrollments matches our
+  // soft-delete UPDATE precisely.
+  db.prepare(`DROP TRIGGER IF EXISTS v14_abort_pd_update`).run();
+  db.prepare(`CREATE TRIGGER v14_abort_pd_update
+              BEFORE UPDATE OF deleted_at ON pd_enrollments
+              FOR EACH ROW WHEN NEW.id=9951 AND OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+              BEGIN SELECT RAISE(ABORT, 'v14_injected_failure'); END`).run();
+
+  // Execute — should fail; UI catches and redirects with error message.
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V14: execute redirects (${rExec.status}) — error handling caught the rollback`,
+     rExec.status === 302);
+  const errLoc = decodeURIComponent(rExec.location || '');
+  ok(`V14: redirect message reflects a failure (msg='${errLoc.split('msg=')[1]?.slice(0, 80)}...')`,
+     errLoc.toLowerCase().includes('cleanup failed') || errLoc.toLowerCase().includes('v14_injected_failure'));
+
+  // Now verify the ROLLBACK invariants:
+  const c9950 = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9950`).get();
+  const e9951 = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9951`).get();
+  ok(`V14 ROLLBACK: first parent (coaching_note 9950) NOT soft-deleted (deleted_at='${c9950?.deleted_at}')`,
+     !c9950?.deleted_at);
+  ok(`V14 ROLLBACK: second parent (pd_enrollment 9951) NOT soft-deleted (trigger prevented)`,
+     !e9951?.deleted_at);
+  const batchAfter = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V14 ROLLBACK: batch still at status='preview' (${batchAfter?.status}) — atomic status flip also rolled back`,
+     batchAfter?.status === 'preview');
+  // Manifest rows for THIS batch may or may not exist depending on where
+  // rollback happened; the important invariant is no soft-deletes leaked.
+  const childrenAfter = db.prepare(`SELECT COUNT(*) AS n FROM practice_cleanup_child WHERE batch_id=?`).get(bid).n;
+  ok(`V14 ROLLBACK: no child manifest rows recorded for the rolled-back batch (${childrenAfter})`,
+     childrenAfter === 0);
+
+  // Remove the trigger and retry — same batch id should now execute cleanly.
+  db.prepare(`DROP TRIGGER v14_abort_pd_update`).run();
+  const rRetry = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V14 RETRY: same batch id executes cleanly after trigger removed (${rRetry.status})`,
+     rRetry.status === 302 && (rRetry.location || '').includes(`/batches/${bid}`));
+  const finalState = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V14 RETRY: batch status='executed' after clean retry (${finalState?.status})`,
+     finalState?.status === 'executed');
+  const cFinal = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9950`).get();
+  const eFinal = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9951`).get();
+  ok(`V14 RETRY: both parents now soft-deleted (cn.deleted_at=${!!cFinal?.deleted_at}, enr.deleted_at=${!!eFinal?.deleted_at})`,
+     !!cFinal?.deleted_at && !!eFinal?.deleted_at);
+}
+
+// ==========================================================================
+suite('V15 (item 1 — status-flip failure also rolls back all writes)');
+{
+  // A trigger on practice_cleanup_batches that aborts the final flip
+  // UPDATE.  Even with a single parent, the whole batch must roll back.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9960`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9960, ?, ?, '2026-09-24', 'V15 status-flip atomicity', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9960`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V15 status flip' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+
+  db.prepare(`DROP TRIGGER IF EXISTS v15_abort_flip`).run();
+  db.prepare(`CREATE TRIGGER v15_abort_flip
+              BEFORE UPDATE OF status ON practice_cleanup_batches
+              FOR EACH ROW WHEN NEW.id=${bid} AND NEW.status='executed'
+              BEGIN SELECT RAISE(ABORT, 'v15_flip_failure'); END`).run();
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V15: execute redirects with error (${rExec.status})`, rExec.status === 302);
+  const c9960 = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9960`).get();
+  ok(`V15 ROLLBACK: parent NOT soft-deleted despite writes being staged (deleted_at='${c9960?.deleted_at}')`,
+     !c9960?.deleted_at);
+  const batchAfter = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V15 ROLLBACK: batch still at status='preview' (${batchAfter?.status})`, batchAfter?.status === 'preview');
+
+  db.prepare(`DROP TRIGGER v15_abort_flip`).run();
+  // Clean retry.
+  const rRetry = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V15 RETRY: clean retry succeeds (${rRetry.status})`, rRetry.status === 302);
+  const finalStatus = db.prepare(`SELECT status FROM practice_cleanup_batches WHERE id=?`).get(bid);
+  ok(`V15 RETRY: batch now 'executed' (${finalStatus?.status})`, finalStatus?.status === 'executed');
+}
+
+// ==========================================================================
+suite('V16 (item 2 — dep_fingerprint: child added between preview and execute is rejected)');
+{
+  // Preview a PD enrollment with 0 existing deliverables.  Between preview
+  // and execute, another admin/user adds a deliverable.  Execute must
+  // reject with scope_changed because the dep_fingerprint changed.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  const mod = db.prepare(`SELECT id FROM pd_modules LIMIT 1`).get();
+  db.prepare(`DELETE FROM pd_deliverables WHERE enrollment_id=9970`).run();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id=9970`).run();
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (9970, ?, ?, 'self', 'started', 1, ?, ?)`).run(t, mod.id, now, now);
+  // No deliverables yet — preview should record dep_fingerprint with an
+  // empty child list.
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='pd_enrollment' AND entity_id=9970`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V16 dep drift' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  const depBefore = db.prepare(`SELECT dep_fingerprint FROM practice_cleanup_batches WHERE id=?`).get(bid).dep_fingerprint;
+  ok(`V16: preview captured dep_fingerprint (${(depBefore || '').slice(0, 60)}...)`, !!depBefore);
+
+  // Simulate a mid-flight child add.
+  db.prepare(`INSERT INTO pd_deliverables (id, enrollment_id, title, body, created_at, updated_at)
+    VALUES (99001, 9970, 'V16 late deliverable', 'body', ?, ?)`).run(now, now);
+
+  // Execute must reject with scope_changed.
+  const rExec = await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V16: execute rejects (${rExec.status})`, rExec.status === 302);
+  const errLoc = decodeURIComponent(rExec.location || '');
+  ok(`V16: rejection message mentions scope drift`,
+     /changed since you reviewed it/i.test(errLoc) || /scope/i.test(errLoc),
+     `loc=${errLoc}`);
+
+  // Enrollment untouched.
+  const enrState = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9970`).get();
+  ok(`V16: enrollment 9970 NOT soft-deleted by rejected execute`, !enrState?.deleted_at);
+  const delivState = db.prepare(`SELECT deleted_at FROM pd_deliverables WHERE id=99001`).get();
+  ok(`V16: late-added deliverable 99001 NOT soft-deleted (drift-reject prevented broad-relationship UPDATE)`,
+     !delivState?.deleted_at);
+
+  // Abandon and preview again — should include the late deliverable now.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/abandon`, new URLSearchParams({
+    confirm: 'ABANDON PREVIEW',
+  }));
+  const rPrev2 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V16 refreshed' }));
+  const bid2 = Number((rPrev2.location || '').split('/batches/')[1]);
+  const depAfter = db.prepare(`SELECT dep_fingerprint FROM practice_cleanup_batches WHERE id=?`).get(bid2).dep_fingerprint;
+  ok(`V16: refreshed preview captured NEW dep_fingerprint that differs`,
+     depAfter !== depBefore);
+  // Execute now works.
+  const rExecOk = await admin.post(`/admin/data/practice-cleanup/batches/${bid2}/execute`, new URLSearchParams({
+    confirm: 'CLEAN PRACTICE DATA',
+  }));
+  ok(`V16: refreshed execute succeeds (${rExecOk.status})`,
+     rExecOk.status === 302 && (rExecOk.location || '').includes(`/batches/${bid2}`));
+  // Now both the enrollment AND the late-added deliverable were captured in
+  // the manifest AND soft-deleted.
+  const enrFinal = db.prepare(`SELECT deleted_at FROM pd_enrollments WHERE id=9970`).get();
+  const delivFinal = db.prepare(`SELECT deleted_at FROM pd_deliverables WHERE id=99001`).get();
+  const manifestChild = db.prepare(`SELECT child_id FROM practice_cleanup_child WHERE batch_id=? AND child_id=99001`).get(bid2);
+  ok(`V16: after refreshed execute, enrollment 9970 IS soft-deleted`, !!enrFinal?.deleted_at);
+  ok(`V16: after refreshed execute, deliverable 99001 IS soft-deleted`, !!delivFinal?.deleted_at);
+  ok(`V16: the late-added deliverable IS recorded in the restore manifest`,
+     manifestChild?.child_id === 99001);
+}
+
+// ==========================================================================
+suite('V17 (item 3 — concurrent-execution ownership: two overlapping previews cannot both claim the same parent)');
+{
+  // Tag a fresh parent.  Preview it (locks it in open_claim).  Preview
+  // again while the first is still open → second must reject with
+  // 'concurrent_batch'.  After abandon of the first, second preview works.
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9980`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9980, ?, ?, '2026-09-24', 'V17 concurrent-preview', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9980`).run();
+
+  // Untag everything else so this is the only candidate.
+  const otherTagged = db.prepare(`SELECT id FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL AND id<>9980`).all();
+  for (const r of otherTagged) db.prepare(`UPDATE coaching_notes SET is_practice=0 WHERE id=?`).run(r.id);
+  const otherPd = db.prepare(`SELECT id FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of otherPd) db.prepare(`UPDATE pd_enrollments SET is_practice=0 WHERE id=?`).run(r.id);
+  const otherObs = db.prepare(`SELECT id FROM observations WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of otherObs) db.prepare(`UPDATE observations SET is_practice=0 WHERE id=?`).run(r.id);
+  const otherExt = db.prepare(`SELECT id FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of otherExt) db.prepare(`UPDATE external_pd_submissions SET is_practice=0 WHERE id=?`).run(r.id);
+
+  const rPrev1 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V17 first preview' }));
+  const bid1 = Number((rPrev1.location || '').split('/batches/')[1]);
+  ok(`V17: first preview created (id=${bid1})`, bid1 > 0);
+  const claim = db.prepare(`SELECT batch_id FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9980`).get();
+  ok(`V17: open_claim row present (batch_id=${claim?.batch_id})`, claim?.batch_id === bid1);
+
+  // Second preview must reject with concurrent_batch.
+  const rPrev2 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V17 second concurrent' }));
+  ok(`V17: second preview redirected (${rPrev2.status})`, rPrev2.status === 302);
+  const rejectMsg = decodeURIComponent(rPrev2.location || '');
+  ok(`V17: second preview error message mentions concurrent/open`,
+     /open preview|concurrent/i.test(rejectMsg),
+     `loc=${rejectMsg}`);
+
+  // Abandon first.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid1}/abandon`, new URLSearchParams({
+    confirm: 'ABANDON PREVIEW',
+  }));
+  const claimAfter = db.prepare(`SELECT batch_id FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9980`).get();
+  ok(`V17: abandon released the open_claim (${claimAfter ? 'still present' : 'gone'})`, !claimAfter);
+
+  // Second preview now works.
+  const rPrev3 = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V17 after abandon' }));
+  ok(`V17: after abandon, fresh preview succeeds (${rPrev3.status})`,
+     rPrev3.status === 302 && (rPrev3.location || '').includes('/batches/'));
+  // Clean up.
+  const bid3 = Number((rPrev3.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid3}/abandon`, new URLSearchParams({
+    confirm: 'ABANDON PREVIEW',
+  }));
+}
+
+// ==========================================================================
+suite('V18 (item 3 — restoring an older batch does NOT resurrect records a newer cleanup re-cleaned)');
+{
+  // Batch A cleans record X.  Restore A → X visible.  Tag X again, batch
+  // B cleans X.  Now attempting to restore A must NOT resurrect X (batch
+  // B is now the responsible party; A has no ownership stamp on the
+  // current deleted_at value).
+  const now = new Date().toISOString();
+  const t = IDS.dan;
+  db.prepare(`DELETE FROM coaching_notes WHERE id=9990`).run();
+  db.prepare(`INSERT INTO coaching_notes (id, teacher_id, author_id, occurred_on, glow, status, is_practice, created_at, updated_at)
+    VALUES (9990, ?, ?, '2026-09-24', 'V18 overlapping cleanup+restore', 'draft', 1, ?, ?)`)
+    .run(t, IDS.pureCoach, now, now);
+  // Untag everything else so only 9990 is tagged.
+  const others = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND id<>9990
+                             UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1
+                             UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1
+                             UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1`).all();
+  for (const r of others) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='coaching_note' AND entity_id=9990`).run();
+
+  // Batch A: preview → execute → restore.
+  const rPa = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V18 batch A' }));
+  const bidA = Number((rPa.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bidA}/execute`, new URLSearchParams({ confirm: 'CLEAN PRACTICE DATA' }));
+  const stampA = db.prepare(`SELECT deleted_at_stamp FROM practice_cleanup_row WHERE batch_id=? AND entity_id=9990`).get(bidA)?.deleted_at_stamp;
+  ok(`V18: batch A stamped deleted_at=${stampA}`, !!stampA);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bidA}/restore`, new URLSearchParams({ confirm: 'RESTORE BATCH' }));
+  const afterA = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9990`).get();
+  ok(`V18: after A restore, note is live (${afterA?.deleted_at || 'null'})`, !afterA?.deleted_at);
+
+  // Re-tag and run batch B.
+  db.prepare(`UPDATE coaching_notes SET is_practice=1 WHERE id=9990`).run();
+  const rPb = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V18 batch B' }));
+  const bidB = Number((rPb.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bidB}/execute`, new URLSearchParams({ confirm: 'CLEAN PRACTICE DATA' }));
+  const stampB = db.prepare(`SELECT deleted_at_stamp FROM practice_cleanup_row WHERE batch_id=? AND entity_id=9990`).get(bidB)?.deleted_at_stamp;
+  ok(`V18: batch B stamped deleted_at=${stampB} (different from A: ${stampA !== stampB})`,
+     !!stampB && stampB !== stampA);
+
+  // Sanity: note is deleted with B's stamp, not A's.
+  const curr = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9990`).get().deleted_at;
+  ok(`V18: current deleted_at (${curr}) matches batch B's stamp`, curr === stampB);
+  ok(`V18: current deleted_at does NOT match batch A's stamp`, curr !== stampA);
+
+  // Attempt to restore batch A now.  It has status='restored' — restore
+  // rejects with batch_not_restorable.  But what we're really testing is:
+  // if the batch WERE re-restorable, the guarded UPDATE (WHERE
+  // deleted_at=<stamp A>) would find zero rows and leave X alone.
+  const rRestoreA = await admin.post(`/admin/data/practice-cleanup/batches/${bidA}/restore`, new URLSearchParams({ confirm: 'RESTORE BATCH' }));
+  ok(`V18: re-restore of A rejected as not_restorable (${rRestoreA.status})`,
+     rRestoreA.status === 302 && decodeURIComponent(rRestoreA.location || '').includes('not in a state that can be restored'));
+
+  // Directly manipulate: temporarily unset A's restored status so the
+  // restore path would try to run its UPDATEs.  Verify the stamp-guarded
+  // UPDATE leaves 9990 alone (deleted_at value belongs to batch B).
+  db.prepare(`UPDATE practice_cleanup_batches SET status='executed', restored_at=NULL, restored_by=NULL WHERE id=?`).run(bidA);
+  const rRestoreA2 = await admin.post(`/admin/data/practice-cleanup/batches/${bidA}/restore`, new URLSearchParams({ confirm: 'RESTORE BATCH' }));
+  ok(`V18: re-attempted restore of A returns 302 (${rRestoreA2.status})`, rRestoreA2.status === 302);
+  const afterA2 = db.prepare(`SELECT deleted_at FROM coaching_notes WHERE id=9990`).get().deleted_at;
+  ok(`V18: after re-restore of A, note STILL soft-deleted (batch B remains the responsible party)`,
+     !!afterA2);
+  ok(`V18: note's deleted_at still matches batch B's stamp (${afterA2} === ${stampB})`,
+     afterA2 === stampB);
+}
+
+// ==========================================================================
+suite('V19 (item 4 — cross-teacher notification collision preserved for review)');
+{
+  // Set up the exact scenario from the review:
+  //   Practice enrollment 5 (fake id) belongs to teacher A, module 9.
+  //   Retained enrollment 100 (fake id) belongs to teacher B, module 5.
+  //   Teacher B's historical alert has entity_id=5 (module id of B's
+  //     enrollment, but numerically also matches the practice enrollment id).
+  //   Cleaning practice enrollment 5 must PRESERVE teacher B's alert.
+  //
+  // We use IDS.alice as teacher A, IDS.bob as teacher B.
+  const teacherA = IDS.alice;
+  const teacherB = IDS.bob;
+  const now = new Date().toISOString();
+
+  // Delete stale rows first (respecting FK: notifs → enrollments → modules).
+  db.prepare(`DELETE FROM notifications WHERE entity_type='pd_enrollment' AND entity_id IN (8005, 8100)`).run();
+  db.prepare(`DELETE FROM pd_enrollments WHERE id IN (8005, 8100)`).run();
+  // Insert module 8005 FIRST (safe: no rows reference it after the enrollment
+  // wipe above; pd_modules has no FK backrefs from other tables in the
+  // wipe set).  If module 8005 already exists (previous V19 run), keep it.
+  const modA = db.prepare(`SELECT id FROM pd_modules WHERE id<>8005 ORDER BY id LIMIT 1`).get();
+  const mod8005Exists = db.prepare(`SELECT 1 FROM pd_modules WHERE id=8005`).get();
+  if (!mod8005Exists) {
+    db.prepare(`INSERT INTO pd_modules (id, title, subtitle, is_active, target_level, indicator_id,
+      learn_content, practice_content, apply_content, deliverable_prompt)
+      SELECT 8005, 'V19 test module', 'V19 collision fixture', 1, target_level, indicator_id,
+             learn_content, practice_content, apply_content, deliverable_prompt
+        FROM pd_modules WHERE id=?`).run(modA.id);
+  }
+  // Practice enrollment id=8005 for teacher A on modA (any module).
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (8005, ?, ?, 'self', 'started', 1, ?, ?)`).run(teacherA, modA.id, now, now);
+  // Retained enrollment id=8100 for teacher B on module 8005 — this is
+  // the cross-collision setup (entity_id 8005 is now BOTH a real
+  // enrollment AND a real module).
+  db.prepare(`INSERT INTO pd_enrollments (id, teacher_id, module_id, source, status, is_practice, created_at, updated_at)
+    VALUES (8100, ?, 8005, 'self', 'started', 0, ?, ?)`).run(teacherB, now, now);
+  // Teacher B's historical ambiguous alert: entity_id=8005 (module id of
+  // B's enrollment).  entity_id 8005 ALSO happens to be enrollment 8005
+  // (teacher A's practice).  Recipient user_id=teacherB (Bob), NOT teacher A.
+  const notifBRes = db.prepare(`INSERT INTO notifications (user_id, kind, title, body, url, entity_type, entity_id, created_at)
+    VALUES (?, 'pd_module_recommended', ?, 'body', '/teacher/pd', 'pd_enrollment', 8005, ?)`)
+    .run(teacherB, 'V19 Bob legit alert (looks ambiguous)', now);
+  const notifBId = notifBRes.lastInsertRowid;
+  // Also add teacher A's own notification for enrollment 8005 (unambiguous).
+  const notifARes = db.prepare(`INSERT INTO notifications (user_id, kind, title, body, url, entity_type, entity_id, created_at)
+    VALUES (?, 'pd_module_recommended', ?, 'body', '/teacher/pd/8005', 'pd_enrollment', 8005, ?)`)
+    .run(teacherA, 'V19 Alice practice alert', now);
+  const notifAId = notifARes.lastInsertRowid;
+
+  // Untag everything else so V19's preview only picks up enrollment 8005.
+  const others = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL
+                             UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL AND id<>8005
+                             UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL
+                             UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of others) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='pd_enrollment' AND entity_id=8005`).run();
+
+  // Preview + execute.
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V19 cross-teacher collision' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({ confirm: 'CLEAN PRACTICE DATA' }));
+
+  // Bob's notification must SURVIVE (preserved for admin review).
+  const notifBStill = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(notifBId);
+  ok(`V19: Bob's cross-teacher notification PRESERVED (id=${notifBStill?.id})`,
+     !!notifBStill);
+  const amb = db.prepare(`SELECT resolves_as, user_id FROM practice_cleanup_ambiguous_notif WHERE batch_id=? AND notification_id=?`).get(bid, notifBId);
+  ok(`V19: Bob's notification recorded as ambiguous`, !!amb);
+  ok(`V19: ambiguous row's resolves_as includes 'cross_teacher_collision' (was: '${amb?.resolves_as}')`,
+     (amb?.resolves_as || '').includes('cross_teacher_collision'));
+  ok(`V19: ambiguous row's user_id = teacher B (${amb?.user_id} === ${teacherB})`,
+     amb?.user_id === teacherB);
+  // Alice's own notification (unambiguous owner) IS deleted.
+  const notifAStill = db.prepare(`SELECT id FROM notifications WHERE id=?`).get(notifAId);
+  ok(`V19 NON-COLLISION: Alice's own alert (correct owner) IS deleted`, !notifAStill);
+
+  // Cleanup: restore V19's batch so downstream tests start fresh.
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/restore`, new URLSearchParams({ confirm: 'RESTORE BATCH' }));
+  db.prepare(`DELETE FROM notifications WHERE id=?`).run(notifBId);
+  db.prepare(`DELETE FROM pd_enrollments WHERE id IN (8005, 8100)`).run();
+  // NOTE: leave pd_modules row 8005 in place — later fixture reruns will
+  // wipe it via the standard wipeTables list.  Deleting it here would
+  // race with any lingering FK reference from a leftover ambiguous_notif
+  // row inserted during this test's execute.
+}
+
+// ==========================================================================
+suite('V20 (item 4 — POST /appraiser/observations/:id/save rejects stale writes to cleaned observations)');
+{
+  // Create a practice observation for Bob, publish it via appraiser, then
+  // clean it, then a stale-tab POST to /save must return 403 with no
+  // change to the observation's fields.
+  const teacherId = IDS.bob;
+  const appraiserId = IDS.principal;
+  const fw = db.prepare(`SELECT id FROM frameworks ORDER BY id LIMIT 1`).get();
+  const now = new Date().toISOString();
+  db.prepare(`DELETE FROM observations WHERE id=9502`).run();
+  db.prepare(`INSERT INTO observations (id, teacher_id, appraiser_id, school_year_id, framework_id,
+    observation_type, class_context, subject, grade_level, observed_at, status, is_practice,
+    scripted_notes, private_notes, overall_summary, created_at, updated_at)
+    VALUES (9502, ?, ?, 1, ?, 'informal', 'V20 pre-cleanup', 'ELA', '3', ?, 'draft', 1,
+            'ORIGINAL scripted', 'ORIGINAL private', 'ORIGINAL summary', ?, ?)`)
+    .run(teacherId, appraiserId, fw.id, now, now, now);
+
+  // Tag + preview + execute cleanup on the observation.
+  // Untag other rows first.
+  const others = db.prepare(`SELECT id, 'cn' AS k FROM coaching_notes WHERE is_practice=1 AND deleted_at IS NULL
+                             UNION ALL SELECT id, 'pe' FROM pd_enrollments WHERE is_practice=1 AND deleted_at IS NULL
+                             UNION ALL SELECT id, 'obs' FROM observations WHERE is_practice=1 AND deleted_at IS NULL AND id<>9502
+                             UNION ALL SELECT id, 'ext' FROM external_pd_submissions WHERE is_practice=1 AND deleted_at IS NULL`).all();
+  for (const r of others) {
+    const table = r.k === 'cn' ? 'coaching_notes' : r.k === 'pe' ? 'pd_enrollments' : r.k === 'obs' ? 'observations' : 'external_pd_submissions';
+    db.prepare(`UPDATE ${table} SET is_practice=0 WHERE id=?`).run(r.id);
+  }
+  db.prepare(`DELETE FROM practice_cleanup_open_claim WHERE entity_type='observation' AND entity_id=9502`).run();
+
+  const rPrev = await admin.post('/admin/data/practice-cleanup/preview', new URLSearchParams({ note: 'V20 stale save guard' }));
+  const bid = Number((rPrev.location || '').split('/batches/')[1]);
+  await admin.post(`/admin/data/practice-cleanup/batches/${bid}/execute`, new URLSearchParams({ confirm: 'CLEAN PRACTICE DATA' }));
+  const cleaned = db.prepare(`SELECT deleted_at, scripted_notes FROM observations WHERE id=9502`).get();
+  ok(`V20 precondition: observation 9502 soft-deleted`, !!cleaned?.deleted_at);
+  ok(`V20 precondition: scripted_notes still 'ORIGINAL scripted' (soft-delete preserves fields)`,
+     cleaned?.scripted_notes === 'ORIGINAL scripted');
+
+  // Stale-tab full-form save attempt (all fields present, as a real browser
+  // form would submit).
+  const rSave = await principal.post('/appraiser/observations/9502/save', new URLSearchParams({
+    scripted_notes: 'STALE OVERWRITE scripted',
+    private_notes: 'STALE OVERWRITE private',
+    overall_summary: 'STALE OVERWRITE summary',
+    class_context: 'STALE class',
+    subject: 'STALE subject',
+    grade_level: '9',
+    location: 'STALE location',
+    duration_minutes: '99',
+    observed_at: '2027-01-01T10:00',
+  }));
+  ok(`V20: stale /save returns 403 (${rSave.status})`, rSave.status === 403);
+
+  const after = db.prepare(`SELECT scripted_notes, private_notes, overall_summary, class_context, subject FROM observations WHERE id=9502`).get();
+  ok(`V20: scripted_notes UNCHANGED (${after?.scripted_notes})`, after?.scripted_notes === 'ORIGINAL scripted');
+  ok(`V20: private_notes UNCHANGED`, after?.private_notes === 'ORIGINAL private');
+  ok(`V20: overall_summary UNCHANGED`, after?.overall_summary === 'ORIGINAL summary');
+  ok(`V20: class_context UNCHANGED (still 'V20 pre-cleanup')`, after?.class_context === 'V20 pre-cleanup');
+
+  // Also assert: no save_notes activity was logged for the cleaned obs by
+  // the stale POST (endpoint returned before logActivity ran).
+  const savedLogged = db.prepare(`SELECT COUNT(*) AS n FROM activity_log WHERE entity_type='observation' AND entity_id=9502 AND action='save_notes' AND created_at > ?`).get(cleaned?.deleted_at || now).n;
+  ok(`V20: no save_notes activity logged after cleanup (${savedLogged})`, savedLogged === 0);
 }
 
 // ==========================================================================
