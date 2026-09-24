@@ -190,6 +190,24 @@ const superAdminSteps: TourStep[] = [
       <p><strong>Appraiser</strong> is a <em>role</em> — typically a principal — who is <em>assigned</em> to teachers via the Assignments page. Being the principal of a school does <strong>not</strong> automatically assign you to its teachers; the super-admin picks explicitly who evaluates whom. This lets one principal cover teachers across buildings (very common in small districts) and keeps the eval system separate from staff directory data.</p>`,
   },
   {
+    // Data management + practice-cleanup + non-evaluative coaching feedback
+    // coverage.  This step is the super-admin's counterpart to the coach-
+    // and teacher-side "coaching feedback" tour steps: it explains where
+    // those entries live in the admin toolbox and how to clean them up.
+    page: '/admin/data',
+    noHighlight: true,
+    title: 'Data Management — cleaning up practice content',
+    body: `
+      <p>Three tools cover every kind of demo/practice content you'll accumulate during pilots and training days:</p>
+      <ul>
+        <li><strong>Practice-data cleanup</strong> (top-right of this page) — the surgical tool. Tag <em>individual</em> records (coaching notes, PD activity, external PD, practice observations), preview the exact scope, confirm, and clean them along with their audit rows, delivery ledger, notifications, and matching activity log entries. Every batch has an <strong>undo</strong>.</li>
+        <li><strong>Reset practice data</strong> — the mid-level sweep. Removes PD enrollments, deliverables, external PD submissions, teacher goals, and <strong>non-evaluative coaching feedback</strong> (coaching notes + audit + share-delivery ledger). Observations, users, and rubric are preserved. Honors the soft-delete toggle.</li>
+        <li><strong>Clear all demo data</strong> — the handover wipe. Removes everything the previous two buttons cover <em>plus</em> observations, notifications, and activity log. Users, schools, assignments, rubric, pedagogy library, and PD module library remain untouched.</li>
+      </ul>
+      <p>A coach's <strong>non-evaluative coaching feedback</strong> lives in <code>coaching_notes</code> and is now covered by all three tools — a note the coach shared with a teacher during training is removed along with its audit trail, delivery ledger, and inbox notification whenever you run any of these three cleanups.</p>`,
+    hint: 'Prefer the practice-cleanup workflow whenever possible — it names every record, previews the exact scope, and keeps an undo for 30 days.',
+  },
+  {
     page: '/admin',
     noHighlight: true,
     title: "You're all set",
@@ -336,6 +354,7 @@ const coachSteps: TourStep[] = [
     body: `
       <p>Click any teacher to see:</p>
       <ul>
+        <li><strong>Non-evaluative coaching feedback</strong> — your private notes and shared entries (walked through in the next step).</li>
         <li><strong>Published observations</strong> with the appraiser's glows, grows, and next steps.</li>
         <li><strong>Active focus areas</strong> — the exact indicator you should be coaching to.</li>
         <li>The <strong>pedagogy library's coaching considerations</strong> for that indicator at their current level, so every session has a clear focus.</li>
@@ -343,10 +362,44 @@ const coachSteps: TourStep[] = [
       <p>Coaching is <strong>strictly confidential</strong> — your view never shows private appraiser notes or affects their evaluation.</p>`,
   },
   {
+    // Highlight the "Non-evaluative coaching feedback" card on a real
+    // teacher page.  We link to /coach so the engine lands on the caseload
+    // first; the tour instructs the coach to open any teacher to see it.
+    // The card carries data-tour="co-notes" (id="notes") on both pages.
+    page: '/coach',
+    selector: '[data-tour="co-notes"]',
+    placement: 'auto',
+    title: 'Non-evaluative coaching feedback — the coach\'s own workspace',
+    body: `
+      <p>Every teacher page has a <strong>"Non-evaluative coaching feedback"</strong> card. Click a teacher on your caseload to see it, then use the form to capture the coaching conversation:</p>
+      <ul>
+        <li><strong>Date + optional classroom context</strong> — when and where the conversation happened.</li>
+        <li><strong>Evidence</strong> — low-inference notes on what you noticed.</li>
+        <li><strong>Strengths (glow)</strong>, <strong>Growth opportunity</strong>, and <strong>Agreed next step</strong> — a strength-only entry is fine; you don't have to name a deficiency.</li>
+        <li><strong>Follow-up date</strong> (optional) — a reminder for the next check-in.</li>
+      </ul>
+      <p><strong>Save draft</strong> keeps the entry private to you (and platform support, view-only). <strong>Share with teacher</strong> sends the teacher <em>one</em> notification and makes the entry visible to them — never to other coaches, principals, or district dashboards.</p>
+      <p><strong>These entries are separate from formal observations.</strong> They do not score, do not enroll the teacher in PD, and do not appear in evaluation exports or reports.</p>`,
+    hint: 'Every field auto-saves — no separate "Save" button. Sharing a draft later works too; the notification only ever fires once per note.',
+  },
+  {
+    page: '/coach',
+    noHighlight: true,
+    title: 'How the teacher sees your shared feedback',
+    body: `
+      <p>When you click <strong>Share with teacher</strong>:</p>
+      <ul>
+        <li>The teacher gets a notification titled <em>"[Coach name] shared coaching feedback with you"</em>.</li>
+        <li>Opening it drops them into their workspace at the <strong>"Non-evaluative coaching feedback"</strong> card — a read-only view of your strengths, growth, next step, and follow-up date.</li>
+        <li>Their view never shows drafts, private notes, or entries from other coaches — only what you explicitly shared.</li>
+      </ul>
+      <p>If a shared note needs to be redacted, contact your super administrator — the practice-cleanup workflow can remove a single entry along with its notification and audit trail.</p>`,
+  },
+  {
     page: '/coach',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>That's the coach view — intentionally simple. Re-open the tour any time from the <strong>Guided Tour</strong> button at the top of the screen.</p>`,
+    body: `<p>That's the coach view — a simple caseload plus a private feedback workspace. Re-open the tour any time from the <strong>Guided Tour</strong> button at the top of the screen.</p>`,
   },
 ];
 
@@ -389,6 +442,26 @@ const teacherSteps: TourStep[] = [
     placement: 'auto',
     title: 'Your current focus areas',
     body: `<p>These are the specific indicators your appraiser wants you to work on. Each one links to the pedagogy library's <strong>teacher next moves</strong> and <strong>resources</strong> for that exact indicator at your current level.</p>`,
+  },
+  {
+    // Coaching feedback lives on the teacher home page inside a card
+    // anchored at #coaching-feedback / data-tour="t-coaching-feedback".
+    // Only SHARED entries land here — drafts stay with the coach.
+    page: '/teacher',
+    selector: '[data-tour="t-coaching-feedback"]',
+    placement: 'auto',
+    title: 'Non-evaluative coaching feedback',
+    body: `
+      <p>If you have an instructional coach, this card shows the entries they've chosen to <strong>share</strong> with you — usually after a classroom visit or a coaching conversation. Each entry can include:</p>
+      <ul>
+        <li><strong>What your coach noticed</strong> (evidence from the visit).</li>
+        <li><strong>Strengths</strong> — what worked well.</li>
+        <li><strong>Growth</strong> — what could stretch your practice further.</li>
+        <li><strong>Agreed next step</strong> and an optional <strong>follow-up date</strong>.</li>
+      </ul>
+      <p><strong>This is not an evaluation.</strong> Coaching feedback does not affect your rubric scores, does not enroll you in PD, and is never visible to your principal, other coaches, or the district dashboard. Only you, the authoring coach, and platform support can see it.</p>
+      <p>You'll get a notification the first time each entry is shared — tap the bell in the header to jump straight here.</p>`,
+    hint: 'Your coach can also keep private drafts you never see. Only entries they explicitly click "Share with teacher" appear here.',
   },
   {
     page: '/teacher/pd',

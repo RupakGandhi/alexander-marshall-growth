@@ -1132,6 +1132,8 @@ app.get('/data', async (c) => {
        (SELECT COUNT(*) FROM pd_enrollments WHERE deleted_at IS NOT NULL) AS pd_enrollments_soft_deleted,
        (SELECT COUNT(*) FROM external_pd_submissions)                     AS external_pd,
        (SELECT COUNT(*) FROM external_pd_submissions WHERE deleted_at IS NOT NULL) AS external_pd_soft_deleted,
+       (SELECT COUNT(*) FROM coaching_notes)                              AS coaching_notes,
+       (SELECT COUNT(*) FROM coaching_notes WHERE deleted_at IS NOT NULL) AS coaching_notes_soft_deleted,
        (SELECT COUNT(*) FROM admin_audit_log)                             AS admin_audit_log`
   ).first<any>();
 
@@ -1345,6 +1347,23 @@ app.post('/data/clear-observations', async (c) => {
 // Full demo reset: clear everything above PLUS deactivate non-real users (anything created after seed).
 // Keeps users explicitly created by import (identified by email domains outside of k12.nd.us and
 // alexanderschoolnd.us) untouched — we simply clear the dynamic data. Admin can then delete users manually.
+//
+// Sept 24, 2026 (seventh-review fix) — expanded scope.  The pre-fix version
+// swept only observations + PD enrollments + activity_log.  It intentionally
+// LEFT BEHIND: coaching_notes / coaching_note_audit / coaching_note_share_delivery
+// (migrations 0012–0014), external_pd_submissions, teacher_goals, notifications,
+// and the practice_cleanup workflow scaffolding (migrations 0015–0018).  A
+// district admin who used the button to "hard-wipe all demo data" would still
+// find non-evaluative coaching entries, shared-note inbox pings, previous
+// external-PD submissions, and past cleanup-batch manifests on the "clean"
+// site — with no obvious way to remove them short of raw SQL.
+//
+// This is the "wipe everything before handover" button by design, so it now
+// covers every table where demo/practice content can accumulate.  What is
+// still preserved (unchanged): districts, schools, users, sessions, user
+// settings, user_schools, notification_preferences, push_subscriptions,
+// vapid_keys, system_settings, framework_* (rubric), pedagogy_library,
+// pd_modules + pd_module rubric criteria, school_years, and assignments.
 app.post('/data/clear-all-demo', async (c) => {
   const user = c.get('user')!;
   const body = await c.req.parseBody();
@@ -1361,42 +1380,105 @@ app.post('/data/clear-all-demo', async (c) => {
   // pinned the observation in place — and `DELETE FROM observations` triggered
   // SQLITE_CONSTRAINT_FOREIGNKEY.
   //
-  // FK map (verified against migrations 0001 + 0003 + 0006):
-  //   observation_scores.observation_id    → CASCADE  (safe, but we DELETE explicitly anyway for the audit count)
-  //   feedback_items.observation_id        → CASCADE  (same)
-  //   focus_areas.opened_observation_id    → no CASCADE → must DELETE first
-  //   pd_enrollments.source_observation_id → no CASCADE → must DELETE first  ← was missing
-  //   pd_deliverables.enrollment_id        → CASCADE on pd_enrollments
-  //   pd_reflections.enrollment_id         → CASCADE on pd_enrollments
+  // FK map (verified against migrations 0001 + 0003 + 0006 + 0012 + 0014 + 0015):
+  //   observation_scores.observation_id       → CASCADE  (safe; DELETE explicit for the audit count)
+  //   feedback_items.observation_id           → CASCADE  (same)
+  //   focus_areas.opened_observation_id       → no CASCADE → must DELETE first
+  //   pd_enrollments.source_observation_id    → no CASCADE → must DELETE first
+  //   pd_deliverables.enrollment_id           → CASCADE on pd_enrollments
+  //   pd_reflections.enrollment_id            → CASCADE on pd_enrollments
+  //   pd_deliverable_scores.deliverable_id    → CASCADE on pd_deliverables
+  //   coaching_note_audit.note_id             → CASCADE on coaching_notes
+  //   coaching_note_share_delivery.note_id    → CASCADE on coaching_notes
+  //   practice_cleanup_row.batch_id           → CASCADE on practice_cleanup_batches
+  //   practice_cleanup_child.batch_id         → CASCADE on practice_cleanup_batches
+  //   practice_cleanup_notif_scope.batch_id   → CASCADE on practice_cleanup_batches
+  //   practice_cleanup_ambiguous_notif.batch_id → CASCADE on practice_cleanup_batches
+  //   practice_cleanup_execution_lock         → PRIMARY KEY(batch_id), no FK, wipe explicit
+  //   practice_cleanup_open_claim             → PRIMARY KEY(admin_id), no FK, wipe explicit
   //
-  // So the correct teardown order is: scores/feedback/focus → pd_enrollments
-  // (cascades to deliverables/reflections) → observations → activity_log.
-  await c.env.DB.prepare('DELETE FROM observation_scores').run();
-  await c.env.DB.prepare('DELETE FROM feedback_items').run();
-  await c.env.DB.prepare('DELETE FROM focus_areas').run();
-  // Clear PD enrollments that pin observations in place. Deliverables + reflections
-  // cascade automatically. External PD submissions and teacher goals are NOT
-  // tied to observations and are intentionally preserved here — they belong to
-  // /admin/data/reset-practice-data, which is a separate button by design.
-  const rEnr = await c.env.DB.prepare('DELETE FROM pd_enrollments').run();
-  const rObs = await c.env.DB.prepare('DELETE FROM observations').run();
-  const rAct = await c.env.DB.prepare('DELETE FROM activity_log').run();
+  // Teardown order (all hard-wipes so soft-delete pref is irrelevant):
+  //   1. Observation-graph leaves: scores + feedback + focus_areas
+  //   2. PD enrollments (cascades to deliverables/reflections/scores)
+  //   3. External-PD submissions + teacher goals
+  //   4. Coaching notes (cascades to audit + share_delivery ledger)
+  //   5. Observations
+  //   6. Practice-cleanup workflow scaffolding (batches + their manifests via CASCADE, plus lock + open_claim explicitly)
+  //   7. Notifications + activity_log
+  //
+  // We batch-count changes so the operator sees exactly how much was wiped.
+  const rScores      = await c.env.DB.prepare('DELETE FROM observation_scores').run();
+  const rFeedback    = await c.env.DB.prepare('DELETE FROM feedback_items').run();
+  const rFocus       = await c.env.DB.prepare('DELETE FROM focus_areas').run();
+  // PD enrollments cascade to pd_deliverables → pd_deliverable_scores + pd_reflections.
+  const rEnr         = await c.env.DB.prepare('DELETE FROM pd_enrollments').run();
+  const rExtPd       = await c.env.DB.prepare('DELETE FROM external_pd_submissions').run();
+  const rGoals       = await c.env.DB.prepare('DELETE FROM teacher_goals').run();
+  // Coaching notes (migrations 0012–0014) — every non-evaluative coaching
+  // entry the pilot coaches created, the create/edit/share audit trail, and
+  // the share-delivery ledger.  The audit + delivery tables are ON DELETE
+  // CASCADE from coaching_notes but we DELETE the leaves first so the audit
+  // count is meaningful and the wipe survives even if a future migration
+  // relaxes CASCADE.
+  const rCnAudit     = await c.env.DB.prepare('DELETE FROM coaching_note_audit').run();
+  const rCnDelivery  = await c.env.DB.prepare('DELETE FROM coaching_note_share_delivery').run();
+  const rCn          = await c.env.DB.prepare('DELETE FROM coaching_notes').run();
+  const rObs         = await c.env.DB.prepare('DELETE FROM observations').run();
+  // Practice-cleanup workflow scaffolding (migrations 0015–0018).  Batches
+  // cascade to row/child/notif_scope/ambiguous_notif; the execution_lock
+  // and open_claim tables have no FK and must be swept explicitly.
+  const rPcLock      = await c.env.DB.prepare('DELETE FROM practice_cleanup_execution_lock').run();
+  const rPcOpen      = await c.env.DB.prepare('DELETE FROM practice_cleanup_open_claim').run();
+  const rPcNotif     = await c.env.DB.prepare('DELETE FROM practice_cleanup_notif_scope').run();
+  const rPcAmb       = await c.env.DB.prepare('DELETE FROM practice_cleanup_ambiguous_notif').run();
+  const rPcChild     = await c.env.DB.prepare('DELETE FROM practice_cleanup_child').run();
+  const rPcRow       = await c.env.DB.prepare('DELETE FROM practice_cleanup_row').run();
+  const rPcBatch     = await c.env.DB.prepare('DELETE FROM practice_cleanup_batches').run();
+  // Wipe user-facing notifications last so any residual pings tied to the
+  // records we just deleted are gone from every inbox.  admin_audit_log is
+  // preserved so the operator can see this action in the audit trail.
+  const rNotif       = await c.env.DB.prepare('DELETE FROM notifications').run();
+  const rAct         = await c.env.DB.prepare('DELETE FROM activity_log').run();
+  const changes = (r: any) => (r?.meta as any)?.changes || 0;
+  const detail =
+    `scores=${changes(rScores)} feedback=${changes(rFeedback)} focus=${changes(rFocus)} ` +
+    `pd_enrollments=${changes(rEnr)} external_pd=${changes(rExtPd)} teacher_goals=${changes(rGoals)} ` +
+    `coaching_note_audit=${changes(rCnAudit)} coaching_note_share_delivery=${changes(rCnDelivery)} coaching_notes=${changes(rCn)} ` +
+    `observations=${changes(rObs)} ` +
+    `practice_cleanup_execution_lock=${changes(rPcLock)} practice_cleanup_open_claim=${changes(rPcOpen)} ` +
+    `practice_cleanup_notif_scope=${changes(rPcNotif)} practice_cleanup_ambiguous_notif=${changes(rPcAmb)} ` +
+    `practice_cleanup_child=${changes(rPcChild)} practice_cleanup_row=${changes(rPcRow)} practice_cleanup_batches=${changes(rPcBatch)} ` +
+    `notifications=${changes(rNotif)} activity_log=${changes(rAct)}`;
   const rowCount =
-    ((rEnr.meta as any)?.changes || 0) +
-    ((rObs.meta as any)?.changes || 0) +
-    ((rAct.meta as any)?.changes || 0);
+    changes(rScores) + changes(rFeedback) + changes(rFocus) +
+    changes(rEnr) + changes(rExtPd) + changes(rGoals) +
+    changes(rCnAudit) + changes(rCnDelivery) + changes(rCn) +
+    changes(rObs) +
+    changes(rPcLock) + changes(rPcOpen) + changes(rPcNotif) + changes(rPcAmb) +
+    changes(rPcChild) + changes(rPcRow) + changes(rPcBatch) +
+    changes(rNotif) + changes(rAct);
   await logActivity(c.env.DB, user.id, 'system', 0, 'clear_all_demo');
   await logAdminAudit(c.env.DB, user.id, 'clear_all_demo', {
     entityType: 'bulk', rowCount,
-    detail: 'Wiped observations + PD enrollments (cascading deliverables/reflections) + activity_log (handover reset).',
+    detail: 'Full handover wipe: observations, PD (enrollments+deliverables+reflections+scores), external PD, teacher goals, coaching notes (+audit+delivery), practice-cleanup workflow tables, notifications, activity_log. Users/schools/rubric/pedagogy library/pd_modules/assignments/settings preserved. Counts: ' + detail,
   });
-  return c.redirect('/admin/data?msg=' + encodeURIComponent('All observation data, PD auto-enrollments, and activity log cleared. Users, schools, rubric, pedagogy library, external PD, and teacher goals preserved.'));
+  return c.redirect('/admin/data?msg=' + encodeURIComponent(
+    `All demo data cleared (${rowCount} row${rowCount === 1 ? '' : 's'}): observations, PD activity, coaching notes, external PD submissions, teacher goals, notifications, and past practice-cleanup batches. Users, schools, rubric, pedagogy library, and assignments preserved.`
+  ));
 });
 
 // ----------------------------------------------------------------------------
 // Fix 8 — Reset practice / demo PD data (without touching observations).
 // Targets: pd_enrollments + pd_deliverables + external_pd_submissions +
-// teacher_goals. Phrase guard: "RESET PRACTICE DATA".
+// teacher_goals + coaching_notes (+ audit + share-delivery ledger).
+// Phrase guard: "RESET PRACTICE DATA".
+//
+// Sept 24, 2026 (seventh-review fix) — coaching_notes were missing.  Reset
+// practice data was created for "the district ran a training day, please
+// remove the practice PD activity but keep the observations we scored."
+// Non-evaluative coaching feedback belongs in that same bucket — a coach
+// authoring a note against a teacher during training should not linger on
+// their profile after the reset.  Now covered, honoring the soft-delete pref.
 // ----------------------------------------------------------------------------
 app.post('/data/reset-practice-data', async (c) => {
   const user = c.get('user')!;
@@ -1406,24 +1488,38 @@ app.post('/data/reset-practice-data', async (c) => {
     return c.redirect('/admin/data?msg=' + encodeURIComponent('You must type "RESET PRACTICE DATA" exactly to confirm.'));
   }
   const soft = await readSoftDeletePref(c.env.DB);
+  const changes = (r: any) => (r?.meta as any)?.changes || 0;
   let rowCount = 0;
   if (soft) {
-    const r1 = await c.env.DB.prepare(`UPDATE pd_enrollments         SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
-    const r2 = await c.env.DB.prepare(`UPDATE pd_deliverables        SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
-    const r3 = await c.env.DB.prepare(`UPDATE external_pd_submissions SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
-    const r4 = await c.env.DB.prepare(`UPDATE teacher_goals          SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
-    rowCount = ((r1.meta as any)?.changes || 0) + ((r2.meta as any)?.changes || 0) + ((r3.meta as any)?.changes || 0) + ((r4.meta as any)?.changes || 0);
+    // Soft-path: stamp deleted_at.  Observation-adjacent PD tables that
+    // gained deleted_at in earlier soft-delete migrations, plus the
+    // coaching_note trio from migration 0015 which also added deleted_at.
+    const r1 = await c.env.DB.prepare(`UPDATE pd_enrollments               SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r2 = await c.env.DB.prepare(`UPDATE pd_deliverables              SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r3 = await c.env.DB.prepare(`UPDATE external_pd_submissions     SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r4 = await c.env.DB.prepare(`UPDATE teacher_goals               SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r5 = await c.env.DB.prepare(`UPDATE coaching_note_audit         SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r6 = await c.env.DB.prepare(`UPDATE coaching_note_share_delivery SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    const r7 = await c.env.DB.prepare(`UPDATE coaching_notes              SET deleted_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL`).run();
+    rowCount = changes(r1) + changes(r2) + changes(r3) + changes(r4) + changes(r5) + changes(r6) + changes(r7);
   } else {
+    // Hard-path: DELETE.  Order respects the FK graph:
+    // deliverables/enrollments cascade; coaching_notes cascades to its
+    // audit + share_delivery children (but we DELETE leaves first for clean
+    // per-table counts).
     const r1 = await c.env.DB.prepare(`DELETE FROM pd_deliverables`).run();
     const r2 = await c.env.DB.prepare(`DELETE FROM pd_enrollments`).run();
     const r3 = await c.env.DB.prepare(`DELETE FROM external_pd_submissions`).run();
     const r4 = await c.env.DB.prepare(`DELETE FROM teacher_goals`).run();
-    rowCount = ((r1.meta as any)?.changes || 0) + ((r2.meta as any)?.changes || 0) + ((r3.meta as any)?.changes || 0) + ((r4.meta as any)?.changes || 0);
+    const r5 = await c.env.DB.prepare(`DELETE FROM coaching_note_audit`).run();
+    const r6 = await c.env.DB.prepare(`DELETE FROM coaching_note_share_delivery`).run();
+    const r7 = await c.env.DB.prepare(`DELETE FROM coaching_notes`).run();
+    rowCount = changes(r1) + changes(r2) + changes(r3) + changes(r4) + changes(r5) + changes(r6) + changes(r7);
   }
   await logActivity(c.env.DB, user.id, 'system', 0, soft ? 'soft_reset_practice_data' : 'reset_practice_data');
   await logAdminAudit(c.env.DB, user.id, soft ? 'soft_reset_practice_data' : 'reset_practice_data', {
     entityType: 'bulk', rowCount,
-    detail: `${soft ? 'Soft-' : 'Hard-'}reset of pd_enrollments + pd_deliverables + external_pd_submissions + teacher_goals.`,
+    detail: `${soft ? 'Soft-' : 'Hard-'}reset of pd_enrollments + pd_deliverables + external_pd_submissions + teacher_goals + coaching_notes (+audit + share-delivery ledger).`,
   });
   return c.redirect('/admin/data?msg=' + encodeURIComponent(`${soft ? 'Soft-' : 'Hard-'}reset practice data: ${rowCount} row${rowCount === 1 ? '' : 's'} affected. Observations preserved.`));
 });
@@ -2652,11 +2748,12 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
       </div>
       {msg ? <div class="mb-4 p-3 rounded bg-amber-50 border border-amber-200 text-amber-900 text-sm whitespace-pre-wrap">{msg}</div> : null}
 
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3 mb-6">
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Observations</div><div class="text-2xl font-display text-aps-navy">{counts.observations || 0}</div>{counts.observations_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.observations_soft_deleted} soft-deleted</div> : null}</div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Scores</div><div class="text-2xl font-display text-aps-navy">{counts.scores || 0}</div></div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">PD Enrollments</div><div class="text-2xl font-display text-aps-navy">{counts.pd_enrollments || 0}</div>{counts.pd_enrollments_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.pd_enrollments_soft_deleted} soft-deleted</div> : null}</div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">External PD</div><div class="text-2xl font-display text-aps-navy">{counts.external_pd || 0}</div>{counts.external_pd_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.external_pd_soft_deleted} soft-deleted</div> : null}</div>
+        <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Coaching notes</div><div class="text-2xl font-display text-aps-navy">{counts.coaching_notes || 0}</div>{counts.coaching_notes_soft_deleted ? <div class="text-[11px] text-amber-700 mt-1">{counts.coaching_notes_soft_deleted} soft-deleted</div> : null}</div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Activity log</div><div class="text-2xl font-display text-aps-navy">{counts.activity_log || 0}</div></div>
         <div class="bg-white border border-slate-200 rounded-md p-4"><div class="text-xs text-slate-500">Admin audit</div><div class="text-2xl font-display text-aps-navy">{counts.admin_audit_log || 0}</div></div>
       </div>
@@ -2715,8 +2812,8 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
           </form>
         </Card>
         <Card title="Reset practice data" icon="fas fa-rotate-left">
-          <p class="text-sm text-slate-600 mb-3">Wipes PD enrollments, deliverables, external PD submissions, and teacher goals — <strong>without</strong> touching observations, users, schools, rubric, or pedagogy library. Honors the soft-delete setting above. Use this to reset PD-system practice data after staff training.</p>
-          <form method="post" action="/admin/data/reset-practice-data" onsubmit="return confirm('Reset all PD enrollments, deliverables, external PD, and teacher goals?')">
+          <p class="text-sm text-slate-600 mb-3">Wipes PD enrollments, deliverables, external PD submissions, teacher goals, and <strong>non-evaluative coaching feedback</strong> (coaching notes + their audit + share-delivery ledger) — <strong>without</strong> touching observations, users, schools, rubric, or pedagogy library. Honors the soft-delete setting above. Use this to reset practice data after staff training.</p>
+          <form method="post" action="/admin/data/reset-practice-data" onsubmit="return confirm('Reset all PD enrollments, deliverables, external PD, teacher goals, and coaching notes?')">
             <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">RESET PRACTICE DATA</code> to confirm</label>
             <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
             <button class="bg-sky-700 text-white px-3 py-1.5 rounded text-sm hover:bg-sky-800"><i class="fas fa-rotate-left mr-1"></i>Reset practice data</button>
@@ -2811,8 +2908,8 @@ function DataManagementPage({ user, counts, rows, schools, audit, softDelete, ms
           </form>
         </Card>
         <Card title="Hard-wipe all demo data" icon="fas fa-eraser">
-          <p class="text-sm text-slate-600 mb-3">Permanently wipes all observations <em>plus</em> the activity log — <strong>regardless</strong> of the soft-delete setting. Does not touch users, schools, rubric, or pedagogy library. Use this right before handing the live site to the district.</p>
-          <form method="post" action="/admin/data/clear-all-demo" onsubmit="return confirm('Really HARD-WIPE all demo observation data AND the activity log? This cannot be undone.')">
+          <p class="text-sm text-slate-600 mb-3">Permanently wipes every table that can hold demo/practice content — <strong>regardless</strong> of the soft-delete setting. Cleared: observations (+scores/feedback/focus areas), PD enrollments (+deliverables/reflections), external PD submissions, teacher goals, <strong>non-evaluative coaching feedback</strong> (coaching notes +audit +share-delivery ledger), notifications, activity log, and all practice-cleanup batch history. <strong>Preserved:</strong> users, schools, rubric, pedagogy library, PD module library, assignments, and district settings. Use this right before handing the live site to the district.</p>
+          <form method="post" action="/admin/data/clear-all-demo" onsubmit="return confirm('Really HARD-WIPE all demo data — observations, PD, coaching notes, notifications, and activity log? This cannot be undone.')">
             <label class="block text-xs text-slate-600 mb-1">Type <code class="bg-slate-100 px-1">CLEAR ALL DEMO DATA</code> to confirm</label>
             <input name="confirm" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm mb-2" autocomplete="off" />
             <button class="bg-red-700 text-white px-3 py-1.5 rounded text-sm hover:bg-red-800"><i class="fas fa-eraser mr-1"></i>Clear all demo data</button>

@@ -1279,8 +1279,10 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
           from Published Feedback (below) so the coach entry, the evaluator
           feedback, and the automated PD library never blend into each other.
           Draft = author-only; Shared = author + subject teacher; no other coach
-          or principal sees these entries automatically. */}
-      <div id="notes">
+          or principal sees these entries automatically.
+          data-tour="co-notes" anchors the guided-tour step so the coach's
+          walkthrough highlights this card. */}
+      <div id="notes" data-tour="co-notes">
       <Card title="Non-evaluative coaching feedback" icon="fas fa-comment-medical" class="mb-4">
         <p class="text-xs text-slate-500 italic mb-3">
           <i class="fas fa-info-circle mr-1"></i>

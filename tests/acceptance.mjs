@@ -1824,6 +1824,175 @@ suite('Case 23 — F5c: PD review-revise-verify-credit round-trip works and cred
 }
 
 // ==========================================================================
+suite('Case 27 — RESET PRACTICE DATA sweeps coaching_notes (+audit + share-delivery); observations preserved');
+{
+  // Seed a fresh coaching note authored by CoachOne for Alice, share it,
+  // then run RESET PRACTICE DATA and verify:
+  //   * coaching_notes: 0 active (soft-delete if pref ON, hard-delete otherwise)
+  //   * coaching_note_audit: same
+  //   * coaching_note_share_delivery: same
+  //   * observations: preserved (Alice's seeded obs 100 still there)
+  //   * admin_audit_log: has a reset_practice_data (or soft_ variant) row
+  //     whose detail names coaching_notes
+  //
+  // Case 27 + 28 must run at the very END of the suite because they wipe
+  // fixture state (coaching_notes and — for Case 28 — observations).
+  const noteToken = 'case27-' + Date.now();
+  const create = await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, new URLSearchParams({
+    _token: noteToken,
+    occurred_on: '2026-09-24',
+    class_context: 'Case 27 seed',
+    evidence: 'Case 27 evidence text.',
+    glow: 'Case 27 glow.',
+    _action: 'share',
+  }));
+  ok('Case 27 seed note POST 302', create.status === 302, `HTTP ${create.status}`);
+  const seededCount = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE deleted_at IS NULL`
+  ).get().n;
+  ok('at least one live coaching note before reset', seededCount >= 1, `got ${seededCount}`);
+
+  // Confirm the soft-delete preference so we know which invariant to check.
+  const softPref = Number(
+    db.prepare(`SELECT value FROM system_settings WHERE key='soft_delete_enabled'`).get()?.value ?? 1
+  ) >= 1;
+
+  // Snapshot observation count so we can verify preservation.
+  const obsBefore = db.prepare(
+    `SELECT COUNT(*) AS n FROM observations WHERE deleted_at IS NULL`
+  ).get().n;
+
+  // Run RESET PRACTICE DATA.
+  const reset = await admin.post('/admin/data/reset-practice-data', new URLSearchParams({
+    confirm: 'RESET PRACTICE DATA',
+  }));
+  ok('RESET PRACTICE DATA returns 302', reset.status === 302, `HTTP ${reset.status}`);
+
+  // Coaching notes: no live rows regardless of soft-pref.
+  const cnLive = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_notes WHERE deleted_at IS NULL`
+  ).get().n;
+  ok(`no live coaching notes after reset (got ${cnLive})`, cnLive === 0);
+
+  // Audit + delivery ledger: no live rows.
+  const cnaLive = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_note_audit WHERE deleted_at IS NULL`
+  ).get().n;
+  ok(`no live coaching_note_audit after reset (got ${cnaLive})`, cnaLive === 0);
+  const cnsLive = db.prepare(
+    `SELECT COUNT(*) AS n FROM coaching_note_share_delivery WHERE deleted_at IS NULL`
+  ).get().n;
+  ok(`no live coaching_note_share_delivery after reset (got ${cnsLive})`, cnsLive === 0);
+
+  // Soft-vs-hard-path invariant: if soft, rows must still exist with deleted_at set.
+  if (softPref) {
+    const cnSoft = db.prepare(
+      `SELECT COUNT(*) AS n FROM coaching_notes WHERE deleted_at IS NOT NULL`
+    ).get().n;
+    ok(`soft-delete pref ON → coaching_notes rows preserved with deleted_at (got ${cnSoft})`, cnSoft >= 1);
+  }
+
+  // Observations preserved.
+  const obsAfter = db.prepare(
+    `SELECT COUNT(*) AS n FROM observations WHERE deleted_at IS NULL`
+  ).get().n;
+  ok(`observations preserved (${obsBefore} → ${obsAfter})`, obsAfter === obsBefore);
+
+  // admin_audit_log has a reset_practice_data row whose detail names coaching_notes.
+  const auditRow = db.prepare(
+    `SELECT action, detail FROM admin_audit_log
+      WHERE action IN ('reset_practice_data','soft_reset_practice_data')
+      ORDER BY id DESC LIMIT 1`
+  ).get();
+  ok('reset_practice_data admin_audit_log row exists', !!auditRow, 'no audit row');
+  ok('admin_audit_log detail mentions coaching_notes',
+     !!auditRow && String(auditRow.detail || '').includes('coaching_notes'),
+     `detail='${auditRow?.detail || ''}'`);
+}
+
+// ==========================================================================
+suite('Case 28 — CLEAR ALL DEMO DATA sweeps coaching_notes + observations + notifications + practice_cleanup_*');
+{
+  // Seed a NEW coaching note (Case 27 wiped the previous one) plus an
+  // observation-adjacent notification via the coach-share path.  Then run
+  // CLEAR ALL DEMO DATA and verify EVERYTHING listed in the handover-wipe
+  // scope is empty while users/schools/rubric/pd_modules stay intact.
+  const noteToken = 'case28-' + Date.now();
+  const create = await coachOne.post(`/coach/teachers/${IDS.alice}/notes`, new URLSearchParams({
+    _token: noteToken,
+    occurred_on: '2026-09-24',
+    evidence: 'Case 28 evidence text.',
+    glow: 'Case 28 glow.',
+    _action: 'share',
+  }));
+  ok('Case 28 seed note POST 302', create.status === 302, `HTTP ${create.status}`);
+
+  // Snapshot preserved-side counts BEFORE the wipe.
+  const usersBefore     = db.prepare(`SELECT COUNT(*) AS n FROM users`).get().n;
+  const schoolsBefore   = db.prepare(`SELECT COUNT(*) AS n FROM schools`).get().n;
+  const asnBefore       = db.prepare(`SELECT COUNT(*) AS n FROM assignments`).get().n;
+  const fwBefore        = db.prepare(`SELECT COUNT(*) AS n FROM framework_indicators`).get().n;
+  const pdModsBefore    = db.prepare(`SELECT COUNT(*) AS n FROM pd_modules`).get().n;
+
+  // Run CLEAR ALL DEMO DATA.
+  const wipe = await admin.post('/admin/data/clear-all-demo', new URLSearchParams({
+    confirm: 'CLEAR ALL DEMO DATA',
+  }));
+  ok('CLEAR ALL DEMO DATA returns 302', wipe.status === 302, `HTTP ${wipe.status}`);
+
+  // Every practice/demo table is empty (hard-delete regardless of soft pref).
+  const tablesShouldBeEmpty = [
+    'observation_scores', 'feedback_items', 'focus_areas',
+    'pd_enrollments', 'external_pd_submissions', 'teacher_goals',
+    'coaching_note_audit', 'coaching_note_share_delivery', 'coaching_notes',
+    'observations',
+    'practice_cleanup_execution_lock', 'practice_cleanup_open_claim',
+    'practice_cleanup_notif_scope', 'practice_cleanup_ambiguous_notif',
+    'practice_cleanup_child', 'practice_cleanup_row', 'practice_cleanup_batches',
+    'notifications',
+  ];
+  for (const t of tablesShouldBeEmpty) {
+    const n = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+    ok(`${t} empty after clear-all-demo (got ${n})`, n === 0);
+  }
+  // activity_log gets ONE fresh row from logActivity('system', 0, 'clear_all_demo')
+  // itself — recorded AFTER the DELETE so the wipe leaves an audit trail of
+  // the wipe.  The pre-wipe rows are gone; only this self-referential
+  // 'clear_all_demo' record remains.
+  const actRows = db.prepare(
+    `SELECT COUNT(*) AS n FROM activity_log WHERE action='clear_all_demo'`
+  ).get().n;
+  const actTotal = db.prepare(`SELECT COUNT(*) AS n FROM activity_log`).get().n;
+  ok(`activity_log holds ONLY the clear_all_demo self-record (total=${actTotal}, clear_all_demo=${actRows})`,
+     actTotal === 1 && actRows === 1);
+
+  // Preserved-side invariants: users, schools, assignments, rubric,
+  // pd_modules must be untouched.
+  const usersAfter   = db.prepare(`SELECT COUNT(*) AS n FROM users`).get().n;
+  const schoolsAfter = db.prepare(`SELECT COUNT(*) AS n FROM schools`).get().n;
+  const asnAfter     = db.prepare(`SELECT COUNT(*) AS n FROM assignments`).get().n;
+  const fwAfter      = db.prepare(`SELECT COUNT(*) AS n FROM framework_indicators`).get().n;
+  const pdModsAfter  = db.prepare(`SELECT COUNT(*) AS n FROM pd_modules`).get().n;
+  ok(`users preserved (${usersBefore} → ${usersAfter})`, usersAfter === usersBefore);
+  ok(`schools preserved (${schoolsBefore} → ${schoolsAfter})`, schoolsAfter === schoolsBefore);
+  ok(`assignments preserved (${asnBefore} → ${asnAfter})`, asnAfter === asnBefore);
+  ok(`framework_indicators preserved (${fwBefore} → ${fwAfter})`, fwAfter === fwBefore);
+  ok(`pd_modules preserved (${pdModsBefore} → ${pdModsAfter})`, pdModsAfter === pdModsBefore);
+
+  // admin_audit_log has a clear_all_demo row whose detail lists coaching_notes.
+  // NOTE: activity_log was just wiped, but admin_audit_log is preserved by design.
+  const auditRow = db.prepare(
+    `SELECT action, detail FROM admin_audit_log
+      WHERE action = 'clear_all_demo'
+      ORDER BY id DESC LIMIT 1`
+  ).get();
+  ok('clear_all_demo admin_audit_log row exists', !!auditRow, 'no audit row');
+  ok('admin_audit_log detail mentions coaching_notes',
+     !!auditRow && String(auditRow.detail || '').includes('coaching_notes'),
+     `detail='${auditRow?.detail || ''}'`);
+}
+
+// ==========================================================================
 console.log('\n============================================================');
 console.log(`  ${passed} passed · ${failed} failed`);
 if (failed) {

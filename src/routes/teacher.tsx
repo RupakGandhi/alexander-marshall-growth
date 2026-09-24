@@ -645,8 +645,10 @@ function TeacherHome({ user, summary, enrollments, goals, externalPd, hours, hou
           Only SHARED entries land here (drafts are author-only).  The hash
           #coaching-feedback matches the URL the coach-share notification
           links to, so a teacher tapping "open your workspace" scrolls to
-          this section on load. */}
-      <Card id="coaching-feedback" title="Non-evaluative coaching feedback" icon="fas fa-comment-medical" class="mt-6">
+          this section on load.
+          data-tour="t-coaching-feedback" anchors the guided-tour step so
+          the teacher's walkthrough highlights this card. */}
+      <Card id="coaching-feedback" title="Non-evaluative coaching feedback" icon="fas fa-comment-medical" class="mt-6" data-tour="t-coaching-feedback">
         <p class="text-xs text-slate-500 italic mb-3">
           <i class="fas fa-info-circle mr-1"></i>
           Notes your instructional coach(es) chose to share with you. These are separate from formal observations, do not affect scores or evaluation, and are not visible to principals or the district.
