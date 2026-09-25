@@ -2419,6 +2419,244 @@ suite('Case 31 — principal bulk-assigns external PD to multiple teachers (Aaro
 }
 
 // ==========================================================================
+suite('Case 32 — bulk-assign atomicity, notification isolation, and retry idempotency (independent testing regressions)');
+{
+  // Independent testing of commit 63dcbad found three data-integrity
+  // bugs in the bulk-assign flow.  This case reproduces each one and
+  // asserts the hotfix invariants:
+  //
+  //   32A — RETRY IDEMPOTENCY.  A retry with the SAME _op_id must
+  //   collapse per-row.  Alice must end up with exactly ONE row and
+  //   3.5 hours across two POSTs with the same op_id.
+  //
+  //   32B — INTERRUPTED-SAVE ATOMICITY.  Injecting a RAISE(ABORT)
+  //   trigger on external_pd_submissions that fires during the batch
+  //   must roll back EVERY row.  No teacher gets partial credit.
+  //
+  //   32C — NOTIFICATION FAILURE ISOLATION.  Injecting a
+  //   RAISE(ABORT) trigger on the notifications INSERT for teacher B
+  //   must NOT undo credit for teacher A or B, and MUST NOT halt the
+  //   loop before teacher C is notified.  All 3 rows land; A and C
+  //   get notifications; B's notification silently fails.
+  //
+  // Fresh principal client — Case 17 above soft-fallback-deletes
+  // Alice and revokes her sessions, but principal@test is untouched.
+  const principal = await new Client('principal@test','Principal32').login();
+  const AT = IDS.alice, BT = IDS.bob, CT = IDS.carol;
+
+  // ---- 32A: retry with the SAME _op_id collapses to one row/credit --
+  {
+    const OP = 'case32a-op-' + Date.now();
+    const TITLE = `Case 32A CLA training ${Date.now()}`;
+    const HOURS = 3.5;
+    // Baseline for Alice — count her rows for THIS op_id (should be 0).
+    const preA = db.prepare(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(approved_hours),0) AS h FROM external_pd_submissions
+        WHERE teacher_id=? AND client_op_id=?`
+    ).get(AT, OP);
+    ok(`32A: no pre-existing rows for op=${OP.slice(0,15)}...`, preA.n === 0);
+
+    const form1 = new URLSearchParams();
+    form1.append('_op_id', OP);
+    form1.append('title', TITLE);
+    form1.append('hours', String(HOURS));
+    form1.append('teacher_ids', String(AT));
+    form1.append('teacher_ids', String(BT));
+    const r1 = await principal.post('/appraiser/external-pd/bulk-assign', form1);
+    ok('32A: first submit 302', r1.status === 302);
+    // Retry — exact same body, exact same op_id.
+    const form2 = new URLSearchParams();
+    form2.append('_op_id', OP);
+    form2.append('title', TITLE);
+    form2.append('hours', String(HOURS));
+    form2.append('teacher_ids', String(AT));
+    form2.append('teacher_ids', String(BT));
+    const r2 = await principal.post('/appraiser/external-pd/bulk-assign', form2);
+    ok('32A: retry submit 302', r2.status === 302);
+    ok('32A: retry toast reports duplicate collapse',
+       locHas(r2.location, 'duplicate submit') && locHas(r2.location, 'collapsed'),
+       `loc=${r2.location}`);
+
+    for (const tid of [AT, BT]) {
+      const post = db.prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(approved_hours),0) AS h FROM external_pd_submissions
+          WHERE teacher_id=? AND client_op_id=?`
+      ).get(tid, OP);
+      ok(`32A teacher ${tid}: exactly ONE row after retry (got ${post.n})`, post.n === 1);
+      ok(`32A teacher ${tid}: hours=${HOURS} unchanged after retry (got ${post.h})`,
+         Number(post.h) === HOURS);
+    }
+    // Notification bomb: retry must NOT re-fire the coach_note ping.
+    for (const tid of [AT, BT]) {
+      const notifs = db.prepare(
+        `SELECT COUNT(*) AS n FROM notifications
+          WHERE user_id=? AND kind='external_pd_approved'
+            AND entity_type='external_pd_submission'
+            AND entity_id IN (SELECT id FROM external_pd_submissions
+                              WHERE teacher_id=? AND client_op_id=?)`
+      ).get(tid, tid, OP).n;
+      ok(`32A teacher ${tid}: exactly ONE notification after retry (got ${notifs})`, notifs === 1);
+    }
+  }
+
+  // ---- 32B: interrupted-save atomicity via RAISE(ABORT) trigger -----
+  {
+    const OP = 'case32b-op-' + Date.now();
+    const TITLE = `Case 32B RAISE ABORT ${Date.now()}`;
+    // Install a trigger that aborts any external_pd_submissions INSERT
+    // whose teacher_id is Bob (11).  Alice's INSERT is FIRST in the
+    // batch; without atomicity her row would commit before Bob's fails.
+    db.prepare(`DROP TRIGGER IF EXISTS case32b_abort_ext_pd`).run();
+    db.prepare(`CREATE TRIGGER case32b_abort_ext_pd
+                BEFORE INSERT ON external_pd_submissions
+                FOR EACH ROW WHEN NEW.teacher_id = ${BT} AND NEW.client_op_id = '${OP}'
+                BEGIN SELECT RAISE(ABORT, 'case32b_injected_failure'); END`).run();
+
+    const form = new URLSearchParams();
+    form.append('_op_id', OP);
+    form.append('title', TITLE);
+    form.append('hours', '3.5');
+    form.append('teacher_ids', String(AT));   // would insert first
+    form.append('teacher_ids', String(BT));   // trigger aborts THIS one
+    form.append('teacher_ids', String(CT));   // never reached
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('32B: interrupted-save returns 302 (no server 500)', r.status === 302, `HTTP ${r.status}`);
+    ok('32B: redirect toast says the group save failed and was rolled back',
+       locHas(r.location, 'rolled back') || locHas(r.location, 'failed'),
+       `loc=${r.location}`);
+
+    // Drop trigger before subsequent queries so cleanup doesn't fail.
+    db.prepare(`DROP TRIGGER IF EXISTS case32b_abort_ext_pd`).run();
+
+    // Rollback invariant: ZERO rows for this op_id, for ANY teacher.
+    for (const tid of [AT, BT, CT]) {
+      const n = db.prepare(
+        `SELECT COUNT(*) AS n FROM external_pd_submissions
+          WHERE teacher_id=? AND client_op_id=?`
+      ).get(tid, OP).n;
+      ok(`32B teacher ${tid}: ZERO rows after atomic rollback (got ${n})`, n === 0);
+    }
+    // Alice specifically must not have partial credit — the whole point
+    // of the fix.  Sum across all her rows for this OP:
+    const aliceHours = db.prepare(
+      `SELECT COALESCE(SUM(approved_hours),0) AS h FROM external_pd_submissions
+        WHERE teacher_id=? AND client_op_id=?`
+    ).get(AT, OP).h;
+    ok(`32B: Alice's partial credit was rolled back (hours for this op=${aliceHours})`,
+       Number(aliceHours) === 0);
+    // Notification invariant: no external_pd_approved notification was
+    // fired for this op_id.  We look up notifications by title (bodies
+    // include the title) so we don't false-match earlier ops.
+    for (const tid of [AT, BT, CT]) {
+      const n = db.prepare(
+        `SELECT COUNT(*) AS n FROM notifications
+          WHERE user_id=? AND kind='external_pd_approved' AND body LIKE ?`
+      ).get(tid, '%' + TITLE + '%').n;
+      ok(`32B teacher ${tid}: no notification fired (got ${n})`, n === 0);
+    }
+  }
+
+  // ---- 32C: notification failure isolated to one teacher ------------
+  {
+    const OP = 'case32c-op-' + Date.now();
+    const TITLE = `Case 32C notify fail ${Date.now()}`;
+    const HOURS = 2.0;
+    // Install a trigger that aborts notifications INSERTs targeting
+    // teacher B during THIS op.  We fingerprint on the notification
+    // body (contains the unique TITLE) so we don't affect other tests
+    // running notifications concurrently.
+    db.prepare(`DROP TRIGGER IF EXISTS case32c_abort_notif`).run();
+    db.prepare(`CREATE TRIGGER case32c_abort_notif
+                BEFORE INSERT ON notifications
+                FOR EACH ROW WHEN NEW.user_id = ${BT}
+                                 AND NEW.kind = 'external_pd_approved'
+                                 AND NEW.body LIKE '%${TITLE}%'
+                BEGIN SELECT RAISE(ABORT, 'case32c_injected_notif_failure'); END`).run();
+
+    const form = new URLSearchParams();
+    form.append('_op_id', OP);
+    form.append('title', TITLE);
+    form.append('hours', String(HOURS));
+    form.append('teacher_ids', String(AT));
+    form.append('teacher_ids', String(BT)); // notification will fail for this one
+    form.append('teacher_ids', String(CT));
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('32C: partial-notif-failure returns 302 (no 500)', r.status === 302, `HTTP ${r.status}`);
+
+    // Drop trigger before subsequent queries so cleanup doesn't fail.
+    db.prepare(`DROP TRIGGER IF EXISTS case32c_abort_notif`).run();
+
+    // Toast must acknowledge the notification failure honestly.
+    ok('32C: toast reports "1 notification failed" and "every credit is on record"',
+       locHas(r.location, 'notification failed') && locHas(r.location, 'every credit is on record'),
+       `loc=${r.location}`);
+    ok('32C: toast reports "Notified 2 teachers"', locHas(r.location, 'Notified 2 teacher'),
+       `loc=${r.location}`);
+    ok('32C: toast reports the credit landed for all 3 teachers',
+       locHas(r.location, 'for 3 teachers'), `loc=${r.location}`);
+
+    // Credit invariant: every one of the three teachers has EXACTLY one row and full hours.
+    for (const tid of [AT, BT, CT]) {
+      const row = db.prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(approved_hours),0) AS h FROM external_pd_submissions
+          WHERE teacher_id=? AND client_op_id=?`
+      ).get(tid, OP);
+      ok(`32C teacher ${tid}: exactly ONE row despite notif failure (got ${row.n})`, row.n === 1);
+      ok(`32C teacher ${tid}: full ${HOURS}h credited despite notif failure (got ${row.h})`,
+         Number(row.h) === HOURS);
+    }
+    // Notification invariant: A and C got notifications, B did NOT.
+    for (const [tid, label, expect] of [
+      [AT, 'Alice',   1],
+      [BT, 'Bob',     0],
+      [CT, 'Carol',   1],
+    ]) {
+      const n = db.prepare(
+        `SELECT COUNT(*) AS n FROM notifications
+          WHERE user_id=? AND kind='external_pd_approved' AND body LIKE ?`
+      ).get(tid, '%' + TITLE + '%').n;
+      ok(`32C ${label} (teacher ${tid}): notifications = ${expect} (got ${n})`, n === expect);
+    }
+  }
+
+  // ---- 32D: server-side idempotency when the client omits _op_id ---
+  // If a curl request or a very old cached page POSTs without _op_id,
+  // the server synthesizes one.  Two synthesized ops for two separate
+  // POSTs would legitimately be different events, so we ONLY verify
+  // that omitting _op_id doesn't crash and still writes atomically.
+  {
+    const TITLE = `Case 32D no-op-id ${Date.now()}`;
+    const form = new URLSearchParams();
+    form.append('title', TITLE);
+    form.append('hours', '1.0');
+    form.append('teacher_ids', String(AT));
+    const r = await principal.post('/appraiser/external-pd/bulk-assign', form);
+    ok('32D: missing _op_id still 302 (server synthesizes one)', r.status === 302, `HTTP ${r.status}`);
+    ok('32D: toast reports the row landed', locHas(r.location, 'for 1 teacher'), `loc=${r.location}`);
+    // Row exists with a synthesized op_id (starts with 'srv-')
+    const row = db.prepare(
+      `SELECT client_op_id FROM external_pd_submissions
+        WHERE teacher_id=? AND title=? AND deleted_at IS NULL
+        ORDER BY id DESC LIMIT 1`
+    ).get(AT, TITLE);
+    ok('32D: synthesized op_id present on the row', !!row?.client_op_id);
+    ok(`32D: synthesized op_id starts with 'srv-' (got '${row?.client_op_id?.slice(0,15)}...')`,
+       String(row?.client_op_id || '').startsWith('srv-'));
+  }
+
+  // ---- 32E: form renders with hidden _op_id input for browser retry safety --
+  {
+    const r = await principal.get('/appraiser/external-pd');
+    ok('32E: page renders 200', r.status === 200);
+    ok('32E: form has a hidden _op_id input',
+       /<input[^>]+type="hidden"[^>]+name="_op_id"[^>]+value="[^"]+"/.test(r.text)
+       || /<input[^>]+name="_op_id"[^>]+type="hidden"[^>]+value="[^"]+"/.test(r.text)
+       || /<input[^>]+name="_op_id"[^>]+value="[^"]+"[^>]*\/>/.test(r.text),
+       'no hidden _op_id input in form HTML');
+  }
+}
+
+// ==========================================================================
 suite('Case 27 — RESET PRACTICE DATA sweeps coaching_notes (+audit + share-delivery); observations preserved');
 {
   // Seed a fresh coaching note authored by CoachOne for Alice, share it,

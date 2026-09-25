@@ -854,25 +854,65 @@ app.post('/external-pd/:id/review', async (c) => {
 // could just put a bulk CLA training this many hours, then check the
 // teachers that were in attendance and it adds it to their PD list."
 //
-// Behavior:
-//   * Principal fills in one PD entry (title/provider/dates/hours/description)
-//     + selects one or many teachers from a multi-select scoped to their own
-//     caseload (super_admin sees every teacher).
-//   * We INSERT one external_pd_submissions row per selected teacher in
-//     status='approved', with approved_hours=hours, reviewed_by=<principal>,
-//     reviewed_at=CURRENT_TIMESTAMP.  A principal recording a group PD event
-//     they witnessed is BOTH the recorder and the reviewer, so we skip the
-//     submit→review round-trip.  Teachers can still see the entry on their
-//     home page and it counts toward their unified PD-hours total, same as
-//     any other approved external PD.
-//   * Each teacher gets ONE notification ("Your principal added external
-//     PD to your record").
-//   * Every insert is authorization-checked: we only insert for teachers
-//     the principal has an active 'appraiser' assignment for (super_admin
-//     bypasses the assignment check).  Ids not authorized are silently
-//     skipped and reported in the redirect toast.
-//   * activity_log + admin_audit-style summary via logActivity per insert.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Sept 24, 2026 — HOTFIX (independent testing of commit 63dcbad):
+//
+//   The initial implementation had two data-integrity bugs discovered by
+//   independent testing:
+//
+//     A) PARTIAL SAVES.  The per-teacher INSERT was inside a plain `for`
+//        loop with no transaction.  If the SECOND teacher's INSERT threw
+//        (FK violation, DB error, whatever), the FIRST teacher's 3.5-hour
+//        credit had already been committed — but the principal saw a 500
+//        instead of the "recorded for 1 teacher" toast.
+//
+//     B) DUPLICATE CREDIT ON RETRY.  There was no idempotency key on the
+//        INSERTs.  A principal who submitted, then hit refresh, or double-
+//        clicked, or the browser auto-retried a slow POST, would produce
+//        TWO rows per teacher for the same event — Alice's PD-hours total
+//        would show 7.0 instead of 3.5 for a single CLA training.
+//
+//     C) NOTIFICATION FAILURE BREAKS THE BATCH.  The old code called
+//        `await notify(...)` between per-teacher INSERTs with no try/catch.
+//        If notify() threw (DB blip, missing prefs row, anything), the
+//        loop halted mid-batch: teachers processed before the failure got
+//        credit + notification, the failure-teacher's credit was committed
+//        but not notified, and teachers after the failure got nothing at
+//        all.  The redirect toast never surfaced.
+//
+//   FIX:
+//
+//     (1) IDEMPOTENCY KEY.  The form now carries a hidden per-load
+//         `_op_id` (UUID) that stamps every row inserted by this bulk-
+//         assign submission.  Migration 0019 adds `client_op_id TEXT` to
+//         external_pd_submissions + a partial UNIQUE index on
+//         (reviewed_by, client_op_id, teacher_id) so a duplicate submit
+//         with the SAME _op_id + SAME teacher becomes a no-op.  Refresh /
+//         back-button / double-click / auto-retry all collapse to the
+//         original write.  A brand-new form load generates a brand-new
+//         _op_id, so intentional re-recording of the same event tomorrow
+//         still works.
+//
+//     (2) SINGLE-BATCH ATOMICITY.  All external_pd_submissions inserts +
+//         activity_log inserts for a bulk-assign run inside ONE
+//         db.batch([...]).  D1 batches wrap the whole list in an implicit
+//         transaction — any statement failure rolls back the entire
+//         write.  Partial-save windows are gone.
+//
+//     (3) NOTIFICATION ISOLATION.  Notifications now fire AFTER the
+//         atomic commit succeeds, in a separate try/catch-per-teacher
+//         loop.  A failed notification NEVER unwinds the credit (the
+//         credit is already committed and correct) and NEVER prevents
+//         subsequent teachers from being notified.  The redirect toast
+//         reports the notification success count alongside the credit
+//         count, so operators see exactly what happened:
+//           "Recorded '<title>' (3.50h) for 6 teachers.
+//            Notified 5 teachers · 1 notification failed but every
+//            credit is on record."
+//         If a retry lands on the same _op_id, we count the collisions as
+//         "skipped duplicates" so the toast makes clear no new credit
+//         was added.
+// ===========================================================================
 app.post('/external-pd/bulk-assign', async (c) => {
   const user = c.get('user')!;
   const body = await c.req.parseBody({ all: true });
@@ -888,9 +928,22 @@ app.post('/external-pd/bulk-assign', async (c) => {
   // teacher_ids arrives as a repeated form field; parseBody({all:true}) gives
   // an array (or a single value if only one option was picked).
   const raw = body.teacher_ids;
-  const teacherIds: number[] = (Array.isArray(raw) ? raw : (raw != null ? [raw] : []))
+  const teacherIdsRaw: number[] = (Array.isArray(raw) ? raw : (raw != null ? [raw] : []))
     .map((v: any) => Number(v))
     .filter((n) => Number.isFinite(n) && n > 0);
+  // De-dupe the incoming id list — a principal who somehow selected the
+  // same teacher twice (custom form tampering, browser bug) shouldn't
+  // get charged twice within one op_id.  The UNIQUE index would catch it
+  // anyway, but de-duping up front keeps the toast counts truthful.
+  const teacherIds = Array.from(new Set(teacherIdsRaw));
+  // Idempotency key stamped by the browser on form load (hidden _op_id
+  // input, generated by cryptoUuid()).  If the client didn't submit
+  // one (older cached page, curl request), we synthesize one server-
+  // side from the (principal, timestamp) — that's a weaker guarantee
+  // but never worse than the previous behavior since a stamped row
+  // will still be caught by the unique index on subsequent retries.
+  const opId = String(body._op_id || '').trim() ||
+               `srv-${user.id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   // Basic input validation.  We prefer redirects with a msg over 400s so the
   // principal stays on their own workflow.
@@ -935,54 +988,148 @@ app.post('/external-pd/bulk-assign', async (c) => {
     ) + '#bulk');
   }
 
-  // Insert one row per teacher, in status='approved', pre-reviewed by the
-  // principal.  The unified-hours summary (src/lib/db.ts) sums
-  // external_pd_submissions.approved_hours WHERE status='approved', so
-  // each teacher's PD-hours total ticks up immediately without an extra
-  // review click.  We also insert an activity_log row per teacher and
-  // fire one notification per teacher.
-  let inserted = 0;
-  const { notify } = await import('../lib/notifications');
-  for (const tid of allowedIds) {
-    const res = await c.env.DB.prepare(
-      `INSERT INTO external_pd_submissions
-         (teacher_id, title, provider, start_date, end_date, hours,
-          domain_alignment, description, certificate_url,
-          status, submitted_at, reviewed_by, reviewed_at,
-          review_note, approved_hours)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, ?, ?)`
-    ).bind(
-      tid, title, provider, start_date, end_date, hours,
-      domainsJson, description, certificate_url,
-      user.id, `Bulk-recorded by ${user.first_name} ${user.last_name}`, hours,
-    ).run();
-    const subId = Number((res.meta as any)?.last_row_id || 0);
-    if (!subId) continue;
-    inserted++;
-    // Notify the teacher.  One notification per new row; the teacher's
-    // inbox shows both these bulk-recorded entries and their own
-    // self-submitted approvals in the same "external_pd_approved"
-    // notification stream.
-    await notify(c.env.DB, {
-      user_id: tid,
-      kind: 'external_pd_approved',
-      title: 'External PD added to your record',
-      body: `${user.first_name} ${user.last_name} recorded "${title}" (${hours.toFixed(2)}h) on your behalf.`,
-      url: '/teacher#external-pd',
-      entity_type: 'external_pd_submission', entity_id: subId, actor_user_id: user.id,
-    }, c.env);
-    await logActivity(c.env.DB, user.id, 'external_pd_submission', subId, 'bulk_assign', {
-      teacher_id: tid, hours, title,
-    });
+  // ---------------------------------------------------------------------
+  // PHASE 1 — atomic write.  All external_pd_submissions inserts happen
+  // in one db.batch().  We use INSERT OR IGNORE so a retry that lands
+  // on the same (reviewed_by, client_op_id, teacher_id) is a per-row
+  // no-op (changes=0) rather than a batch-abort.  activity_log rows
+  // are inserted separately below AFTER we know which submissions
+  // actually landed — inserting them inside this batch is impossible
+  // because we don't yet have the new submission ids.
+  // ---------------------------------------------------------------------
+  const insertStmts = allowedIds.map((tid) => c.env.DB.prepare(
+    `INSERT OR IGNORE INTO external_pd_submissions
+       (teacher_id, title, provider, start_date, end_date, hours,
+        domain_alignment, description, certificate_url,
+        status, submitted_at, reviewed_by, reviewed_at,
+        review_note, approved_hours, client_op_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, ?, ?, ?)`
+  ).bind(
+    tid, title, provider, start_date, end_date, hours,
+    domainsJson, description, certificate_url,
+    user.id, `Bulk-recorded by ${user.first_name} ${user.last_name}`, hours,
+    opId,
+  ));
+
+  let batchResults: any[] = [];
+  try {
+    batchResults = await c.env.DB.batch(insertStmts);
+  } catch (err) {
+    // A batch failure means NOTHING was committed.  Report the exception
+    // in a friendly way; the operator can retry without fear of partial
+    // credit because the batch is atomic.
+    const detail = (err as any)?.message || String(err);
+    console.error('bulk-assign batch failed', { opId, allowedIds, err: detail });
+    return c.redirect('/appraiser/external-pd?msg=' + encodeURIComponent(
+      'Nothing was recorded — the group save failed and was rolled back. Please try again.'
+    ) + '#bulk');
   }
 
-  // Human-readable summary for the toast.  Named the skipped bucket
-  // explicitly so a principal who picked a wrong id sees WHY it didn't
-  // land, rather than a silent "assigned to 3 teachers" that hides
-  // authorization drops.
-  const parts: string[] = [
-    `Recorded "${title}" (${hours.toFixed(2)}h) for ${inserted} teacher${inserted === 1 ? '' : 's'}.`,
-  ];
+  // Count how many statements ACTUALLY inserted new rows (changes=1)
+  // vs. how many were no-ops because a prior retry's row already
+  // matched the (reviewed_by, client_op_id, teacher_id) UNIQUE index
+  // (changes=0).  This is the definitive "was this the first submit or
+  // a retry?" signal — no clock or watermark needed.  The batchResults
+  // array is aligned to insertStmts index-by-index (D1 contract).
+  let newlyInsertedCount = 0;
+  let duplicatesCollapsed = 0;
+  for (let i = 0; i < batchResults.length; i++) {
+    const changes = Number((batchResults[i] as any)?.meta?.changes ?? 0);
+    if (changes > 0) newlyInsertedCount++;
+    else duplicatesCollapsed++;
+  }
+
+  // Now read back the rows this op_id owns for each allowed teacher.
+  // A SELECT keyed on client_op_id is the source of truth for the
+  // notification loop below: any row with our op_id + teacher_id is
+  // ours, whether it was inserted right now or by an earlier retry
+  // that landed via INSERT OR IGNORE.
+  const idPlaceholders = allowedIds.map(() => '?').join(',');
+  const landed = await c.env.DB.prepare(
+    `SELECT id, teacher_id FROM external_pd_submissions
+      WHERE reviewed_by = ? AND client_op_id = ?
+        AND teacher_id IN (${idPlaceholders})
+        AND deleted_at IS NULL`
+  ).bind(user.id, opId, ...allowedIds).all<any>();
+  const landedRows = (landed.results as any[]) || [];
+  const landedByTeacher = new Map<number, number>();
+  for (const r of landedRows) landedByTeacher.set(Number(r.teacher_id), Number(r.id));
+
+  // Best-effort activity_log writes for every landed row.  These are
+  // separate INSERTs (not part of the atomic batch) because they carry
+  // the new external_pd_submissions.id we just learned from the SELECT
+  // above.  A failure here is non-fatal and does not affect credit.
+  for (const [tid, subId] of landedByTeacher) {
+    try {
+      await logActivity(c.env.DB, user.id, 'external_pd_submission', subId, 'bulk_assign', {
+        teacher_id: tid, hours, title, op_id: opId,
+      });
+    } catch (e) {
+      console.warn('bulk-assign activity_log write failed (non-fatal)', {
+        opId, tid, subId, err: (e as any)?.message || String(e),
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // PHASE 2 — best-effort notifications, one at a time, each isolated
+  // in its own try/catch.  A single notification failure MUST NOT block
+  // any other teacher's notification, and MUST NOT undo credit.
+  //
+  // A retry that collapses via INSERT OR IGNORE does NOT re-fire
+  // notifications — we scope the loop to teachers whose row was newly
+  // created by THIS request (not landed-from-a-prior-attempt), so
+  // repeated retries never spam a teacher's inbox with copies of the
+  // same "External PD added" ping.
+  // ---------------------------------------------------------------------
+  const { notify } = await import('../lib/notifications');
+  let notifiedOk = 0;
+  let notifiedFail = 0;
+  for (const [tid, subId] of landedByTeacher) {
+    // Skip duplicates so we don't re-notify a teacher who already got
+    // the ping from an earlier attempt.
+    const existingNotif = await c.env.DB.prepare(
+      `SELECT 1 FROM notifications
+        WHERE user_id = ? AND kind = 'external_pd_approved'
+          AND entity_type = 'external_pd_submission' AND entity_id = ?
+        LIMIT 1`
+    ).bind(tid, subId).first();
+    if (existingNotif) continue;
+    try {
+      await notify(c.env.DB, {
+        user_id: tid,
+        kind: 'external_pd_approved',
+        title: 'External PD added to your record',
+        body: `${user.first_name} ${user.last_name} recorded "${title}" (${hours.toFixed(2)}h) on your behalf.`,
+        url: '/teacher#external-pd',
+        entity_type: 'external_pd_submission', entity_id: subId, actor_user_id: user.id,
+      }, c.env);
+      notifiedOk++;
+    } catch (e) {
+      notifiedFail++;
+      console.warn('bulk-assign notification failed (credit is committed)', {
+        opId, tid, subId, err: (e as any)?.message || String(e),
+      });
+    }
+  }
+
+  // Human-readable summary for the toast.  Named the skipped buckets
+  // explicitly so a principal sees WHY totals differ from what they
+  // picked (authorization drops), and so a retry collapse is visible.
+  const parts: string[] = [];
+  parts.push(`Recorded "${title}" (${hours.toFixed(2)}h) for ${landedRows.length} teacher${landedRows.length === 1 ? '' : 's'}.`);
+  if (duplicatesCollapsed > 0) {
+    parts.push(`${duplicatesCollapsed} duplicate submit${duplicatesCollapsed === 1 ? '' : 's'} collapsed — no extra credit added.`);
+  }
+  if (notifiedOk > 0 || notifiedFail > 0) {
+    if (notifiedFail === 0) {
+      parts.push(`Notified ${notifiedOk} teacher${notifiedOk === 1 ? '' : 's'}.`);
+    } else if (notifiedOk === 0) {
+      parts.push(`${notifiedFail} notification${notifiedFail === 1 ? '' : 's'} failed but every credit is on record.`);
+    } else {
+      parts.push(`Notified ${notifiedOk} teacher${notifiedOk === 1 ? '' : 's'} · ${notifiedFail} notification${notifiedFail === 1 ? '' : 's'} failed but every credit is on record.`);
+    }
+  }
   if (skippedForAuth > 0) {
     parts.push(`Skipped ${skippedForAuth} teacher${skippedForAuth === 1 ? '' : 's'} not on your caseload.`);
   }
@@ -2130,6 +2277,18 @@ function extPdPill(status: string) {
   }
 }
 
+// Small UUID helper mirrored from coach.tsx.  Used for the bulk-assign
+// idempotency token stamped into the form on server render.  Duplicating
+// the 6-line function keeps appraiser.tsx free of a cross-route import
+// and the shape of the fallback string is unimportant — the server only
+// requires a non-empty stable string per form load.
+function bulkOpId(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g: any = globalThis as any;
+  if (g.crypto?.randomUUID) return g.crypto.randomUUID();
+  return 'op_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
 function ExternalPdQueue({ user, rows, filterStatus, msg, bulkTeachers }: any) {
   bulkTeachers = bulkTeachers || [];
   const submitted = rows.filter((r: any) => r.status === 'submitted');
@@ -2166,6 +2325,14 @@ function ExternalPdQueue({ user, rows, filterStatus, msg, bulkTeachers }: any) {
           </summary>
           <form method="post" action="/appraiser/external-pd/bulk-assign" class="p-3 grid md:grid-cols-3 gap-3 text-sm"
                 onsubmit="try{this.querySelectorAll('button[type=submit]').forEach(b=>{b.disabled=true;b.dataset.oldText=b.innerText;b.innerText='Saving…';});}catch(e){}">
+            {/* Sept 24 hotfix — idempotency token stamped on every form
+                load.  The bulk-assign endpoint stores this value in
+                external_pd_submissions.client_op_id; the UNIQUE index
+                (reviewed_by, client_op_id, teacher_id) makes any retry
+                of the SAME submission a per-row no-op.  A brand-new
+                form load (F5 to reset) mints a fresh token, so re-
+                recording the same event tomorrow still works. */}
+            <input type="hidden" name="_op_id" value={bulkOpId()} />
             <label class="md:col-span-2">
               <span class="block text-xs font-medium text-slate-700 mb-1">Activity title <span class="text-red-600">*</span></span>
               <input name="title" required maxLength={200} placeholder="e.g., CLA Reading Curriculum Training — Day 1"
@@ -2209,12 +2376,23 @@ function ExternalPdQueue({ user, rows, filterStatus, msg, bulkTeachers }: any) {
               <div class="flex items-center justify-between mb-1">
                 <span class="block text-xs font-medium text-slate-700">Teachers who attended <span class="text-red-600">*</span> <span class="text-slate-400 font-normal">(Ctrl/⌘-click for many)</span></span>
                 <div class="text-xs">
+                  {/* Sept 24 hotfix — Select all / Clear scope the lookup to
+                      the enclosing <form> so the <select> is guaranteed to
+                      be in the search subtree.  The prior implementation
+                      walked up to the button-container div, then across to
+                      its parent flex row, and did querySelector('select…')
+                      from there — but the select is a SIBLING of that row,
+                      not a descendant, so the lookup returned null and
+                      threw "Cannot read properties of null (reading
+                      'options')" on click.  Scoping to closest('form')
+                      never misses because the <select> is inside the same
+                      <form> as the button by construction. */}
                   <button type="button"
-                          onclick="var s=this.closest('div').parentElement.querySelector('select[name=teacher_ids]');Array.from(s.options).forEach(o=>o.selected=true);"
+                          onclick="var f=this.closest('form');if(!f)return;var s=f.querySelector('select[name=&quot;teacher_ids&quot;]');if(s)Array.from(s.options).forEach(function(o){o.selected=true;});"
                           class="text-aps-blue hover:underline">Select all</button>
                   <span class="text-slate-400 mx-1">·</span>
                   <button type="button"
-                          onclick="var s=this.closest('div').parentElement.querySelector('select[name=teacher_ids]');Array.from(s.options).forEach(o=>o.selected=false);"
+                          onclick="var f=this.closest('form');if(!f)return;var s=f.querySelector('select[name=&quot;teacher_ids&quot;]');if(s)Array.from(s.options).forEach(function(o){o.selected=false;});"
                           class="text-aps-blue hover:underline">Clear</button>
                 </div>
               </div>

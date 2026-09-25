@@ -209,6 +209,64 @@ async function main() {
     await context.close();
   }
 
+  // --------------------------------------------------------------------
+  // Sept 24 hotfix — independent testing found that "Select all" and
+  // "Clear" on the External-PD bulk-assign form threw
+  //   "Cannot read properties of null (reading 'options')"
+  // because the inline onclick walked up to the wrong DOM ancestor and
+  // queried for the <select> in a subtree that doesn't contain it.  The
+  // fix scopes the lookup to closest('form').  This Playwright case
+  // repro-tests the exact click-through, watching pageerror + console
+  // for any JS exception during either button click.
+  // --------------------------------------------------------------------
+  console.log('\n[Browser Case 6 — External PD bulk-assign: Select all + Clear buttons work without JS errors]');
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    const jsErrors = [];
+    page.on('pageerror', (e) => jsErrors.push('pageerror: ' + e.message));
+    page.on('console', (m) => { if (m.type() === 'error') jsErrors.push('console.error: ' + m.text()); });
+    await login(page, 'principal@test');
+    await page.goto(`${BASE}/appraiser/external-pd`);
+    // Open the collapsible bulk-assign form.
+    await page.waitForSelector('details >> summary:has-text("Open bulk-assign form")');
+    await page.click('details >> summary:has-text("Open bulk-assign form")');
+    await page.waitForSelector('select[name="teacher_ids"]');
+
+    const totalOpts = await page.$$eval('select[name="teacher_ids"] option', (os) => os.length);
+    ok(`bulk form: teacher_ids has options (got ${totalOpts})`, totalOpts >= 2);
+
+    // Baseline: nothing selected.
+    const selectedInitial = await page.$$eval('select[name="teacher_ids"] option', (os) => os.filter((o) => o.selected).length);
+    ok('bulk form: no teachers pre-selected', selectedInitial === 0);
+
+    // Click Select all — must select every option, and MUST NOT throw.
+    await page.click('button:has-text("Select all")');
+    await page.waitForTimeout(120);
+    const selectedAfterAll = await page.$$eval('select[name="teacher_ids"] option', (os) => os.filter((o) => o.selected).length);
+    ok(`Select all: every option is selected (got ${selectedAfterAll}/${totalOpts})`,
+       selectedAfterAll === totalOpts);
+    ok(`Select all: zero JS errors during click (got ${jsErrors.length})`,
+       jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
+
+    // Click Clear — must deselect every option, still no JS errors.
+    await page.click('button:has-text("Clear")');
+    await page.waitForTimeout(120);
+    const selectedAfterClear = await page.$$eval('select[name="teacher_ids"] option', (os) => os.filter((o) => o.selected).length);
+    ok(`Clear: zero options selected (got ${selectedAfterClear})`, selectedAfterClear === 0);
+    ok(`Clear: zero JS errors across Select all + Clear (total ${jsErrors.length})`,
+       jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
+
+    // Sanity: the hidden _op_id input is present (guards the idempotency
+    // fix — if this ever regresses to missing, browser-side retries could
+    // duplicate again).
+    const opIdValue = await page.$eval('input[name="_op_id"]', (el) => el.value).catch(() => null);
+    ok(`bulk form: hidden _op_id is present and non-empty (got '${String(opIdValue).slice(0, 12)}...')`,
+       !!opIdValue && opIdValue.length >= 8);
+
+    await context.close();
+  }
+
   await browser.close();
 
   console.log('\n============================================================');
