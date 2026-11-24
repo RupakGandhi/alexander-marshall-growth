@@ -343,6 +343,7 @@
   function start(fromStart, resumeStep) {
     const steps = getSteps();
     if (navigating || !steps.length) return;
+    document.querySelectorAll('.aps-tour-toast').forEach(toast => toast.remove());
     if (fromStart) opener = document.activeElement?.closest('.aps-tour-nav-btn');
     idx = fromStart ? 0 : resumeStep ?? loadStep();
     if (!Number.isInteger(idx) || idx < 0 || idx >= steps.length) idx = 0;
