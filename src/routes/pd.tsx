@@ -1600,7 +1600,7 @@ function ReviewReflection({ phase, raw, enrollment }: {
   const responses = Object.entries(steps)
     .filter(([, answer]) => typeof answer === 'string' && answer.trim())
     .map(([key, answer]) => ({ label: prompts[phase][key] || 'Step ' + key, answer }));
-  if (notes) responses.push({ label: 'Notes', answer: notes });
+  if (notes.trim()) responses.push({ label: 'Notes', answer: notes });
   const selections: { label: string; options: string[] }[] = [];
   if (phase === 'learn') {
     const signals = parseJsonList(enrollment.tgt_evidence_signals);
