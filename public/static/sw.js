@@ -10,7 +10,7 @@
 // Bump CACHE_VERSION any time static assets change in an incompatible way.
 // ============================================================================
 
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE_SHELL   = `aps-shell-${CACHE_VERSION}`;
 const CACHE_STATIC  = `aps-static-${CACHE_VERSION}`;
 const CACHE_CDN     = `aps-cdn-${CACHE_VERSION}`;
@@ -70,8 +70,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
 
-  // Same-origin /static/* → cache-first
-  if (sameOrigin && url.pathname.startsWith('/static/')) {
+  // Static resources use the cache. Navigations follow the current server response.
+  if (sameOrigin && req.mode !== 'navigate' && url.pathname.startsWith('/static/')) {
     event.respondWith(cacheFirst(req, CACHE_STATIC));
     return;
   }
