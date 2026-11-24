@@ -311,8 +311,6 @@
   //   • Polls /api/notifications/summary every 45s for the unread badge
   //   • Lazy-loads full list on first open
   //   • Exposes window.APSBell.{toggle, open, close, refresh, markAllRead}
-  //   • Also registers a Web Push subscription the first time the user
-  //     interacts with the bell (required by browsers for permission).
   // ======================================================================
   const APSBell = {
     _panel: null, _list: null, _badge: null, _btn: null, _empty: null,
@@ -331,7 +329,7 @@
       const open = this._panel.classList.contains('hidden');
       this._panel.classList.toggle('hidden');
       this._btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-      if (open) { this.refresh(); this._ensurePushSubscribed(); }
+      if (open) this.refresh();
     },
     close() {
       if (!this._refs()) return;
@@ -434,35 +432,236 @@
       // Also refresh when the tab regains focus
       document.addEventListener('visibilitychange', () => { if (!document.hidden) this.summary(); });
     },
-    // Web Push — registered only after user opens the bell (interaction gate)
-    async _ensurePushSubscribed() {
-      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        let sub = await reg.pushManager.getSubscription();
-        if (sub) return; // already subscribed on this device
-        if (Notification.permission === 'denied') return;
-        if (Notification.permission !== 'granted') {
-          const p = await Notification.requestPermission();
-          if (p !== 'granted') return;
-        }
-        const keyRes = await fetch('/api/push/public-key', { credentials: 'include' });
-        if (!keyRes.ok) return;
-        const { publicKey } = await keyRes.json();
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(publicKey),
-        });
-        await fetch('/api/push/subscribe', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(sub.toJSON ? sub.toJSON() : sub),
-        });
-      } catch (e) { /* permission denied / unsupported — silently skip */ }
-    },
   };
   window.APSBell = APSBell;
+
+  // The account's bell, this browser's enrollment and the account-wide pause are
+  // separate preferences. Only a click on the device checkbox may ask for permission.
+  function initializeDeviceAlerts() {
+    const control = document.getElementById('aps-device-alerts');
+    if (!control) return;
+    const status = document.getElementById('aps-device-status');
+    const roster = document.getElementById('aps-enrolled-devices');
+    const test = document.getElementById('aps-device-test');
+    const managementStatus = document.getElementById('aps-device-management-status');
+    const form = control.form;
+    const accountMuted = control.dataset.accountMuted === '1';
+    let deviceId = null;
+    let updating = false;
+    let readVersion = 0;
+    let eligible = true;
+
+    const idleMessage = () => deviceId
+      ? accountMuted
+        ? 'This browser is enrolled. To resume alerts, open Manage device alerts, allow alerts for your account, and save.'
+        : 'On for this browser. Changes here take effect immediately.'
+      : 'Turn on to receive alerts here. Your browser may ask for permission.';
+
+    function showDevice(id) {
+      deviceId = id;
+      control.indeterminate = false;
+      control.checked = !!id;
+      test.hidden = !id || accountMuted;
+      if (!id) return;
+      let row = roster.querySelector('[data-device-id="' + id + '"]');
+      if (!row) {
+        row = document.createElement('li');
+        row.dataset.deviceId = String(id);
+        row.className = 'flex items-center justify-between gap-2 py-1';
+        const name = document.createElement('span');
+        name.dataset.deviceName = '';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.deviceRevoke = String(id);
+        button.className = 'text-rose-700 hover:underline';
+        button.textContent = 'Remove';
+        row.append(name, button);
+        roster.prepend(row);
+      }
+      row.querySelector('[data-device-name]').textContent = 'This browser';
+    }
+
+    async function api(path, payload) {
+      const response = await fetch(path, {
+        method: payload === undefined ? 'GET' : 'POST',
+        credentials: 'same-origin', cache: 'no-store',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+        signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(15000) : undefined,
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result || result.ok === false) {
+        throw new Error(result?.error || 'Could not confirm this change. Check your connection and try again.');
+      }
+      return result;
+    }
+
+    async function registration(create) {
+      // The older registration lives at /static/. Prefer it when present so
+      // existing enrollments survive the switch to an app-wide registration.
+      let reg = await navigator.serviceWorker.getRegistration('/static/');
+      if (!reg && create) reg = await navigator.serviceWorker.register('/static/sw.js', { scope: '/' });
+      if (!reg || reg.active) return reg;
+      const worker = reg.installing || reg.waiting;
+      if (!worker) throw new Error('The platform is updating. Reload this page and try again.');
+      await new Promise((resolve, reject) => {
+        const finish = ok => {
+          clearTimeout(timer);
+          worker.removeEventListener('statechange', onStateChange);
+          if (ok) resolve();
+          else reject(new Error('The platform could not start device alerts. Reload this page and try again.'));
+        };
+        const onStateChange = () => {
+          if (worker.state === 'activated') finish(true);
+          else if (worker.state === 'redundant') finish(false);
+        };
+        const timer = setTimeout(() => finish(false), 15000);
+        worker.addEventListener('statechange', onStateChange);
+        onStateChange();
+      });
+      return reg;
+    }
+
+    const blocked = 'Notifications are blocked. Allow notifications for this site in your browser settings, then return here.';
+    async function refresh() {
+      if (updating) return;
+      const version = ++readVersion;
+      control.disabled = true;
+      try {
+        const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+        const installed = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+        if (ios && !installed) {
+          eligible = false;
+          showDevice(null);
+          status.textContent = 'On iPhone or iPad, add the platform to your Home Screen, open it there, and turn on device alerts.';
+          return;
+        }
+        eligible = window.isSecureContext && 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator;
+        if (!eligible || Notification.permission === 'denied') {
+          eligible = false;
+          showDevice(null);
+          status.textContent = !('Notification' in window) || !('PushManager' in window) || !window.isSecureContext || !('serviceWorker' in navigator)
+            ? 'Device alerts are unavailable in this browser. You can still use the in-app bell.' : blocked;
+          return;
+        }
+        const reg = await registration(false);
+        const sub = reg && await reg.pushManager.getSubscription();
+        const id = sub && Notification.permission === 'granted' ? (await api('/api/push/status', {endpoint: sub.endpoint})).deviceId : null;
+        if (version === readVersion) {
+          showDevice(id);
+          status.textContent = idleMessage();
+        }
+      } catch (error) {
+        if (version === readVersion) {
+          eligible = false;
+          control.indeterminate = true;
+          test.hidden = true;
+          status.textContent = 'Could not check device alerts. Reload this page to try again.';
+        }
+      } finally {
+        if (version === readVersion) control.disabled = !eligible;
+      }
+    }
+
+    control.addEventListener('change', async () => {
+      if (updating) return;
+      const enable = control.checked;
+      const previous = deviceId;
+      ++readVersion;
+      updating = true;
+      control.disabled = true;
+      status.textContent = enable ? 'Turning on device alerts…' : 'Turning off device alerts…';
+      try {
+        if (enable) {
+          // Request permission before any asynchronous work to retain the click gesture.
+          const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+          if (permission !== 'granted') {
+            eligible = permission !== 'denied';
+            throw new Error(permission === 'denied' ? blocked : 'Permission was not granted. Check the box when you are ready to try again.');
+          }
+          const reg = await registration(true);
+          let sub = await reg.pushManager.getSubscription();
+          if (!sub) {
+            const {publicKey} = await api('/api/push/public-key');
+            if (!publicKey) throw new Error('The platform could not prepare device alerts. Try again.');
+            sub = await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey)});
+          }
+          const result = await api('/api/push/subscribe', sub.toJSON());
+          if (!Number.isInteger(result.deviceId)) throw new Error('The platform could not confirm enrollment. Reload and check this browser.');
+          showDevice(result.deviceId);
+        } else {
+          // End delivery for this account on the server. Keeping the browser
+          // permission allows a later explicit re-enrollment without another prompt.
+          await api('/profile/notifications/devices/' + previous + '/revoke', {});
+          roster.querySelector('[data-device-id="' + previous + '"]')?.remove();
+          showDevice(null);
+        }
+        status.textContent = enable ? idleMessage() : 'Off for this browser. You can turn alerts on here again.';
+      } catch (error) {
+        showDevice(previous);
+        status.textContent = error.message || 'Could not change device alerts. Try again.';
+      } finally {
+        updating = false;
+        control.disabled = !eligible;
+      }
+    });
+
+    test.addEventListener('click', async () => {
+      if (updating || !deviceId) return;
+      ++readVersion;
+      updating = true;
+      control.disabled = test.disabled = true;
+      status.textContent = 'Sending a test alert to this browser…';
+      try {
+        const reg = await registration(false);
+        const sub = reg && await reg.pushManager.getSubscription();
+        if (!sub || Notification.permission !== 'granted') throw new Error('This browser is no longer enrolled. Reload to check its settings.');
+        await api('/api/push/test', {endpoint: sub.endpoint});
+        status.textContent = 'The push service accepted the test. Check this device’s notifications to confirm it arrived.';
+      } catch (error) {
+        status.textContent = error.message || 'The test could not be sent. Try again.';
+      } finally {
+        updating = false;
+        test.disabled = false;
+        control.disabled = !eligible;
+      }
+    });
+
+    roster.addEventListener('click', async event => {
+      const button = event.target.closest('button[data-device-revoke]');
+      if (!button || updating || !window.confirm('Remove alerts for this browser from your account?')) return;
+      ++readVersion;
+      updating = true;
+      control.disabled = button.disabled = true;
+      const id = Number(button.dataset.deviceRevoke);
+      try {
+        await api('/profile/notifications/devices/' + id + '/revoke', {});
+        button.closest('li').remove();
+        if (id === deviceId) {
+          showDevice(null);
+          status.textContent = idleMessage();
+        }
+        managementStatus.textContent = 'Device removed.';
+      } catch (error) {
+        managementStatus.textContent = error.message || 'Could not remove this device. Try again.';
+      } finally {
+        updating = false;
+        button.disabled = false;
+        control.disabled = !eligible;
+      }
+    });
+
+    form.addEventListener('submit', event => {
+      if (updating) {
+        event.preventDefault();
+        managementStatus.textContent = 'Wait for the device change to finish, then save your settings.';
+      }
+    });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    refresh();
+  }
+  document.addEventListener('DOMContentLoaded', initializeDeviceAlerts);
 
   // Bell opens from icon click; close on outside click like the user menu
   document.addEventListener('click', (e) => {
