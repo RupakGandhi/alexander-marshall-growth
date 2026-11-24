@@ -29,42 +29,37 @@ const introStep = (roleLabel: string, homeUrl: string): TourStep => ({
   page: homeUrl,
   noHighlight: true,
   title: `Welcome to the Marshall Growth Platform`,
-  body: `
-    <p>You're signed in as a <strong>${roleLabel}</strong>. This short walkthrough shows you the features available to you right now, exactly as you'll use them.</p>
-    <p>It takes about <strong>2–3 minutes</strong>. Use <strong>Next →</strong> to move forward, <strong>← Back</strong> to review, or <strong>Skip</strong> to exit at any time. You can always restart from the <strong>Guided Tour</strong> button at the top of the screen.</p>`,
-  hint: 'Keyboard shortcuts work too — press → for next, ← for back, Esc to close.',
+  body: `<p>You’re signed in as a <strong>${roleLabel}</strong>. Choose <strong>Next</strong> to continue, <strong>Back</strong> to revisit a step, or <strong>Skip</strong> to leave. You can replay the walkthrough from <strong>Guided Tour</strong>.</p>`,
 });
 
-const reportsTourSteps = (includeAppraisers: boolean): TourStep[] => [
+const reportsTourSteps = (audience: 'district' | 'appraiser' | 'teacher'): TourStep[] => [
   {
     page: '/reports',
     selector: '[data-tour="reports-title"]',
     placement: 'bottom',
-    title: 'The Report Builder — everything in one place',
-    body: `<p>Any CSV or PDF you need — one teacher, one school, one date range, or a whole year — starts here. Build it in <strong>three steps</strong>: ① who, ② what, ③ download.</p>`,
+    title: "The Report Builder",
+    body: `<p>Build an observation report in three steps. Choose the records, decide what to include, then download your report.</p>`,
   },
   {
     page: '/reports',
     selector: '[data-tour="reports-who"]',
     placement: 'bottom',
-    title: 'Step 1 — pick who',
-    body: `<p>Use multi-select to choose one or many <strong>teachers</strong>${includeAppraisers ? ', one or many <strong>schools</strong>, one or many <strong>appraisers</strong>' : ' and one or many <strong>schools</strong>'}. Leave a list empty to include everyone you're authorized to see.</p><p>Then pick a date range and observation types.</p>`,
-    hint: 'Hold Ctrl (or ⌘ on Mac) to pick more than one item at a time.',
+    title: "Choose who and when",
+    body: `<p>${audience === 'teacher' ? 'Your observation report covers your own published and acknowledged observations.' : audience === 'district' ? 'Filter by teacher, school, or appraiser.' : 'Filter by teachers on your caseload or by school.'} Choose dates or observation types, then select <strong>Apply filters &amp; preview</strong>.</p>`,
   },
   {
     page: '/reports',
     selector: '[data-tour="reports-what"]',
     placement: 'top',
-    title: 'Step 2 — pick what to include',
-    body: `<p>One-click <strong>presets</strong> ("Full observation", "Scores only", "Strengths only", "Growth areas only", "Feedback only", "Teacher folder copy") set the right boxes for common use-cases. You can also check individual sections by hand.</p>`,
+    title: "Choose what to include",
+    body: `<p>Select a preset such as <strong>Scores only</strong> or <strong>Teacher folder copy</strong>. Adjust the individual checkboxes to include the sections you need.</p>`,
   },
   {
     page: '/reports',
     selector: '[data-tour="reports-download"]',
     placement: 'top',
-    title: 'Step 3 — download',
-    body: `<p><strong>CSV</strong> opens in Excel or Google Sheets — with 8 different row shapes to pick from (summary, scores-only, one-row-per-feedback-item, and more).</p><p><strong>PDF</strong> opens a print-ready report in a new tab. Use <em>Print → Save as PDF</em> in your browser to save or email it.</p>`,
-    hint: 'Preview below shows exactly which observations will be included in your export.',
+    title: "Download your report",
+    body: `<p>Choose <strong>Download CSV</strong> for a spreadsheet. For a printable report, choose <strong>Open PDF</strong>, then use your browser’s print menu to save a PDF.</p>`,
   },
 ];
 
@@ -75,143 +70,118 @@ const superAdminSteps: TourStep[] = [
   introStep('Super Administrator', '/admin'),
   {
     page: '/admin',
-    selector: '[data-tour="main-nav"]',
+    selector: '[data-tour="main-nav"], #aps-mobile-nav-btn',
     placement: 'bottom',
     title: 'Your navigation',
-    body: `<p>As Super Admin you have the <strong>full menu</strong>: Users, Assignments, Schools, Pedagogy Library, Framework, Bulk Import, Reports, and District settings.</p>`,
+    body: `<p>Use the navigation to move between Users, Assignments, Schools, and your other tools. On a small screen, open the menu at the top left.</p>`,
   },
   {
     page: '/admin',
     selector: '[data-tour="admin-overview"]',
     placement: 'auto',
     title: 'Overview dashboard',
-    body: `<p>Live counts of teachers, appraisers, coaches, and superintendents; observation-status rollup; and a feed of the most recent activity across the whole platform.</p>`,
+    body: `<p>The overview summarizes district activity and provides links to the tools you use to manage the platform.</p>`,
   },
   {
     page: '/admin/users',
     selector: '[data-tour="users-create"]',
     placement: 'bottom',
     title: 'Create users',
-    body: `<p>Add a teacher, principal, coach, or superintendent here. <strong>Schools is a multi-select</strong> — the first school you pick becomes the user's primary; any extras are additional links. Leave the password blank and the user will be created with <code>Alexander2026!</code> and be forced to change it on first login.</p>`,
+    body: `<p>Enter the staff member’s name, email, role, and school information. Use the initial password field to set their starting password. They can change it in <strong>Profile &amp; Password</strong>.</p>`,
   },
   {
     page: '/admin/users',
     selector: '[data-tour="users-bulk"]',
     placement: 'bottom',
     title: 'Bulk add many users at once',
-    body: `<p>If you're onboarding a whole roster, skip the one-at-a-time form and use <strong>Bulk Import</strong>. Download the CSV template, fill it in Excel, and upload — existing emails are updated, new ones are created.</p>`,
+    body: `<p>Use <strong>Add many users at once</strong> to open the CSV import workflow. A downloadable template shows which columns to fill in.</p>`,
   },
   {
     page: '/admin/users',
     selector: '[data-tour="users-list"]',
     placement: 'top',
-    title: 'Search, filter, edit, reset',
-    body: `<p>Search any user by name or email, filter by role, then click their name to expand an editor where you can fix their details, reset their password, or deactivate them.</p><p>The chips in the <strong>School</strong> column show every school they're linked to — the gold-starred chip is their primary school.</p>`,
+    title: "Find and manage a user",
+    body: `<p>Search by name or email, or filter by role. Open a user’s controls to edit their account or reset their password.</p>`,
   },
   {
     page: '/admin/assignments',
     selector: '[data-tour="assign-create"]',
     placement: 'bottom',
     title: 'Link teachers to appraisers and coaches',
-    body: `<p>This is the key page for scoping. Pick <strong>any number of teachers</strong> and <strong>any number of staff</strong> in one submit — every teacher × staff combination you selected is linked in a single click. Use the relationship dropdown to switch between <em>Appraiser</em> and <em>Coach</em>.</p>`,
-    hint: 'Want to give a teacher both an appraiser and a coach? Submit the form twice — once with each relationship.',
+    body: `<p>Select teachers, choose the appraiser or coach relationship, then select the staff members to link. Set up a separate relationship for each role the teacher needs.</p>`,
   },
   {
     page: '/admin/assignments',
     selector: '[data-tour="assign-current"]',
     placement: 'top',
-    title: 'See who evaluates whom — and unlink in bulk',
-    body: `<p>Current assignments are grouped by staff member so you can see at a glance who each principal or coach is responsible for. Tick as many rows as you want, then click <strong>Remove checked</strong> — or delete a single row with the trash icon.</p>`,
+    title: "Review current assignments",
+    body: `<p>Assignments are grouped by staff member. Use this list to check which teachers are linked to each appraiser or coach.</p>`,
   },
   {
     page: '/admin/schools',
     selector: '[data-tour="schools-add"]',
     placement: 'bottom',
     title: 'Manage schools',
-    body: `<p>Add or edit each school's name, grade span, address, and phone. Any school here becomes available in the multi-school picker on the Users page and as a filter in the Report Builder.</p>`,
+    body: `<p>Use this page to add a school and review the district’s existing schools. School membership is managed on each user’s account.</p>`,
   },
   {
     page: '/admin/framework',
     selector: '[data-tour="framework-actions"]',
     placement: 'bottom',
     title: 'Your evaluation framework',
-    body: `<p>This shows the active rubric — four performance levels for every indicator. You can <strong>bulk-import</strong> a new rubric from CSV, <strong>export</strong> the current one for editing, or tune individual cells in the Pedagogy Library.</p>`,
+    body: `<p>Review the evaluation domains, indicators, and rating descriptors. The actions at the top let you export the framework or open the bulk import workflow.</p>`,
   },
   {
     page: '/admin/pedagogy',
     noHighlight: true,
     title: 'Pedagogy Library',
-    body: `<p>Every cell in the rubric has an entry with: <strong>interpretation</strong> in plain English, <strong>evidence signals</strong> (what it looks like in a real classroom), <strong>teacher next moves</strong>, <strong>coaching considerations</strong>, <strong>resources</strong>, and a <strong>feedback-starter sentence</strong> used when auto-generating feedback.</p><p>Click any cell on this page to edit it — the content flows back into every observation.</p>`,
+    body: `<p>The Pedagogy Library organizes teaching guidance by rubric indicator and performance level. Select the relevant entry to review or edit its guidance.</p>`,
   },
   {
     page: '/admin/import/users',
     selector: '[data-tour="import-users-template"]',
     placement: 'bottom',
     title: 'Bulk import users',
-    body: `<p>Download the template, fill it out in Excel, and upload. The <code>school_names</code> column accepts a single school <em>or</em> a pipe-separated list like <code>Alexander Elementary | Alexander Jr/Sr High</code> — perfect for staff covering more than one building.</p>`,
-    hint: 'Tick "Dry run" first to see exactly what will be created/updated before it happens.',
+    body: `<p>Download the CSV template and fill it in with staff information. Select <strong>Dry run</strong> to preview counts and errors before an import writes account changes.</p>`,
   },
-  ...reportsTourSteps(true),
+  ...reportsTourSteps('district'),
   {
     page: '/admin/district',
     selector: '[data-tour="district-form"]',
     placement: 'auto',
     title: 'District settings',
-    body: `<p>Finally, the district's name, address, and phone number appear on every printed PDF. Keep them current here.</p>`,
+    body: `<p>Edit district contact details here. The School years section below lets you manage the year used for district records.</p>`,
   },
   {
     page: '/admin/pd',
     noHighlight: true,
-    title: 'PD Modules — the in-platform LMS',
-    body: `
-      <p>This is where you <strong>build the PD curriculum</strong> teachers see on their "My PD LMS" page. Each module is attached to a specific Marshall rubric indicator at a target level, and the seed ships <strong>120 lesson-plan-driven modules</strong> (60 indicators × levels 1 & 2) built around an 8-step Learn → Practice → Apply protocol:</p>
-      <ul>
-        <li><strong>Learn</strong> — teacher picks an upcoming lesson, reads the rubric side-by-side (current level vs. target), and identifies the evidence gap.</li>
-        <li><strong>Practice</strong> — teacher rebuilds that lesson, scripts opener / pivot / close, and picks one piece of student evidence to collect.</li>
-        <li><strong>Apply</strong> — teacher teaches the rebuilt lesson and submits <em>plan + evidence + 3-sentence impact note</em> for supervisor verification.</li>
-      </ul>
-      <p>When a teacher scores 1 or 2 on an indicator in a published observation, the platform auto-enrolls them in up to three matching modules — no manual assignment needed. You can edit, add, or retire any module here.</p>`,
+    title: "PD modules",
+    body: `<p>Manage the modules teachers see in My PD LMS. Each module connects to an indicator and target level. Open a module to review the guidance and deliverable.</p>`,
   },
   {
     page: '/admin',
     selector: '#aps-bell-btn',
     placement: 'bottom',
-    title: 'Notifications — replaces every email',
-    body: `
-      <p>The bell in the header is the in-platform alert system. It fires for every important event: a teacher acknowledged, a PD deliverable submitted, a bulk import finished, etc.</p>
-      <p>Teachers, principals, coaches, and superintendents all get their own role-specific notifications. No SendGrid. No Twilio. No subscription. The district owns its own VAPID key pair and uses the browser's built-in Web Push standard.</p>`,
+    title: "Your notifications",
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
   {
     page: '/admin',
     noHighlight: true,
-    title: "Schools vs. Appraiser — what's the difference?",
-    body: `
-      <p><strong>Schools</strong> are the physical buildings (Elementary, High School…). They're used for org structure, reporting roll-ups, and telling the system where a teacher is based. A teacher can belong to <strong>multiple</strong> schools.</p>
-      <p><strong>Appraiser</strong> is a <em>role</em> — typically a principal — who is <em>assigned</em> to teachers via the Assignments page. Being the principal of a school does <strong>not</strong> automatically assign you to its teachers; the super-admin picks explicitly who evaluates whom. This lets one principal cover teachers across buildings (very common in small districts) and keeps the eval system separate from staff directory data.</p>`,
+    title: "School membership and appraiser assignments",
+    body: `<p>School membership groups records by building. Use <strong>Assignments</strong> to connect a teacher with the person who evaluates or coaches them.</p>`,
   },
   {
-    // Data management + practice-cleanup + non-evaluative coaching feedback
-    // coverage.  This step is the super-admin's counterpart to the coach-
-    // and teacher-side "coaching feedback" tour steps: it explains where
-    // those entries live in the admin toolbox and how to clean them up.
     page: '/admin/data',
-    noHighlight: true,
-    title: 'Data Management — cleaning up practice content',
-    body: `
-      <p>Three tools cover every kind of demo/practice content you'll accumulate during pilots and training days:</p>
-      <ul>
-        <li><strong>Practice-data cleanup</strong> (top-right of this page) — the surgical tool. Tag <em>individual</em> records (coaching notes, PD activity, external PD, practice observations), preview the exact scope, confirm, and clean them along with their audit rows, delivery ledger, notifications, and matching activity log entries. Every batch has an <strong>undo</strong>.</li>
-        <li><strong>Reset practice data</strong> — the mid-level sweep. Removes PD enrollments, deliverables, external PD submissions, teacher goals, and <strong>non-evaluative coaching feedback</strong> (coaching notes + audit + share-delivery ledger). Observations, users, and rubric are preserved. Honors the soft-delete toggle.</li>
-        <li><strong>Clear all demo data</strong> — the handover wipe. Removes everything the previous two buttons cover <em>plus</em> observations, notifications, and activity log. Users, schools, assignments, rubric, pedagogy library, and PD module library remain untouched.</li>
-      </ul>
-      <p>A coach's <strong>non-evaluative coaching feedback</strong> lives in <code>coaching_notes</code> and is now covered by all three tools — a note the coach shared with a teacher during training is removed along with its audit trail, delivery ledger, and inbox notification whenever you run any of these three cleanups.</p>`,
-    hint: 'Prefer the practice-cleanup workflow whenever possible — it names every record, previews the exact scope, and keeps an undo for 30 days.',
+    selector: 'main a[href="/admin/data/practice-cleanup"]',
+    title: "Practice-data cleanup",
+    body: `<p>After training, open <strong>Practice-data cleanup</strong> to select individual demo records and preview the exact selection. Read the preview before confirming. The district-wide reset controls affect a much broader set of records.</p>`,
   },
   {
     page: '/admin',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>That's the whole super-admin toolkit. Replay the tour from the <strong>Guided Tour</strong> button any time, and use the <strong>Profile</strong> menu in the top-right to change your password or notification preferences.</p><p>Questions? The <em>README</em> linked at the bottom of the site documents every route and feature.</p>`,
+    body: `<p>Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
@@ -224,36 +194,36 @@ const superintendentSteps: TourStep[] = [
     page: '/superintendent',
     selector: '[data-tour="supt-kpis"]',
     placement: 'bottom',
-    title: 'District KPIs at a glance',
-    body: `<p>Live district-wide totals: how many teachers, appraisers, coaches you have; how many observations are published vs. acknowledged; and a distribution of rubric scores across all four levels.</p>`,
+    title: "District dashboard",
+    body: `<p>Review district counts for staff, focus areas, and observations. The dashboard distinguishes total observations from published observations.</p>`,
   },
   {
     page: '/superintendent',
     selector: '[data-tour="supt-by-school"]',
     placement: 'auto',
     title: 'By-school rollup',
-    body: `<p>Each school card shows teacher count, total observations, and how many are officially published. Multi-school teachers are counted for every building they belong to.</p>`,
+    body: `<p>The <strong>By School</strong> table summarizes activity by building. Use the school view to see the teachers behind those counts.</p>`,
   },
   {
     page: '/superintendent/schools',
-    selector: '[data-tour="supt-schools-list"]',
+    selector: 'main h1',
     placement: 'auto',
-    title: 'Drill into any school',
-    body: `<p>See every teacher by school, with their title, how many observations they have, and when they were most recently observed. Click any teacher to view their individual profile.</p>`,
+    title: "Teachers by school",
+    body: `<p>Each school lists its teachers, published observation counts, and most recent observation dates. Open a teacher’s record from their row.</p>`,
   },
   {
     page: '/superintendent/teachers',
     selector: '[data-tour="supt-teachers-list"]',
     placement: 'auto',
-    title: 'Every teacher, district-wide',
-    body: `<p>The full teacher list with school, observation count, and last-observed date. Click a name to open a read-only profile with all their published observations.</p>`,
+    title: "District teacher directory",
+    body: `<p>Use the district-wide list to find teachers across buildings and open their records.</p>`,
   },
-  ...reportsTourSteps(true),
+  ...reportsTourSteps('district'),
   {
     page: '/superintendent',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>You can re-open this tour any time from the <strong>Guided Tour</strong> button. All observation data you see is scoped to what's officially published — drafts in progress are never counted.</p>`,
+    body: `<p>Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
@@ -264,93 +234,56 @@ const appraiserSteps: TourStep[] = [
   introStep('Administrator / Appraiser', '/appraiser'),
   {
     page: '/appraiser',
-    selector: '[data-tour="ap-teachers"]',
+    selector: '[data-tour="ap-teachers"], [data-tour="ap-empty"]',
     placement: 'auto',
     title: 'Your teachers',
-    body: `<p>These are the teachers <strong>assigned to you</strong> for evaluation. Each row shows their latest observation so you can see where everyone stands at a glance.</p>`,
+    body: `<p>Your assigned teachers appear here. Use <strong>View data</strong> on a teacher’s card to review their record. If the list is empty, your super administrator can add your assignments.</p>`,
   },
   {
     page: '/appraiser',
-    selector: '[data-tour="ap-start-obs"]',
+    selector: '[data-tour="ap-start-obs"] summary, [data-tour="ap-empty"]',
     placement: 'auto',
     title: 'Start a new observation',
-    body: `<p>Click <strong>Start observation</strong> next to any teacher. You'll enter the class context (subject, grade, location, duration) and immediately land in the rubric editor.</p>`,
-    hint: 'Three observation types: Mini (short walk-throughs), Formal (full observations), and Annual Summary (end-of-year rollup).',
+    body: `<p>On an assigned teacher’s card, <strong>Start observation</strong> offers Mini observation, Formal observation, and Annual summary. Choosing a type creates a draft. You can continue this tour without creating one.</p>`,
   },
   {
     page: '/appraiser/observations',
     selector: '[data-tour="ap-obs-list"]',
     placement: 'auto',
-    title: 'All your observations',
-    body: `<p>Every observation you've ever started — drafts, scored-but-not-published, published, and acknowledged. Click any row to jump back in.</p>`,
+    title: "Your observations",
+    body: `<p>Use the observations list to find an existing draft or revisit an observation you published. An empty list means you have no matching observations yet.</p>`,
   },
   {
     page: '/appraiser/observations',
     noHighlight: true,
-    title: 'Inside an observation',
-    body: `
-      <p>When you open an observation, the editor gives you everything in one place:</p>
-      <ul>
-        <li><strong>Scripted notes</strong> — low-inference evidence you collect live in the classroom. <em>Auto-saves on every keystroke</em> — no "Save" button.</li>
-        <li><strong>Rubric scoring</strong> — click 1–4 on each indicator; the pedagogy library's plain-English language appears as guidance.</li>
-        <li><strong>Glows & Grows</strong> — auto-generated starter sentences you can accept or rewrite.</li>
-        <li><strong>Focus areas & next steps</strong> — what the teacher should work on and how.</li>
-        <li><strong>Private notes</strong> — admin-only; never shown to the teacher. Auto-saves too.</li>
-        <li><strong>Signatures</strong> — sign and publish; the teacher gets notified to acknowledge.</li>
-      </ul>
-      <p>Look for the green <strong>✓ Saved — N chars at HH:MM</strong> pill in the top-right of each card — that's the server confirming it wrote your text. Below the Scripted Notes box, open <strong>"Saved scripted notes in database"</strong> to see the exact text the server is holding right now.</p>`,
+    title: "From draft to published observation",
+    body: `<p>Open a draft to enter the evidence, scores, and feedback for the observation. Review it and sign before publishing. Once published, the teacher can read it, respond, and acknowledge it.</p>`,
   },
   {
     page: '/pd/review',
     noHighlight: true,
-    title: 'PD review queue — verify the rebuilt lesson',
-    body: `
-      <p>Teachers don't need a separate LMS — every module lives inside this platform. When one of your teachers submits a PD deliverable, it appears here as a <strong>pending review</strong>.</p>
-      <p>Each submission is a <strong>rebuilt lesson plan</strong> for the exact indicator where you scored them a 1 or 2 — plus a student-evidence artifact (exit ticket, board photo, student quotes) and a 3-sentence impact note. You're looking for six specific things (shown at the top of every review page):</p>
-      <ul>
-        <li>The lesson is real — one they taught or are about to teach.</li>
-        <li>At least two of the target-level moves are built into the plan.</li>
-        <li>Opener / pivot / close are scripted in their own voice.</li>
-        <li>Student evidence is concrete (work sample, exit ticket, transcript).</li>
-        <li>The impact note names both what worked and what didn't.</li>
-        <li>They identify one concrete next classroom move.</li>
-      </ul>
-      <p>Click <em>verified</em> (success notification fires to the teacher) or ask for a revision with a note. No email, no external LMS.</p>`,
+    title: "Review a PD submission",
+    body: `<p>Open a submitted deliverable in <strong>PD Review</strong> to read the teacher’s work and use the rubric. Verify completed work and set the credit hours, or ask for revision with feedback.</p>`,
   },
   {
-    // Sept 24, 2026 — External PD review queue + bulk-assign.
-    // Added after the Sept 24 admin+coaches training where Aaron Allard
-    // requested the bulk-assign flow: "if all of our primary teachers
-    // participated in the CLA training, we could just put a bulk CLA
-    // training this many hours, then check the teachers that were in
-    // attendance and it adds it to their PD list."
     page: '/appraiser/external-pd',
     noHighlight: true,
-    title: 'External PD — approve submissions AND bulk-record group events',
-    body: `
-      <p>This page is the home for external professional development (conferences, workshops, curriculum training — anything outside our LMS). It does two things:</p>
-      <ul>
-        <li><strong>Review queue</strong> — when a teacher submits their own external PD from their <em>My PD LMS</em> page, it lands here as <em>Awaiting review</em>. Click <em>Open</em> to see the details, then <em>approve</em> (optionally adjusting hours), <em>request revision</em>, or <em>decline</em>. Approved hours automatically count toward each teacher's unified PD-hours total.</li>
-        <li><strong>Bulk-assign card (top of page)</strong> — for group PD events your teachers attended together (district CLA training, in-service days, curriculum workshops). Fill in the activity ONCE — title, hours, provider — then tick every teacher who attended. One click records it as <em>approved</em> external PD on each teacher's file and sends each of them a notification. No need to ask every teacher to submit it individually.</li>
-      </ul>
-      <p>You only see teachers on your own caseload. If a teacher you expected is missing from the bulk-assign list, check that they have an active <em>appraiser</em> assignment to you on the Admin → Assignments page.</p>`,
-    hint: 'Bulk-assign lands hours as approved immediately — you\'re both the recorder and the reviewer for events you witnessed, so there is no separate approval step.',
+    title: "External PD",
+    body: `<p>Review external PD submissions from your teachers. To record a group event, enter the event details and hours, then select only the teachers who attended.</p>`,
   },
   {
     page: '/appraiser',
     selector: '#aps-bell-btn',
     placement: 'bottom',
     title: 'Your notification bell',
-    body: `
-      <p>This bell replaces every email a traditional evaluation system would send. Teachers acknowledging their observations, deliverables submitted for review, overdue acknowledgments — they all surface here.</p>
-      <p>Click once to enable <strong>Web Push</strong> so your phone or desktop pings you in real time. No subscription, no third-party service.</p>`,
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
-  ...reportsTourSteps(false),
+  ...reportsTourSteps('appraiser'),
   {
     page: '/appraiser',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>Everything you do here is <strong>scoped to your assigned teachers</strong> — reports, searches, lists, and PD reviews. If a teacher you expected to see is missing, ask your super admin to add the assignment.</p>`,
+    body: `<p>Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
@@ -361,65 +294,34 @@ const coachSteps: TourStep[] = [
   introStep('Instructional Coach', '/coach'),
   {
     page: '/coach',
-    selector: '[data-tour="co-teachers"]',
+    selector: '[data-tour="co-teachers"], [data-tour="co-empty"]',
     placement: 'auto',
     title: 'Your coaching caseload',
-    body: `<p>The teachers you've been assigned to coach. Each row shows how many <strong>active focus areas</strong> they're working on right now — that's your starting point for every conversation.</p>`,
+    body: `<p>Your assigned teachers appear here. Choose <strong>Open coaching view</strong> on a teacher’s card to see their focus areas and teacher-facing feedback. If the list is empty, ask your super administrator about your assignments.</p>`,
   },
   {
     page: '/coach',
     noHighlight: true,
-    title: "What you'll see on a teacher's page",
-    body: `
-      <p>Click any teacher to see:</p>
-      <ul>
-        <li><strong>Non-evaluative coaching feedback</strong> — your private notes and shared entries (walked through in the next step).</li>
-        <li><strong>Published observations</strong> with the appraiser's glows, grows, and next steps.</li>
-        <li><strong>Active focus areas</strong> — the exact indicator you should be coaching to.</li>
-        <li>The <strong>pedagogy library's coaching considerations</strong> for that indicator at their current level, so every session has a clear focus.</li>
-      </ul>
-      <p>Coaching is <strong>strictly confidential</strong> — your view never shows private appraiser notes or affects their evaluation.</p>`,
-  },
-  {
-    // Highlight the "Non-evaluative coaching feedback" card on a real
-    // teacher page.  We link to /coach so the engine lands on the caseload
-    // first; the tour instructs the coach to open any teacher to see it.
-    // The card carries data-tour="co-notes" (id="notes") on both pages.
-    page: '/coach',
-    selector: '[data-tour="co-notes"]',
-    placement: 'auto',
-    title: 'Non-evaluative coaching feedback — the coach\'s own workspace',
-    body: `
-      <p>Every teacher page has a <strong>"Non-evaluative coaching feedback"</strong> card. Click a teacher on your caseload to see it, then use the form to capture the coaching conversation:</p>
-      <ul>
-        <li><strong>Date + optional classroom context</strong> — when and where the conversation happened.</li>
-        <li><strong>Evidence</strong> — low-inference notes on what you noticed.</li>
-        <li><strong>Strengths (glow)</strong>, <strong>Growth opportunity</strong>, and <strong>Agreed next step</strong> — a strength-only entry is fine; you don't have to name a deficiency.</li>
-        <li><strong>Follow-up date</strong> (optional) — a reminder for the next check-in.</li>
-      </ul>
-      <p><strong>Save draft</strong> keeps the entry private to you (and platform support, view-only). <strong>Share with teacher</strong> sends the teacher <em>one</em> notification and makes the entry visible to them — never to other coaches, principals, or district dashboards.</p>
-      <p><strong>These entries are separate from formal observations.</strong> They do not score, do not enroll the teacher in PD, and do not appear in evaluation exports or reports.</p>`,
-    hint: 'Nothing is stored until you click a button — use "Save draft" to keep it private, "Share with teacher" to send it, or (on a previously-shared entry) "Save and share changes" to update it. Sharing a draft later works too; the notification only ever fires once per note.',
+    title: "Inside a teacher’s coaching view",
+    body: `<p>After the tour, open an assigned teacher’s coaching view. Review their focus areas and teacher-facing feedback to plan your next conversation.</p>`,
   },
   {
     page: '/coach',
     noHighlight: true,
-    title: 'How the teacher sees your shared feedback',
-    body: `
-      <p>When you click <strong>Share with teacher</strong>:</p>
-      <ul>
-        <li>The teacher gets a notification titled <em>"[Coach name] shared coaching feedback with you"</em>.</li>
-        <li>Opening it drops them into their workspace at the <strong>"Non-evaluative coaching feedback"</strong> card — a read-only view of your strengths, growth, next step, and follow-up date.</li>
-        <li>Their view shows <strong>every shared entry from every coach assigned to them</strong>, in one list — so if a teacher has two coaches, both coaches' shared entries appear together. Drafts and private notes never surface there.</li>
-      </ul>
-      <p><strong>What you (the coach) see is different:</strong> your workspace lists only <em>your own</em> entries for a given teacher. Another coach's entries on the same teacher are not visible to you — only to the teacher and to platform support.</p>
-      <p>If a shared note needs to be redacted, contact your super administrator — the practice-cleanup workflow can remove a single entry along with its notification and audit trail.</p>`,
+    title: "Non-evaluative coaching feedback",
+    body: `<p>In a teacher’s coaching view, use <strong>Non-evaluative coaching feedback</strong> to record a conversation. Save a draft while you work. Choose <strong>Share with teacher</strong> when you want it to appear on that teacher’s home page.</p>`,
+  },
+  {
+    page: '/pd/review',
+    selector: 'main h1',
+    title: "Review teachers’ PD",
+    body: `<p>Open a submitted deliverable from this queue to read the teacher’s work and give feedback. An empty queue means there is currently nothing awaiting review. You can continue the tour.</p>`,
   },
   {
     page: '/coach',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>That's the coach view — a simple caseload plus a private feedback workspace. Re-open the tour any time from the <strong>Guided Tour</strong> button at the top of the screen.</p>`,
+    body: `<p>Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
@@ -432,114 +334,61 @@ const teacherSteps: TourStep[] = [
     page: '/teacher',
     selector: '[data-tour="t-summary"]',
     placement: 'auto',
-    title: 'Your performance summary',
-    body: `<p>A snapshot of your growth: per-domain averages, most-recent ratings on each indicator, and the observations that contributed to the numbers. Nothing is computed until an observation is <strong>published</strong> — drafts never affect your summary.</p>`,
+    title: "Your teaching dashboard",
+    body: `<p>The four cards show your active focus areas, published observations, PD hours this year, and goals. Counts can be zero when you first sign in.</p>`,
   },
   {
     page: '/teacher/observations',
     selector: '[data-tour="t-obs-list"]',
     placement: 'auto',
-    title: 'All your observations',
-    body: `<p>Every observation your principal has run for you. The <strong>status</strong> tells you where each one stands: published means it's waiting for your acknowledgement, acknowledged means you've signed it.</p>`,
+    title: "Your published observations",
+    body: `<p>An observation appears here after your appraiser publishes it. Open one to read the scores and feedback. If your list is empty, continue the tour and explore the Module Library in My PD LMS.</p>`,
   },
   {
     page: '/teacher/observations',
     noHighlight: true,
-    title: 'Acknowledging an observation — read first, sign after',
-    body: `
-      <p>When you open a published observation the <strong>blue banner at the very top</strong> tells you exactly how many strengths, growth areas, next steps, and rubric scores are waiting below — before you're asked to sign anything.</p>
-      <ul>
-        <li><strong>Rubric Scores</strong> — every indicator the appraiser marked, with evidence notes.</li>
-        <li><strong>Strengths (Glows)</strong>, <strong>Growth areas (Grows)</strong>, and <strong>Next steps</strong>.</li>
-        <li><strong>Focus areas</strong> opened for you.</li>
-        <li>A place to <strong>type your response</strong> and <strong>sign</strong> at the bottom.</li>
-      </ul>
-      <p><strong>Signing = "seen and discussed"</strong> — not "I agree with every rating." If there's a dispute, use the response box; the signature is only the legal record that the conversation happened.</p>`,
+    title: "Acknowledge an observation",
+    body: `<p>After you have read and discussed a published observation, draw your signature, add an optional response, and choose <strong>Sign &amp; Acknowledge</strong>. Your signature records that you have seen and discussed the observation.</p>`,
   },
   {
     page: '/teacher/focus',
     selector: '[data-tour="t-focus"]',
     placement: 'auto',
     title: 'Your current focus areas',
-    body: `<p>These are the specific indicators your appraiser wants you to work on. Each one links to the pedagogy library's <strong>teacher next moves</strong> and <strong>resources</strong> for that exact indicator at your current level.</p>`,
+    body: `<p>Your appraiser can identify focus areas for your work together. Active focus areas are listed here with their descriptions. Your first visit may show no active focus areas.</p>`,
   },
   {
-    // Coaching feedback lives on the teacher home page inside a card
-    // anchored at #coaching-feedback / data-tour="t-coaching-feedback".
-    // Only SHARED entries land here — drafts stay with the coach.
     page: '/teacher',
     selector: '[data-tour="t-coaching-feedback"]',
     placement: 'auto',
     title: 'Non-evaluative coaching feedback',
-    body: `
-      <p>If you have one or more instructional coaches, this card shows every entry they've chosen to <strong>share</strong> with you — usually after a classroom visit or a coaching conversation. If more than one coach is assigned to you, their shared entries all appear here together, each labeled with the author's name. Each entry can include:</p>
-      <ul>
-        <li><strong>What your coach noticed</strong> (evidence from the visit).</li>
-        <li><strong>Strengths</strong> — what worked well.</li>
-        <li><strong>Growth</strong> — what could stretch your practice further.</li>
-        <li><strong>Agreed next step</strong> and an optional <strong>follow-up date</strong>.</li>
-      </ul>
-      <p><strong>This is not an evaluation.</strong> Coaching feedback does not affect your rubric scores, does not enroll you in PD, and is never visible to your principal or the district dashboard. Only you, the authoring coach(es), and platform support can see it — and each coach sees only the entries they themselves authored, not the entries other coaches wrote for you.</p>
-      <p>You'll get a notification the first time each entry is shared — tap the bell in the header to jump straight here.</p>`,
-    hint: 'Your coach(es) can also keep private drafts you never see. Only entries a coach explicitly clicks "Share with teacher" appear here.',
+    body: `<p>When your instructional coach chooses <strong>Share with teacher</strong>, their note appears in this section of your home page. These notes are separate from observation scores. The section is empty until a coach shares feedback.</p>`,
   },
   {
     page: '/teacher/pd',
     selector: '[data-tour="t-pd-home"]',
     placement: 'auto',
-    title: 'My PD LMS — rebuild a real lesson, level up the rubric',
-    body: `
-      <p>You can choose a module from the PD Library before your first observation. Your principal or coach can also recommend a module. When a published observation scores an indicator at level 1 or 2, the platform recommends a module for that indicator. Each module follows eight steps:</p>
-      <ul>
-        <li><strong>Learn</strong> (Steps 1-3) — pick an upcoming lesson you'll actually teach, read the rubric side-by-side for your current level vs. your target level, and spot the evidence gap.</li>
-        <li><strong>Practice</strong> (Steps 4-6) — rewrite that lesson so the missing Level-up signals show up, script the three high-leverage moments (opener / pivot / close), and choose one piece of student evidence you'll collect.</li>
-        <li><strong>Apply</strong> (Steps 7-8) — teach the redesigned lesson, then submit the rebuilt <strong>lesson plan + student evidence artifact + 3-sentence impact note</strong>. Your supervisor verifies that bundle right in the platform.</li>
-      </ul>
-      <p>The deliverable is <strong>work you keep</strong> — a lesson plan you can reuse, not a worksheet for a seminar you'll never open again. Group several modules into a <strong>PD Plan</strong> for a printable Floating PD Day agenda.</p>
-      <p><strong>Works on the computer, not on paper:</strong> every "check that" becomes a clickable checkbox, every "pick one" becomes a radio button, and every answer box is an auto-saving textarea. Watch the green <em>✓ Saved (learn) at HH:MM</em> pill in the top-right — that's the server confirming every keystroke and click. You can close the browser any time; when you come back everything is exactly where you left it.</p>
-      <p><strong>Practice unlocks</strong> the moment you click <em>Mark learn complete</em>; <strong>Apply unlocks</strong> the moment you click <em>Mark practice complete</em>. If you skipped "Start module" we forward you automatically — you will never be stuck.</p>`,
+    title: "My PD LMS",
+    body: `<p>Start with <strong>Recommended Modules</strong>, or browse the <strong>Module Library</strong> even before your first observation. Follow Learn, Practice, and Apply in your module, then submit your deliverable for review. Your reviewer can verify it or request a revision.</p>`,
   },
   {
     page: '/teacher',
     selector: '#aps-bell-btn',
     placement: 'bottom',
-    title: 'Notifications — no email required',
-    body: `
-      <p>The bell in the header collects every important event: a new observation, a focus area opened for you, a PD module recommended, a supervisor verification, and more.</p>
-      <p>Open the bell once and the browser will ask permission to enable <strong>Web Push</strong>, so you'll also get notifications on your phone / laptop lock screen — still completely free to the district.</p>
-      <p>You can fine-tune every notification kind (in-app + push, separately) from <strong>Profile &rarr; Notifications</strong>.</p>`,
+    title: "Your notifications",
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
-  ...reportsTourSteps(false),
+  ...reportsTourSteps('teacher'),
   {
     page: '/teacher',
     noHighlight: true,
     title: "You're all set",
-    body: `<p>Everything here is <strong>your private record</strong> — only you, your appraiser, and district leadership can see it. Re-open the tour from the top nav any time, and use <strong>Profile</strong> to change your password or notification preferences.</p>`,
+    body: `<p>Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
 // ----------------------------------------------------------------------------
-// Teacher-coach merged tour
-//
-// Sept 24, 2026 — a `role='teacher'` user with `can_coach=1` (in production:
-// Tristae Allard, Miranda Quale) has TWO workspaces: their own teacher home
-// AND the coaching workspace at /coach.  The nav bar already reflects this
-// ("My Teaching" + "My Coaching" + "PD Review"), but the guided tour used to
-// return `teacherSteps` only — so a teacher-coach never got a walkthrough of
-// coaching notes, sharing, or the /coach caseload page they use every day.
-//
-// The merged tour stitches teacher + coach steps into one flow:
-//   1. A single teacher-coach intro (replaces both role-specific intros).
-//   2. Teacher body (teacher steps minus intro[0] and terminal "You're all
-//      set").
-//   3. A bridge step that hands off from the teacher side to the coach side.
-//   4. Coach body (coach steps minus intro[0] and terminal "You're all set").
-//   5. One combined "You're all set" outro that names both workspaces.
-//
-// Intro/outro identification is textual (title === "You're all set") so
-// future edits to the underlying arrays don't silently drop the terminal
-// step — if someone renames the outro, the helper leaves the array intact
-// and logs a warning at build time instead of silently emitting a duplicate.
+// The combined tour visits the teacher workspace, then the coaching caseload.
 const TEACHER_COACH_OUTRO_TITLE = "You're all set";
 
 function stripIntroAndOutro(steps: TourStep[], label: string): TourStep[] {
@@ -566,10 +415,7 @@ const teacherCoachSteps: TourStep[] = [
     page: '/teacher',
     noHighlight: true,
     title: 'Welcome to the Marshall Growth Platform',
-    body: `
-      <p>You wear two hats: you're a <strong>Teacher</strong> with your own observations, PD, and focus areas, and you're also an <strong>Instructional Coach</strong> for one or more teachers on your caseload.</p>
-      <p>This tour covers BOTH workspaces. We'll start with your teacher home (about 2 minutes), then hand off to your coaching workspace (about 2 more minutes). Use <strong>Next →</strong> and <strong>← Back</strong> to move through, or <strong>Skip</strong> at any time. You can always restart from <strong>Guided Tour</strong> at the top of the screen.</p>`,
-    hint: 'Keyboard shortcuts work too — press → for next, ← for back, Esc to close.',
+    body: `<p>This tour covers both your <strong>My Teaching</strong> and <strong>My Coaching</strong> workspaces. Choose <strong>Next</strong> to continue, <strong>Back</strong> to revisit a step, or <strong>Skip</strong> to leave. You can replay the walkthrough from <strong>Guided Tour</strong>.</p>`,
   },
   // 2. Teacher body (drops teacher intro + teacher outro).
   ...stripIntroAndOutro(teacherSteps, 'teacherSteps'),
@@ -577,11 +423,8 @@ const teacherCoachSteps: TourStep[] = [
   {
     page: '/teacher',
     noHighlight: true,
-    title: "That's your teaching workspace — now your coaching workspace",
-    body: `
-      <p>That covers everything on the <strong>teacher</strong> side. Your <strong>My Teaching</strong>, <strong>Observations</strong>, <strong>Focus Areas</strong>, <strong>My PD LMS</strong>, and <strong>Exports</strong> nav items above all live in this workspace.</p>
-      <p>You also have <strong>My Coaching</strong> and <strong>PD Review</strong> in the nav — that's a completely separate workspace where you coach OTHER teachers. Next steps walk through that side, starting with your coaching caseload.</p>`,
-    hint: 'Nothing you do on the coaching side ever mixes with your own teacher record. Your coaching entries never score you, and your teacher observations never appear to the teachers you coach.',
+    title: "From My Teaching to My Coaching",
+    body: `<p>Next, you’ll see the coaching workspace for your assigned teachers. Use <strong>My Teaching</strong> to return to your own records or <strong>My Coaching</strong> to return to your caseload.</p>`,
   },
   // 4. Coach body (drops coach intro + coach outro).
   ...stripIntroAndOutro(coachSteps, 'coachSteps'),
@@ -590,13 +433,7 @@ const teacherCoachSteps: TourStep[] = [
     page: '/teacher',
     noHighlight: true,
     title: "You're all set",
-    body: `
-      <p>You've now seen both sides of your account:</p>
-      <ul>
-        <li><strong>My Teaching</strong> — your own observations, focus areas, PD LMS, and exports. Private to you, your appraiser, and district leadership.</li>
-        <li><strong>My Coaching</strong> — non-evaluative coaching feedback for the teachers on your caseload. Never touches evaluation, never visible to principals.</li>
-      </ul>
-      <p>Re-open this tour any time from the <strong>Guided Tour</strong> button at the top of the screen. Use <strong>Profile</strong> to change your password or notification preferences.</p>`,
+    body: `<p>Use <strong>My Teaching</strong> for your own observations and PD, and <strong>My Coaching</strong> for your assigned teachers. Open <strong>Guided Tour</strong> to replay these steps. To change your password, open your account menu and choose <strong>Profile &amp; Password</strong>.</p>`,
   },
 ];
 
@@ -616,8 +453,6 @@ export function getTour(role: UserRole, canCoach?: number): TourStep[] {
     case 'appraiser':      return appraiserSteps;
     case 'coach':          return coachSteps;
     case 'teacher':
-      // Teacher-coach (Miranda, Tristae): merged walkthrough of both
-      // workspaces.  Pure teachers get the unchanged teacher tour.
       return canCoach === 1 ? teacherCoachSteps : teacherSteps;
     default:               return [];
   }

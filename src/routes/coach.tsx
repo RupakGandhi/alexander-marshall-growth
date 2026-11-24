@@ -1221,7 +1221,7 @@ function CoachHome({ user, teachers, welcome }: any) {
       <h1 class="font-display text-2xl text-aps-navy mb-1">My Teachers</h1>
       <p class="text-slate-600 text-sm mb-6">Instructional coach view — focus areas and teacher-facing feedback only. You do not see scores or appraiser private notes.</p>
       {teachers.length === 0 ? (
-        <Card><p class="text-slate-500 text-sm">No teachers are currently assigned to you as coach.</p></Card>
+        <Card data-tour="co-empty"><p class="text-slate-500 text-sm">No teachers are currently assigned to you as coach.</p></Card>
       ) : (
         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-tour="co-teachers">
           {teachers.map((t: any) => (

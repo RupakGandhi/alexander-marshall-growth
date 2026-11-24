@@ -80,41 +80,29 @@ body.aps-tour-open { overflow: hidden; }
 .aps-tour-overlay {
   position: fixed; inset: 0; background: rgba(11, 37, 69, 0.55);
   z-index: 9998; backdrop-filter: blur(1.5px);
-  animation: apsFadeIn .25s ease-out;
 }
+.aps-tour-overlay.aps-tour-has-target { background: transparent; backdrop-filter: none; }
 .aps-tour-highlight {
-  position: absolute; z-index: 9999; pointer-events: none;
-  border: 3px solid #facc15;
-  border-radius: 10px;
+  position: fixed; z-index: 9999; pointer-events: none; box-sizing: border-box;
+  border: 3px solid #facc15; border-radius: 10px;
   box-shadow: 0 0 0 9999px rgba(11, 37, 69, 0.55), 0 0 24px rgba(250, 204, 21, 0.6);
-  transition: top .18s ease, left .18s ease, width .18s ease, height .18s ease;
 }
 .aps-tour-tooltip {
-  position: absolute; z-index: 10000;
-  width: min(380px, calc(100vw - 24px));
+  position: fixed; z-index: 10000; display: flex; flex-direction: column;
+  box-sizing: border-box; max-width: none; overflow: hidden;
   background: white; color: #0f172a; border-radius: 12px;
   box-shadow: 0 20px 50px rgba(2, 6, 23, 0.35), 0 4px 12px rgba(2, 6, 23, 0.15);
-  padding: 16px 18px 14px;
+  padding: 12px 16px;
   font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Arial, sans-serif;
-  animation: apsPopIn .2s ease-out;
-  max-height: calc(100vh - 24px);
-  overflow-y: auto;
 }
-.aps-tour-tooltip[data-placement="center"] {
-  width: min(480px, calc(100vw - 24px));
+.aps-tour-content {
+  flex: 1 1 auto; min-height: 0; overflow: auto; overflow-wrap: anywhere;
+  overscroll-behavior: contain;
 }
-@media (max-width: 640px) {
-  /* On phones, keep the tooltip centered at the bottom — readable, not covering */
-  .aps-tour-tooltip {
-    position: fixed !important;
-    left: 8px !important; right: 8px !important;
-    bottom: calc(8px + env(safe-area-inset-bottom)) !important;
-    top: auto !important;
-    width: auto !important;
-    max-width: none !important;
-    max-height: 70vh;
-  }
-  .aps-tour-tooltip[data-placement="center"] { top: 50% !important; transform: translateY(-50%); bottom: auto !important; }
+.aps-tour-head, .aps-tour-foot, .aps-tour-progress { flex: 0 0 auto; }
+@media (max-width: 380px), (max-height: 400px) {
+  .aps-tour-tooltip { padding: 8px 10px; }
+  .aps-tour-foot .aps-tour-btn { padding-left: 8px; padding-right: 8px; }
 }
 .aps-tour-head {
   display: flex; align-items: center; gap: 8px;

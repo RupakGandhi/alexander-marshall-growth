@@ -51,10 +51,6 @@
     return n;
   }
 
-  function currentPath() {
-    return window.location.pathname + window.location.search;
-  }
-
   function onPage(stepPage) {
     if (!stepPage) return true;
     // Match by pathname only; ignore trailing slashes.
@@ -63,10 +59,24 @@
     return a === b;
   }
 
-  function scrollIntoViewNice(target) {
+  function visibleTarget(selector) {
+    if (!selector) return null;
+    return Array.from(document.querySelectorAll(selector)).find(node => {
+      const rect = node.getBoundingClientRect();
+      return rect.width && rect.height && getComputedStyle(node).visibility !== 'hidden';
+    }) || null;
+  }
+
+  function scrollToTarget(target) {
     const rect = target.getBoundingClientRect();
-    const inView = rect.top >= 0 && rect.bottom <= (window.innerHeight || document.documentElement.clientHeight);
-    if (!inView) target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    const viewport = viewportBounds();
+    if (rect.top < viewport.top || rect.bottom > viewport.bottom ||
+        rect.left < viewport.left || rect.right > viewport.right) {
+      target.scrollIntoView({
+        block: rect.height > viewport.height ? 'start' : 'center',
+        inline: 'nearest', behavior: 'instant',
+      });
+    }
   }
 
   // -------------------- Tour state --------------------
@@ -74,6 +84,10 @@
   let overlayNode = null;
   let tooltipNode = null;
   let highlightNode = null;
+  let layoutObserver = null;
+  let frame = 0;
+  let navigating = false;
+  let opener = null;
 
   function saveStep(i) {
     try { localStorage.setItem(LS_STEP, String(i)); } catch (e) {}
@@ -91,13 +105,23 @@
     overlayNode = tooltipNode = highlightNode = null;
     document.body.classList.remove('aps-tour-open');
     document.removeEventListener('keydown', onKey, true);
-    window.removeEventListener('resize', reposition, true);
-    window.removeEventListener('scroll', reposition, true);
+    window.removeEventListener('resize', schedulePosition);
+    window.removeEventListener('scroll', schedulePosition, true);
+    window.visualViewport?.removeEventListener('resize', schedulePosition);
+    window.visualViewport?.removeEventListener('scroll', schedulePosition);
+    layoutObserver?.disconnect();
+    layoutObserver = null;
+    cancelAnimationFrame(frame);
+    frame = 0;
   }
 
   function finish(doneMessage) {
     clearStep();
     teardown();
+    const launcher = opener?.isConnected && opener.getClientRects().length
+      ? opener : visibleTarget('.aps-tour-nav-btn') || visibleTarget('#aps-mobile-nav-btn');
+    launcher?.focus({ preventScroll: true });
+    opener = null;
     if (doneMessage) {
       const toast = el('div', { class: 'aps-tour-toast', role: 'status' }, doneMessage);
       document.body.appendChild(toast);
@@ -109,77 +133,91 @@
   function onKey(e) {
     if (!tooltipNode) return;
     if (e.key === 'Escape')     { e.preventDefault(); finish('Tour closed. You can re-open it any time from the “Guided Tour” button.'); }
-    else if (e.key === 'ArrowRight' || e.key === 'Enter') { e.preventDefault(); next(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
     else if (e.key === 'ArrowLeft')  { e.preventDefault(); prev(); }
+    else if (e.key === 'Tab') {
+      const items = tooltipNode.querySelectorAll('button:not([disabled]), a[href], [tabindex="0"]');
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus({ preventScroll: true });
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function viewportBounds() {
+    // A fixed dialog and its anchor must use the same viewport coordinates,
+    // including when a phone's visual viewport is smaller than the layout viewport.
+    const vv = window.visualViewport;
+    const left = vv?.offsetLeft || 0, top = vv?.offsetTop || 0;
+    const width = vv?.width || document.documentElement.clientWidth;
+    const height = vv?.height || document.documentElement.clientHeight;
+    return { top, left, width, height, right: left + width, bottom: top + height };
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(value, max));
+  }
+
+  function schedulePosition(event) {
+    // Scrolling a long tour explanation does not move its page anchor.
+    if (tooltipNode?.contains(event?.target instanceof Node ? event.target : null)) return;
+    if (!frame) frame = requestAnimationFrame(() => { frame = 0; reposition(); });
   }
 
   function reposition() {
-    const steps = getSteps();
-    if (!tooltipNode || !steps[idx]) return;
-    const step = steps[idx];
-    if (step.noHighlight) return;
-    const target = step.selector ? document.querySelector(step.selector) : null;
-    if (!target) return;
-    positionAround(target, step.placement || 'auto');
-  }
-
-  function positionAround(target, placement) {
-    const rect = target.getBoundingClientRect();
-    // Move the highlight box over the target
-    if (highlightNode) {
-      highlightNode.style.top = (rect.top + window.scrollY - 6) + 'px';
-      highlightNode.style.left = (rect.left + window.scrollX - 6) + 'px';
-      highlightNode.style.width = (rect.width + 12) + 'px';
-      highlightNode.style.height = (rect.height + 12) + 'px';
-    }
-    // Position the tooltip
-    const tipW = tooltipNode.offsetWidth || 360;
-    const tipH = tooltipNode.offsetHeight || 200;
-    const margin = 14;
-    const viewportW = window.innerWidth, viewportH = window.innerHeight;
-    let top, left, place = placement;
-
-    if (place === 'auto') {
-      const roomBelow = viewportH - rect.bottom;
-      const roomAbove = rect.top;
-      const roomRight = viewportW - rect.right;
-      const roomLeft = rect.left;
-      if (roomBelow >= tipH + margin) place = 'bottom';
-      else if (roomAbove >= tipH + margin) place = 'top';
-      else if (roomRight >= tipW + margin) place = 'right';
-      else if (roomLeft >= tipW + margin) place = 'left';
-      else place = 'bottom';
+    const step = getSteps()[idx];
+    if (!tooltipNode || !step) return;
+    const v = viewportBounds();
+    const pad = 10, gap = 14;
+    const target = step.noHighlight ? null : visibleTarget(step.selector);
+    const rect = target?.getBoundingClientRect();
+    // Draw only the visible part. Large forms and tables can span several screens.
+    const clipped = rect && {
+      left: Math.max(v.left, rect.left - 5), right: Math.min(v.right, rect.right + 5),
+      top: Math.max(v.top, rect.top - 5), bottom: Math.min(v.bottom, rect.bottom + 5),
+    };
+    const anchored = clipped && clipped.right > clipped.left && clipped.bottom > clipped.top;
+    highlightNode.hidden = !anchored;
+    overlayNode.classList.toggle('aps-tour-has-target', Boolean(anchored));
+    if (anchored) {
+      Object.assign(highlightNode.style, {
+        left: clipped.left + 'px', top: clipped.top + 'px',
+        width: clipped.right - clipped.left + 'px', height: clipped.bottom - clipped.top + 'px',
+      });
     }
 
-    if (place === 'bottom') {
-      top = rect.bottom + window.scrollY + margin;
-      left = Math.max(8, Math.min(rect.left + window.scrollX + rect.width/2 - tipW/2, window.scrollX + viewportW - tipW - 8));
-    } else if (place === 'top') {
-      top = rect.top + window.scrollY - tipH - margin;
-      left = Math.max(8, Math.min(rect.left + window.scrollX + rect.width/2 - tipW/2, window.scrollX + viewportW - tipW - 8));
-    } else if (place === 'right') {
-      top = Math.max(8, rect.top + window.scrollY + rect.height/2 - tipH/2);
-      left = rect.right + window.scrollX + margin;
-    } else {
-      top = Math.max(8, rect.top + window.scrollY + rect.height/2 - tipH/2);
-      left = Math.max(8, rect.left + window.scrollX - tipW - margin);
+    const narrow = v.width <= 640;
+    const preferredWidth = narrow ? v.width : anchored ? 380 : 480;
+    tooltipNode.style.width = Math.min(preferredWidth, v.width - 2 * pad) + 'px';
+    const maxHeight = anchored && narrow && v.height >= 400 ? v.height * 0.72 : v.height - 2 * pad;
+    tooltipNode.style.maxHeight = maxHeight + 'px';
+    const w = tooltipNode.offsetWidth, h = tooltipNode.offsetHeight;
+    let x = v.left + (v.width - w) / 2, y = v.top + (v.height - h) / 2;
+    let side = 'center';
+    if (anchored) {
+      const room = {
+        bottom: v.bottom - clipped.bottom - gap - pad, top: clipped.top - v.top - gap - pad,
+        right: v.right - clipped.right - gap - pad, left: clipped.left - v.left - gap - pad,
+      };
+      const preferred = ['top', 'left', 'right', 'bottom'].includes(step.placement) ? step.placement : 'bottom';
+      const order = [preferred, 'bottom', 'top', 'right', 'left'];
+      const heightSide = s => s === 'top' || s === 'bottom';
+      side = order.find(s => room[s] >= (heightSide(s) ? h : w));
+      // If the anchor spans the screen, dock against the edge with more room.
+      if (!side) side = room.bottom >= room.top ? 'bottom' : 'top';
+      if (heightSide(side)) {
+        x = (clipped.left + clipped.right - w) / 2;
+        y = side === 'top' ? clipped.top - h - gap : clipped.bottom + gap;
+      } else {
+        y = (clipped.top + clipped.bottom - h) / 2;
+        x = side === 'left' ? clipped.left - w - gap : clipped.right + gap;
+      }
     }
-    tooltipNode.style.top = top + 'px';
-    tooltipNode.style.left = left + 'px';
-    tooltipNode.setAttribute('data-placement', place);
-  }
-
-  function positionCentered() {
-    if (!tooltipNode) return;
-    const tipW = tooltipNode.offsetWidth || 420;
-    const tipH = tooltipNode.offsetHeight || 240;
-    tooltipNode.style.top = (window.scrollY + (window.innerHeight - tipH) / 2) + 'px';
-    tooltipNode.style.left = ((window.innerWidth - tipW) / 2) + 'px';
-    tooltipNode.setAttribute('data-placement', 'center');
-    if (highlightNode) {
-      highlightNode.style.width = '0px';
-      highlightNode.style.height = '0px';
-    }
+    tooltipNode.style.left = clamp(x, v.left + pad, v.right - w - pad) + 'px';
+    tooltipNode.style.top = clamp(y, v.top + pad, v.bottom - h - pad) + 'px';
+    tooltipNode.dataset.placement = side;
   }
 
   function renderStep() {
@@ -190,8 +228,12 @@
 
     // If the current page doesn't match the step's page, navigate there.
     if (!onPage(step.page)) {
+      navigating = true;
       saveStep(idx);
-      window.location.href = step.page + (step.page.indexOf('?') === -1 ? '?' : '&') + 'tour=1';
+      const destination = new URL(step.page, window.location.href);
+      destination.searchParams.set('tour', '1');
+      destination.searchParams.set('tourStep', String(idx));
+      window.location.assign(destination.href);
       return;
     }
 
@@ -212,7 +254,7 @@
 
     // Resolve the target element (may be missing on this particular page —
     // then we center the tooltip and skip the highlight).
-    const target = step.selector && !step.noHighlight ? document.querySelector(step.selector) : null;
+    const target = step.noHighlight ? null : visibleTarget(step.selector);
 
     // Build tooltip contents
     const total = steps.length;
@@ -247,7 +289,7 @@
     const prevBtn = el('button', {
       class: 'aps-tour-btn aps-tour-btn-ghost',
       onclick: prev,
-    }, isFirst ? '← Back' : '← Back');
+    }, '← Back');
     if (isFirst) prevBtn.setAttribute('disabled', 'disabled');
 
     const skipBtn = el('button', {
@@ -264,38 +306,47 @@
 
     tooltipNode.innerHTML = '';
     tooltipNode.appendChild(header);
-    tooltipNode.appendChild(title);
-    tooltipNode.appendChild(body);
-    if (hint) tooltipNode.appendChild(hint);
+    // Keep the close and navigation buttons visible even when the explanation
+    // is longer than the viewport. Only this middle section scrolls.
+    const content = el('div', { class: 'aps-tour-content', tabindex: '0', role: 'region', 'aria-labelledby': 'aps-tour-title' }, [title, body, hint]);
+    tooltipNode.appendChild(content);
     tooltipNode.appendChild(progress);
     tooltipNode.appendChild(foot);
 
-    // Position tooltip + highlight (or center if no target)
-    if (target) {
-      scrollIntoViewNice(target);
-      // Wait one frame so the tooltip has layout metrics for positionAround.
-      requestAnimationFrame(() => positionAround(target, step.placement || 'auto'));
-    } else {
-      positionCentered();
-    }
-
+    if (target && step.autoScroll !== false) scrollToTarget(target);
+    reposition();
+    nextBtn.focus({ preventScroll: true });
     saveStep(idx);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', reposition, true);
-    window.addEventListener('scroll', reposition, true);
-    // Focus nextBtn so keyboard users can press Enter to advance.
-    setTimeout(() => nextBtn && nextBtn.focus && nextBtn.focus(), 60);
+    window.addEventListener('resize', schedulePosition);
+    window.addEventListener('scroll', schedulePosition, true);
+    window.visualViewport?.addEventListener('resize', schedulePosition);
+    window.visualViewport?.addEventListener('scroll', schedulePosition);
+    if (window.ResizeObserver) {
+      layoutObserver ||= new ResizeObserver(schedulePosition);
+      layoutObserver.disconnect();
+      layoutObserver.observe(tooltipNode);
+      if (target) layoutObserver.observe(target);
+    }
   }
 
-  function next() { idx++; renderStep(); }
-  function prev() { idx = Math.max(0, idx - 1); renderStep(); }
+  function next() {
+    if (navigating) return;
+    idx++; renderStep();
+  }
+  function prev() {
+    if (navigating) return;
+    idx = Math.max(0, idx - 1); renderStep();
+  }
 
   // -------------------- Public API --------------------
-  function start(fromStart) {
+  function start(fromStart, resumeStep) {
     const steps = getSteps();
-    if (!steps.length) return;
-    idx = fromStart ? 0 : loadStep();
-    if (idx >= steps.length) idx = 0;
+    if (navigating || !steps.length) return;
+    document.querySelectorAll('.aps-tour-toast').forEach(toast => toast.remove());
+    if (fromStart) opener = document.activeElement?.closest('.aps-tour-nav-btn');
+    idx = fromStart ? 0 : resumeStep ?? loadStep();
+    if (!Number.isInteger(idx) || idx < 0 || idx >= steps.length) idx = 0;
     renderStep();
   }
 
@@ -323,13 +374,16 @@
       } catch (e) {}
     }
     if (resume) {
+      const value = qs.get('tourStep');
+      const resumeStep = value !== null && /^\d+$/.test(value) ? Number(value) : undefined;
       // Clean the query string so reloads don't keep resuming.
       try {
         qs.delete('tour');
+        qs.delete('tourStep');
         const newUrl = window.location.pathname + (qs.toString() ? ('?' + qs.toString()) : '') + window.location.hash;
         window.history.replaceState({}, '', newUrl);
       } catch (e) {}
-      setTimeout(() => start(false), 300);
+      start(false, resumeStep);
     }
   }
 
@@ -338,6 +392,15 @@
     resume: function () { start(false); },
     close: function () { finish(); },
   };
+
+  // A restored browser-history entry can still contain the dialog from before
+  // cross-page navigation. Allow the restored page to launch a fresh tour.
+  window.addEventListener('pageshow', event => {
+    if (event.persisted) {
+      navigating = false;
+      teardown();
+    }
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', autoResumeOnLoad);

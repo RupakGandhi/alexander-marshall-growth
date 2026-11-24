@@ -1155,7 +1155,7 @@ function AppraiserHome({ user, teachers, latest, welcome, pdHours }: any) {
       )}
 
       {teachers.length === 0 ? (
-        <Card><p class="text-slate-500 text-sm">No teachers assigned. Contact your super admin for assignments.</p></Card>
+        <Card data-tour="ap-empty"><p class="text-slate-500 text-sm">No teachers assigned. Contact your super admin for assignments.</p></Card>
       ) : (
         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-tour="ap-teachers">
           {teachers.map((t: any) => {
