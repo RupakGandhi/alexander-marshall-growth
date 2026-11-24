@@ -295,7 +295,7 @@ async function sendWebPush(sub: PushSubscriptionRow, vapid: VapidRow, message: D
   const jwt = `${h}.${p}.${b64urlBytes(sigBytes)}`;
 
   return await fetch(endpoint, {
-    method: 'POST', redirect: 'error',
+    method: 'POST', redirect: 'manual',
     body: await encryptPush(sub, JSON.stringify(message)),
     headers: {
       'TTL': message.test ? '60' : '86400',
