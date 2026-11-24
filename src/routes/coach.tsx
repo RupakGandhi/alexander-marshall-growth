@@ -718,10 +718,10 @@ async function shareDeliveryStatus(
 function firstShareMsg(outcome: DeliveryOutcome): string {
   switch (outcome.status) {
     case 'delivered':          return 'Shared with teacher.';
-    case 'suppressed':         return 'Saved and shared. The teacher has turned off coach-note notifications, so no alert was sent.';
+    case 'suppressed':         return 'Shared with the teacher. Their in-app bell was off for this note.';
     case 'failed':             return 'Saved and shared. Notification did NOT deliver — use "Resend notification" in the entry to retry.';
     case 'already_delivered':  return 'Already shared with teacher.';
-    case 'already_suppressed': return 'Already shared. (No notification: the teacher has turned off coach-note alerts.)';
+    case 'already_suppressed': return 'Already shared. The in-app bell was off for this note.';
     case 'in_flight':          return 'Saved and shared. Another delivery attempt is in progress — refresh in a moment.';
     case 'retry_not_eligible': return 'Saved and shared. Notification state is unusual — check the entry and use Resend if needed.';
   }
@@ -729,11 +729,11 @@ function firstShareMsg(outcome: DeliveryOutcome): string {
 
 function retryMsg(outcome: DeliveryOutcome): string {
   switch (outcome.status) {
-    case 'delivered':          return 'Notification sent.';
-    case 'suppressed':         return 'The teacher has turned off coach-note notifications — no alert can be sent unless they re-enable it.';
+    case 'delivered':          return 'The notification was added to the teacher’s in-app bell.';
+    case 'suppressed':         return 'The teacher’s settings excluded this note from their in-app bell.';
     case 'failed':             return 'Notification retry failed — try again or contact support.';
-    case 'already_delivered':  return 'Notification is already delivered.';
-    case 'already_suppressed': return 'The teacher has turned off coach-note notifications — nothing to send.';
+    case 'already_delivered':  return 'A notification for this note was already added to the teacher’s in-app bell.';
+    case 'already_suppressed': return 'The in-app bell was off for this note when delivery was attempted.';
     case 'in_flight':          return 'Another retry is already in progress — refresh in a moment.';
     case 'retry_not_eligible': return 'Notification is not eligible for retry (unexpected state).';
   }
@@ -1344,7 +1344,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
             <button type="submit" name="_action" value="share" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-sm">
               <i class="fas fa-paper-plane mr-1"></i>Share with teacher
             </button>
-            <span class="text-[11px] text-slate-500 ml-2">Sharing sends {teacher.first_name} one notification and makes this note visible to them. Requires evidence, glow, growth, or next step.</span>
+            <span class="text-[11px] text-slate-500 ml-2">Sharing makes this note visible to {teacher.first_name}. Their notification settings control alerts. Requires evidence, glow, growth, or next step.</span>
           </div>
         </form>
         )}
@@ -1389,8 +1389,8 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                     )}
                     {n.status === 'shared' && n.delivery_status === 'suppressed' && (
                       <span class="ml-2 inline-flex items-center gap-2">
-                        <span class="text-slate-700 bg-slate-100 border border-slate-300 rounded px-2 py-0.5 text-[11px]" title="The teacher has turned off coach-note notifications in their preferences.">
-                          <i class="fas fa-bell-slash mr-1"></i>Recipient opted out of alerts
+                        <span class="text-slate-700 bg-slate-100 border border-slate-300 rounded px-2 py-0.5 text-[11px]" title="The teacher’s notification settings excluded this note from their in-app bell.">
+                          <i class="fas fa-bell-slash mr-1"></i>In-app bell was off for this note
                         </span>
                       </span>
                     )}
@@ -1471,7 +1471,7 @@ function CoachTeacher({ user, teacher, observations, focusAreas, modules, coachi
                             <button type="submit" name="_action" value="draft_share" class="bg-aps-navy hover:bg-aps-blue text-white px-3 py-1.5 rounded text-xs">
                               <i class="fas fa-paper-plane mr-1"></i>Share with teacher
                             </button>
-                            <span class="text-[11px] text-slate-500">(first share sends one notification)</span>
+                            <span class="text-[11px] text-slate-500">The teacher’s notification settings apply when you first share.</span>
                           </>
                         )}
                       </div>
