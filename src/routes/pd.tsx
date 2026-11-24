@@ -981,6 +981,14 @@ function parseReflectionState(raw: string | undefined): { notes: string; steps: 
   return { notes: s, steps: {}, checks: {} };
 }
 
+const practiceArtifacts = [
+  { key: 'exit_ticket',  label: 'A completed exit ticket showing student mastery of the indicator' },
+  { key: 'board_photo',  label: 'An annotated photo of the board / anchor chart' },
+  { key: 'work_sample',  label: 'A student work sample (with name redacted)' },
+  { key: 'transcript',   label: '3-5 student utterances during the pivot moment (short transcript)' },
+  { key: 'other',        label: 'Something else (describe in your answer)' },
+];
+
 function TeacherPdModule({ user, e, reflections, msg }: any) {
   const pill = statusPill(e.status);
   // Unlock rules: Learn is available as soon as the enrollment is not declined;
@@ -1160,13 +1168,7 @@ function TeacherPdModule({ user, e, reflections, msg }: any) {
             <LearnStep num={6} title="Pick ONE student-evidence artifact you will keep">
               <p class="text-sm text-slate-700 mb-2">Decide now — before you teach — which single artifact you'll keep as proof the redesign worked. <strong>Pick one:</strong></p>
               <div class="space-y-1.5">
-                {[
-                  { key: 'exit_ticket',  label: 'A completed exit ticket showing student mastery of the indicator' },
-                  { key: 'board_photo',  label: 'An annotated photo of the board / anchor chart' },
-                  { key: 'work_sample',  label: 'A student work sample (with name redacted)' },
-                  { key: 'transcript',   label: '3-5 student utterances during the pivot moment (short transcript)' },
-                  { key: 'other',        label: 'Something else (describe in your answer)' },
-                ].map((o) => {
+                {practiceArtifacts.map((o) => {
                   const key = `practice_art_${o.key}`;
                   return (
                     <label class="flex items-start gap-2 text-sm cursor-pointer hover:bg-slate-50 rounded px-1 py-0.5">
@@ -1568,6 +1570,61 @@ function ReviewRow({ r }: any) {
   );
 }
 
+type ReflectionPhase = 'learn' | 'practice' | 'apply';
+
+function ReviewReflection({ phase, raw, enrollment }: {
+  phase: ReflectionPhase;
+  raw?: string;
+  enrollment: { target_level: number; tgt_evidence_signals?: string; tgt_teacher_next_moves?: string };
+}) {
+  const { notes, steps, checks } = parseReflectionState(raw);
+  const prompts: Record<ReflectionPhase, Record<string, string>> = {
+    learn: {
+      1: 'Pick the lesson you will rebuild',
+      2: 'What is the biggest difference between the two rubric levels?',
+      3: 'Which evidence signals are missing from the lesson?',
+    },
+    practice: {
+      4: 'Rebuilt lesson plan',
+      5: 'Opening (first 3 minutes)',
+      6: 'Pivot moment (middle)',
+      7: 'Close (last 5 minutes)',
+      8: 'Where and when will you capture the artifact?',
+    },
+    apply: {
+      1: 'Which of the Level ' + (enrollment.target_level + 1) + ' moves actually happened in the room?',
+      2: 'What did students say or do that surprised you?',
+      3: 'What would you change before teaching this lesson again?',
+    },
+  };
+  const responses = Object.entries(steps)
+    .filter(([, answer]) => typeof answer === 'string' && answer.trim())
+    .map(([key, answer]) => ({ label: prompts[phase][key] || 'Step ' + key, answer }));
+  if (notes.trim()) responses.push({ label: 'Notes', answer: notes });
+  const selections: { label: string; options: string[] }[] = [];
+  if (phase === 'learn') {
+    const signals = parseJsonList(enrollment.tgt_evidence_signals);
+    selections.push({ label: 'Evidence signals already in the lesson', options: signals.filter((_, index) => checks['learn_sig_' + index] === true) });
+  }
+  if (phase === 'practice') {
+    const moves = parseJsonList(enrollment.tgt_teacher_next_moves);
+    selections.push({ label: 'Instructional moves selected', options: moves.filter((_, index) => checks['practice_move_' + index] === true) });
+    selections.push({ label: 'Student-evidence artifact', options: practiceArtifacts.filter(({ key }) => checks['practice_art_' + key] === true).map(({ label }) => label) });
+  }
+  const selected = selections.filter(({ options }) => options.length > 0);
+  if (!responses.length && !selected.length) return <p class="text-sm text-slate-400 italic">No reflection</p>;
+  return (
+    <dl class="text-sm text-slate-800 space-y-2 mt-1">
+      {responses.map(({ label, answer }) => (
+        <div><dt class="font-medium">{label}</dt><dd class="whitespace-pre-wrap">{answer}</dd></div>
+      ))}
+      {selected.map(({ label, options }) => (
+        <div><dt class="font-medium">{label}</dt><dd><ul class="list-disc ml-5">{options.map((option) => <li>{option}</li>)}</ul></dd></div>
+      ))}
+    </dl>
+  );
+}
+
 function ReviewPdDetail({ user, e, teacher, reflections, criteria, scoreMap, msg }: any) {
   const pill = statusPill(e.status);
   criteria = criteria || [];
@@ -1603,10 +1660,10 @@ function ReviewPdDetail({ user, e, teacher, reflections, criteria, scoreMap, msg
       </Card>
 
       <Card title="Reflections" icon="fas fa-comments" class="mt-4">
-        {['learn','practice','apply'].map((p) => (
+        {(['learn', 'practice', 'apply'] as const).map((p) => (
           <div class="mb-3">
             <div class="text-xs font-semibold uppercase text-slate-500">{phaseLabel(p)}</div>
-            <div class="text-sm text-slate-800 whitespace-pre-wrap">{reflections[p] || <span class="text-slate-400 italic">No reflection</span>}</div>
+            <ReviewReflection phase={p} raw={reflections[p]} enrollment={e} />
           </div>
         ))}
       </Card>
