@@ -129,7 +129,7 @@ async function networkFirstHTML(event) {
   const req = event.request;
   try {
     // Use navigation preload if available (faster than starting fetch again)
-    const preload = event.preloadResponse ? await event.preloadResponse : null;
+    const preload = await event.preloadResponse?.catch(() => null);
     const res = preload || (await fetch(req));
     return res;
   } catch (err) {
