@@ -409,12 +409,33 @@ export async function setSetting(db: D1Database, key: string, value: string | nu
 // Returns one record per teacher with internal (verified+credited) + external
 // (approved) hours plus a heat-map color class. Honors soft-delete: only
 // non-deleted pd_enrollments and external_pd_submissions count.
+// SQLite credit timestamps are UTC. Resolve Central midnight separately for
+// each boundary so daylight-saving changes and the entire final day are included.
+function centralMidnightUtc(isoDate: string, addDays = 0): string {
+  const date = new Date(isoDate + 'T00:00:00Z');
+  date.setUTCDate(date.getUTCDate() + addDays);
+  const offset = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', timeZoneName: 'longOffset',
+  }).formatToParts(date).find(part => part.type === 'timeZoneName')!.value.slice(3);
+  return new Date(date.toISOString().slice(0, 10) + 'T00:00:00' + offset)
+    .toISOString().slice(0, 19).replace('T', ' ');
+}
+
 export async function getTeacherPDHoursSummary(
   db: D1Database,
-  opts?: { schoolIds?: number[]; teacherId?: number; sinceDate?: string | null }
+  opts?: { schoolIds?: number[]; teacherId?: number; sinceDate?: string | null; currentSchoolYear?: boolean }
 ) {
   const target = await getNumericSetting(db, 'pd_hours_target_annual', 22.5);
-  const since = opts?.sinceDate || null; // YYYY-MM-DD
+  const since = opts?.sinceDate || null; // Optional filter for history reports.
+  // Annual displays use the district's configured dates. Keep the historical
+  // reporting path unbounded unless its caller supplies a filter.
+  const currentPeriod = opts?.currentSchoolYear
+    ? await db.prepare('SELECT start_date, end_date FROM school_years WHERE district_id = 1 AND is_current = 1 LIMIT 1')
+        .first<{ start_date: string; end_date: string }>()
+    : null;
+  const periodBounds = currentPeriod
+    ? [centralMidnightUtc(currentPeriod.start_date), centralMidnightUtc(currentPeriod.end_date, 1)]
+    : [];
 
   const where: string[] = [`u.role = 'teacher'`, `u.active = 1`];
   const binds: any[] = [];
@@ -430,10 +451,15 @@ export async function getTeacherPDHoursSummary(
   // Internal hours: sum of pd_enrollments.hours_credited where credited and not deleted.
   // External hours: sum of external_pd_submissions.approved_hours where status='approved'
   // (fall back to .hours when approved_hours is NULL).
-  const internalDateFilter = since ? `AND e.credited_at IS NOT NULL AND date(e.credited_at) >= date(?)` : '';
-  const externalDateFilter = since ? `AND date(x.reviewed_at) >= date(?)` : '';
-  const extraBindsInternal = since ? [since] : [];
-  const extraBindsExternal = since ? [since] : [];
+  function creditDateFilter(column: string) {
+    const lowerBound = since ? `AND date(${column}) >= date(?)` : '';
+    if (!opts?.currentSchoolYear) return lowerBound;
+    if (!currentPeriod) return lowerBound + ' AND 0'; // An unconfigured year cannot earn annual credit.
+    return lowerBound + ` AND datetime(${column}) >= ? AND datetime(${column}) < ?`;
+  }
+  const internalDateFilter = creditDateFilter('e.credited_at');
+  const externalDateFilter = creditDateFilter('x.reviewed_at');
+  const dateBinds = [...(since ? [since] : []), ...periodBounds];
 
   const sql = `
     SELECT
@@ -469,7 +495,7 @@ export async function getTeacherPDHoursSummary(
   `;
 
   // Bind order: internal CTE filter, external CTE filter, then outer where binds.
-  const allBinds = [...extraBindsInternal, ...extraBindsExternal, ...binds];
+  const allBinds = [...dateBinds, ...dateBinds, ...binds];
   const r = await db.prepare(sql).bind(...allBinds).all();
   const rows = ((r.results as any[]) || []).map((row) => {
     const total = Number(row.internal_hours || 0) + Number(row.external_hours || 0);

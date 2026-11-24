@@ -489,7 +489,7 @@ const teacherSteps: TourStep[] = [
     placement: 'auto',
     title: 'My PD LMS — rebuild a real lesson, level up the rubric',
     body: `
-      <p>Every module here is tied to one specific Marshall indicator where your last observation was scored 1 or 2. When you open a module you follow a simple 8-step protocol:</p>
+      <p>You can choose a module from the PD Library before your first observation. Your principal or coach can also recommend a module. When a published observation scores an indicator at level 1 or 2, the platform recommends a module for that indicator. Each module follows eight steps:</p>
       <ul>
         <li><strong>Learn</strong> (Steps 1-3) — pick an upcoming lesson you'll actually teach, read the rubric side-by-side for your current level vs. your target level, and spot the evidence gap.</li>
         <li><strong>Practice</strong> (Steps 4-6) — rewrite that lesson so the missing Level-up signals show up, script the three high-leverage moments (opener / pivot / close), and choose one piece of student evidence you'll collect.</li>

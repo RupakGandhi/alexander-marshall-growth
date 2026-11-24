@@ -37,7 +37,7 @@ app.get('/', async (c) => {
   ).all();
   // Fix 6 — district-wide PD-hours heat-map data.  No school filter at this
   // level (district overview), so every active teacher is included.
-  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB, { currentSchoolYear: true });
   return c.html(<SuperintendentHome user={user} kpis={kpis} schools={bySchool.results || []} welcome={welcome} pdHours={pdHours} />);
 });
 
@@ -48,7 +48,7 @@ app.get('/', async (c) => {
 // ----------------------------------------------------------------------------
 
 app.get('/pd-hours/csv', async (c) => {
-  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB, { currentSchoolYear: true });
   const csv = buildPdHoursCsv(pdHours);
   const stamp = new Date().toISOString().slice(0, 10);
   return new Response(csv, {
@@ -61,7 +61,7 @@ app.get('/pd-hours/csv', async (c) => {
 
 app.get('/pd-hours/print', async (c) => {
   const user = c.get('user')!;
-  const pdHours = await getTeacherPDHoursSummary(c.env.DB);
+  const pdHours = await getTeacherPDHoursSummary(c.env.DB, { currentSchoolYear: true });
   return c.html(renderPdHoursPrint({
     scopeLabel: 'District-wide',
     user,

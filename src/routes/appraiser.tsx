@@ -30,7 +30,7 @@ async function buildAppraiserPdHours(db: D1Database, appraiserId: number) {
   const heatRowsAll: any[] = [];
   let heatTarget = 22.5;
   for (const t of ids) {
-    const r = await getTeacherPDHoursSummary(db, { teacherId: t });
+    const r = await getTeacherPDHoursSummary(db, { teacherId: t, currentSchoolYear: true });
     if (r.rows.length) heatRowsAll.push(r.rows[0]);
     heatTarget = r.target;
   }
