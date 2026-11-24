@@ -27,7 +27,7 @@ app.get('/', async (c) => {
     teacherEnrollments(c.env.DB, user.id),
     listTeacherGoals(c.env.DB, user.id),
     listExternalPdForTeacher(c.env.DB, user.id),
-    getTeacherPDHoursSummary(c.env.DB, { teacherId: user.id }),
+    getTeacherPDHoursSummary(c.env.DB, { teacherId: user.id, currentSchoolYear: true }),
     // Sept 23, 2026 — Section 3: pull the SHARED coaching notes for this
     // teacher.  Drafts are deliberately excluded (author-only visibility).
     // Multiple coaches can share notes about the same teacher (Aaron's
@@ -238,7 +238,7 @@ app.get('/pd-plan/export.pdf', async (c) => {
     teacherEnrollments(c.env.DB, user.id),
     listTeacherGoals(c.env.DB, user.id),
     listExternalPdForTeacher(c.env.DB, user.id),
-    getTeacherPDHoursSummary(c.env.DB, { teacherId: user.id }),
+    getTeacherPDHoursSummary(c.env.DB, { teacherId: user.id, currentSchoolYear: true }),
     c.env.DB.prepare(`SELECT * FROM districts WHERE id = 1`).first<any>(),
     getTeacherSummary(c.env.DB, user.id),
   ]);

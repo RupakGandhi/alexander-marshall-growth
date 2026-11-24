@@ -3220,7 +3220,7 @@ function PracticeCleanupBatchPage({ user, batch, rows, ambiguous_notifs, childre
       </div>
       <p class="text-slate-600 text-sm mb-4">
         Actor: <strong>{batch.actor_name}</strong> · Created: {formatDateTime(batch.created_at)}
-        {batch.executed_at ? <> · Executed: {formatDateTime(batch.executed_at)}</> : null}
+        {batch.executed_at ? <> · Executed: {formatDateTime(batch.executed_at.replace(/ #b\d+$/, ''))}</> : null}
         {batch.restored_at ? <> · Restored: {formatDateTime(batch.restored_at)} by {batch.restored_by_name || '—'}</> : null}
         <span class={`ml-3 inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${
           isExecuted ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
