@@ -39,7 +39,7 @@
       "name": "Guided Tour",
       "short_name": "Tour",
       "description": "Walkthrough the features for your role",
-      "url": "/?tour=1",
+      "url": "/profile?tour=1&tourStep=0",
       "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
     }
   ],

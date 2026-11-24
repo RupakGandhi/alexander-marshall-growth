@@ -72,6 +72,7 @@ app.post('/notifications/devices/:id/revoke', async (c) => {
     `DELETE FROM push_subscriptions WHERE id = ? AND user_id = ?`
   ).bind(id, user.id).run();
   await logActivity(c.env.DB, user.id, 'user', user.id, 'push_device_revoke', { id });
+  if (c.req.header('Accept') === 'application/json') return c.json({ ok: true });
   return c.redirect('/profile?msg=Device+removed#notifications');
 });
 
@@ -115,6 +116,15 @@ app.post('/password', async (c) => {
 });
 
 export default app;
+
+function deviceLabel(agent: string | null) {
+  const ua = agent || '';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox|FxiOS/.test(ua) ? 'Firefox'
+    : /Chrome|CriOS/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : 'Browser';
+  const os = /iPad/.test(ua) ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android'
+    : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
+  return os ? `${browser} on ${os}` : browser;
+}
 
 function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: string;
                               notifKinds?: any[]; notifPrefs?: Record<string, { in_app: boolean; push: boolean }>;
@@ -207,75 +217,58 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
       </div>
 
       <Card title="Notifications" icon="fas fa-bell" class="mt-6" id="notifications">
-        <p class="text-sm text-slate-700 mb-3">
-          The bell in the header keeps a full history of every alert. <strong>Web Push</strong> delivers notifications to your devices
-          (phone, tablet, laptop) even when this tab isn't open — at zero cost to the district, using the browser standard.
-        </p>
-
-        <form method="post" action="/profile/notifications" class="space-y-4">
-          {/* Master kill-switches */}
-          <div class="p-3 rounded-md border border-aps-navy/30 bg-aps-navy/[0.03]">
-            <div class="text-xs font-semibold uppercase tracking-wide text-aps-navy mb-2"><i class="fas fa-sliders mr-1"></i>Master switches</div>
-            <div class="grid sm:grid-cols-2 gap-3 text-sm">
-              <label class="flex items-start gap-2 p-2 rounded border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer">
-                <input type="checkbox" name="master_in_app" value="1" checked={settings.in_app_enabled} class="mt-1" />
-                <span>
-                  <span class="block font-medium text-slate-800"><i class="fas fa-bell mr-1 text-aps-navy"></i>In-app notifications</span>
-                  <span class="block text-xs text-slate-500">When off, your bell stays empty and no new rows are written. Existing history is preserved.</span>
-                </span>
+        <form method="post" action="/profile/notifications" class="space-y-4" id="aps-notification-settings">
+          <div class="grid sm:grid-cols-2 gap-3 text-sm">
+            <label class="flex items-start gap-2 p-3 rounded border border-slate-200">
+              <input type="checkbox" name="master_in_app" value="1" checked={settings.in_app_enabled} class="mt-1" />
+              <span>
+                <span class="block font-medium text-slate-800">In-app bell</span>
+                <span class="block text-xs text-slate-600">Show new alerts in the bell at the top of the platform.</span>
+              </span>
+            </label>
+            <div class="p-3 rounded border border-slate-200">
+              <label class="flex items-start gap-2">
+                <input type="checkbox" id="aps-device-alerts" disabled class="mt-1"
+                  aria-describedby="aps-device-status" data-account-muted={settings.push_enabled ? '0' : '1'} />
+                <span class="font-medium text-slate-800">Device alerts on this browser</span>
               </label>
-              <label class="flex items-start gap-2 p-2 rounded border border-slate-200 bg-white hover:bg-slate-50 cursor-pointer">
-                <input type="checkbox" name="master_push" value="1" checked={settings.push_enabled} class="mt-1" />
-                <span>
-                  <span class="block font-medium text-slate-800"><i class="fas fa-mobile-screen-button mr-1 text-aps-navy"></i>Web push to my devices</span>
-                  <span class="block text-xs text-slate-500">One-click silence for every enrolled device. Flip back on any time — your device list is kept.</span>
-                </span>
-              </label>
+              <p class="ml-5 mt-1 text-xs text-slate-600" id="aps-device-status" role="status" aria-live="polite">Checking this browser…</p>
+              <button type="button" id="aps-device-test" hidden class="ml-5 mt-2 text-xs text-aps-navy underline">Send a test alert</button>
+              <noscript><p class="text-xs text-slate-600">Enable JavaScript to manage alerts on this browser.</p></noscript>
             </div>
           </div>
 
-          {/* Device roster — only rendered if user has any subscriptions */}
-          <div class="p-3 rounded-md border border-slate-200 bg-slate-50">
-            <div class="flex items-center justify-between flex-wrap gap-2 mb-2">
-              <div class="text-xs font-semibold uppercase tracking-wide text-slate-700">
-                <i class="fas fa-display mr-1"></i>Your push devices ({pushDevices.length})
-              </div>
-              <button type="button" class="text-xs px-2 py-1 rounded bg-aps-navy text-white hover:bg-aps-blue"
-                onclick="(async()=>{try{if(!('serviceWorker' in navigator)||!('PushManager' in window)){alert('This browser does not support Web Push.');return;}const reg=await navigator.serviceWorker.ready;let s=await reg.pushManager.getSubscription();if(s){alert('Push is already enabled on this device.');return;}if(Notification.permission==='denied'){alert('Browser notifications are blocked. Re-enable them in site settings first.');return;}if(Notification.permission!=='granted'){const p=await Notification.requestPermission();if(p!=='granted')return;}const kr=await fetch('/api/push/public-key',{credentials:'include'});if(!kr.ok){alert('Could not fetch push key.');return;}const {publicKey}=await kr.json();function u8(b){const pad='='.repeat((4-b.length%4)%4);const b64=(b+pad).replace(/-/g,'+').replace(/_/g,'/');const r=atob(b64);const o=new Uint8Array(r.length);for(let i=0;i<r.length;i++)o[i]=r.charCodeAt(i);return o;}s=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:u8(publicKey)});await fetch('/api/push/subscribe',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(s.toJSON?s.toJSON():s)});alert('Push enabled on this device.');location.reload();}catch(e){alert('Could not enable push: '+(e&&e.message||e));}})()">
-                <i class="fas fa-plus mr-1"></i>Enable on this device
-              </button>
-            </div>
-            {pushDevices.length === 0 ? (
-              <p class="text-xs text-slate-500 italic">No devices yet. Click the button above on any phone, tablet, or computer to start getting system notifications there.</p>
-            ) : (
-              <ul class="space-y-1 text-xs">
+          <details class="text-sm" open={!settings.push_enabled}>
+            <summary class="cursor-pointer text-aps-navy font-medium">Manage device alerts</summary>
+            <div class="pl-3 pt-3 space-y-3">
+              <label class="flex items-center gap-2">
+                <input type="checkbox" name="master_push" value="1" checked={settings.push_enabled} />
+                Allow device alerts for my account
+              </label>
+              <p class="text-xs text-slate-600">Turn this off to pause alerts on all enrolled devices. Save notification settings to apply.</p>
+              <ul id="aps-enrolled-devices" class="space-y-1 text-xs">
                 {pushDevices.map((d: any) => (
-                  <li class="flex items-center justify-between gap-2 p-2 rounded bg-white border border-slate-200">
-                    <div class="min-w-0">
-                      <div class="text-slate-700 truncate">{d.user_agent || 'Unknown device'}</div>
-                      <div class="text-slate-400">Added {d.created_at ? String(d.created_at).slice(0,16) : '—'}{d.last_used_at ? ` · last ping ${String(d.last_used_at).slice(0,16)}` : ''}</div>
-                    </div>
-                    <button type="button" class="text-rose-700 hover:underline"
-                      onclick={`if(confirm('Remove this device? It will stop getting push notifications.'))fetch('/profile/notifications/devices/${d.id}/revoke',{method:'POST',credentials:'include'}).then(()=>location.reload())`}>
-                      <i class="fas fa-trash mr-1"></i>Remove
-                    </button>
+                  <li data-device-id={String(d.id)} class="flex items-center justify-between gap-2 py-1">
+                    <span class="min-w-0 break-words" data-device-name>{deviceLabel(d.user_agent)}</span>
+                    <button type="button" data-device-revoke={String(d.id)} class="text-rose-700 hover:underline">Remove</button>
                   </li>
                 ))}
               </ul>
-            )}
-          </div>
+              <p id="aps-device-management-status" class="text-xs text-slate-600" role="status"></p>
+            </div>
+          </details>
 
           {/* Per-kind table */}
           {notifKinds.length === 0 ? <p class="text-xs text-slate-500">No role-specific notification kinds.</p> : (
             <div>
-              <div class="text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2"><i class="fas fa-list-check mr-1"></i>Per-event controls</div>
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-700 mb-2"><i class="fas fa-list-check mr-1"></i>Alerts by event</div>
               <div class="overflow-x-auto rounded border border-slate-200">
                 <table class="w-full text-sm">
                   <thead class="text-xs text-slate-500 text-left bg-slate-50">
                     <tr>
                       <th class="py-2 pl-3 pr-2">Event</th>
                       <th class="py-2 px-2 text-center w-24">In-app bell</th>
-                      <th class="py-2 px-2 text-center w-24">Web push</th>
+                      <th class="py-2 px-2 text-center w-24">Device alerts</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -296,7 +289,7 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
                 </table>
               </div>
               <p class="text-[11px] text-slate-500 mt-2">
-                An event fires a push only when <em>both</em> the master push switch AND its row are on. The master switches win.
+                Choose where to receive each event. Save notification settings to apply changes to the bell, your account, and the event list.
               </p>
             </div>
           )}
@@ -318,11 +311,7 @@ function ProfilePage(props: { user: any; first?: boolean; err?: string; msg?: st
           <button type="button" class="aps-tour-nav-btn" onclick="window.APSGuidedTour && window.APSGuidedTour.start()">
             <i class="fas fa-play"></i>Start the tour
           </button>
-          <button type="button"
-            class="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-white text-aps-navy border border-aps-navy hover:bg-slate-50"
-            onclick="try{localStorage.removeItem('aps_tour_autolaunch_done');localStorage.removeItem('aps_tour_autolaunch_user');alert('The guided tour will auto-launch again the next time you sign in.');}catch(e){}">
-            <i class="fas fa-rotate-right"></i>Re-enable auto-launch on next login
-          </button>
+
         </div>
       </Card>
     </Layout>

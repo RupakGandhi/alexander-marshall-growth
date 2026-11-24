@@ -75,7 +75,7 @@ export function Layout(props: { title: string; user: User | null; children: any;
         <meta name="application-name" content="APS Growth" />
         <meta name="format-detection" content="telephone=yes" />
         <meta name="msapplication-TileColor" content="#0b2545" />
-        <link rel="manifest" href="/static/manifest.json" />
+        <link rel="manifest" href="/static/manifest.json?v=20261124-pwa1" />
         <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png" />
         <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png" />
         <link rel="shortcut icon" href="/static/favicon.ico" />
@@ -150,7 +150,7 @@ export function Layout(props: { title: string; user: User | null; children: any;
             }}
           />
         )}
-        <script src="/static/app.js" defer></script>
+        <script src="/static/app.js?v=20261124-pwa1" defer></script>
         {/* June 4, 2026 — sortable tables for every admin + superintendent
             report. Adds click-to-sort + shift-click multi-sort to any table
             tagged with data-sortable="true". Pure progressive enhancement —
