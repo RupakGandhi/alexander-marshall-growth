@@ -84,7 +84,7 @@ export function Layout(props: { title: string; user: User | null; children: any;
         <title>{title} · Alexander Public Schools — Marshall Growth Platform</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
-        <link href="/static/styles.css" rel="stylesheet" />
+        <link href="/static/styles.css?v=20261124-tour2" rel="stylesheet" />
         <script
           dangerouslySetInnerHTML={{
             __html: `tailwind.config = { theme: { extend: { colors: {
@@ -159,7 +159,7 @@ export function Layout(props: { title: string; user: User | null; children: any;
         {/* June 4, 2026 — heat-map tile sort + filter controls (drives the
             "Sort tiles by:" and "Filter:" dropdowns on the PDHoursHeatMap). */}
         <script src="/static/heatmap-sort.js" defer></script>
-        {tourPayload && <script src="/static/tour.js" defer></script>}
+        {tourPayload && <script src="/static/tour.js?v=20261124-tour2" defer></script>}
       </body>
     </html>
   );
