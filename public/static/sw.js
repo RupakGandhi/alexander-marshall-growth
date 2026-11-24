@@ -10,7 +10,7 @@
 // Bump CACHE_VERSION any time static assets change in an incompatible way.
 // ============================================================================
 
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_SHELL   = `aps-shell-${CACHE_VERSION}`;
 const CACHE_STATIC  = `aps-static-${CACHE_VERSION}`;
 const CACHE_CDN     = `aps-cdn-${CACHE_VERSION}`;

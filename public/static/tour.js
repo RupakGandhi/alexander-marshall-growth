@@ -246,7 +246,7 @@
 
     const prevBtn = el('button', {
       class: 'aps-tour-btn aps-tour-btn-ghost',
-      onclick: prev, disabled: isFirst ? '' : null,
+      onclick: prev,
     }, isFirst ? '← Back' : '← Back');
     if (isFirst) prevBtn.setAttribute('disabled', 'disabled');
 
