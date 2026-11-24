@@ -163,7 +163,7 @@ const superAdminSteps: TourStep[] = [
     selector: '#aps-bell-btn',
     placement: 'bottom',
     title: "Your notifications",
-    body: `<p>Open the bell to read your notifications. Use <strong>Notification settings</strong> in the bell menu to manage your preferences.</p>`,
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
   {
     page: '/admin',
@@ -276,7 +276,7 @@ const appraiserSteps: TourStep[] = [
     selector: '#aps-bell-btn',
     placement: 'bottom',
     title: 'Your notification bell',
-    body: `<p>Open the bell to read your notifications. Use <strong>Notification settings</strong> in the bell menu to manage your preferences.</p>`,
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
   ...reportsTourSteps('appraiser'),
   {
@@ -376,7 +376,7 @@ const teacherSteps: TourStep[] = [
     selector: '#aps-bell-btn',
     placement: 'bottom',
     title: "Your notifications",
-    body: `<p>Open the bell to read your notifications. Use <strong>Notification settings</strong> in the bell menu to manage your preferences.</p>`,
+    body: `<p>Open the bell to read your notifications. Choose <strong>Notification settings</strong> to manage your preferences or turn on optional alerts for this device.</p>`,
   },
   ...reportsTourSteps('teacher'),
   {
