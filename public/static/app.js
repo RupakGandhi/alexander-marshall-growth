@@ -13,12 +13,12 @@
   'use strict';
 
   // -------------------------- Signature Pad --------------------------
-  const pads = new Map();
+  const pads = new WeakMap();
 
   function initPad(canvasId) {
-    if (pads.has(canvasId)) return pads.get(canvasId);
     const canvas = document.getElementById(canvasId);
     if (!canvas) return null;
+    if (pads.has(canvas)) return pads.get(canvas);
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
 
@@ -33,8 +33,6 @@
       ctx.strokeStyle = '#0b2545';
     }
     resize();
-    window.addEventListener('resize', resize);
-    window.addEventListener('orientationchange', resize);
 
     let drawing = false;
     let last = null;
@@ -65,12 +63,12 @@
     canvas.addEventListener('touchend', end);
 
     const api = {
-      canvas,
+      resize,
       clear() { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; },
       isDirty() { return dirty; },
       toDataURL() { return canvas.toDataURL('image/png'); },
     };
-    pads.set(canvasId, api);
+    pads.set(canvas, api);
     return api;
   }
 
@@ -91,9 +89,19 @@
     },
   };
 
-  document.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('canvas[id^="sig-pad"]').forEach((c) => initPad(c.id));
-  });
+  function initCurrentPads() {
+    document.querySelectorAll('canvas[id^="sig-pad"]').forEach((canvas) => initPad(canvas.id));
+  }
+  function resizeCurrentPads() {
+    document.querySelectorAll('canvas[id^="sig-pad"]').forEach((canvas) => {
+      const pad = pads.get(canvas);
+      if (pad) pad.resize();
+    });
+  }
+  document.addEventListener('DOMContentLoaded', initCurrentPads);
+  document.addEventListener('aps:ajax-swapped', initCurrentPads);
+  window.addEventListener('resize', resizeCurrentPads);
+  window.addEventListener('orientationchange', resizeCurrentPads);
 
   // -------------------------- Service Worker + updates --------------------------
   if ('serviceWorker' in navigator) {
