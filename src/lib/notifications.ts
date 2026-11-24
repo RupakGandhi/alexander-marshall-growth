@@ -1,34 +1,5 @@
-// ============================================================================
-// notifications.ts — In-app + Web Push notifications
-// ============================================================================
-// Unified alert system for the Alexander Marshall Growth platform.  Replaces
-// every outbound email a traditional eval system would send with (a) an
-// always-on bell dropdown inside the PWA and (b) Web Push notifications that
-// reach any device running the installed PWA — all without an email or SMS
-// subscription.
-//
-// Public helpers:
-//   notify()          — create a single notification (and optionally push it)
-//   notifyMany()      — same, broadcast to a list of user ids
-//   getUnreadCount()  — count for bell badge
-//   listRecent()      — bell dropdown contents
-//   markRead / markAllRead / deleteNotification
-//   getOrCreateVapidKeys() — self-provisioning Web Push identity
-//   pushTo()          — best-effort push delivery
-//
-// Design choices that matter:
-//   • Persistence first — the DB row is the source of truth.  A push failure
-//     never rolls back or blocks a workflow.
-//   • Empty-payload push — we send VAPID-signed pushes with no encrypted body.
-//     The service worker responds by fetching /api/notifications/latest, which
-//     returns the freshest unread title/body/url.  This keeps the crypto path
-//     small (just signing a JWT) and avoids the AES-GCM ECE dance that is
-//     painful in a Worker runtime.
-//   • Zero cost — everything uses the open Web Push + built-in Web Crypto
-//     standards.  The district owns its VAPID key pair forever.
-// ============================================================================
-
 import type { Bindings } from './types';
+import { encryptPush, isBrowserPushEndpoint } from './web_push';
 
 export type NotifSeverity = 'info' | 'success' | 'warning' | 'action';
 
@@ -107,26 +78,23 @@ export async function notify(db: D1Database, p: NotifPayload, env?: Bindings): P
     `SELECT in_app, push FROM notification_preferences WHERE user_id = ? AND kind = ?`
   ).bind(p.user_id, p.kind).first<any>();
   const inAppKind = pref ? !!pref.in_app : true;
-  // Respect both master + per-kind — if either is off, don't write the row.
-  if (!masterInApp || !inAppKind) return 0;
-
-  const res = await db.prepare(
-    `INSERT INTO notifications (user_id, kind, title, body, url, icon, severity,
-        entity_type, entity_id, actor_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    p.user_id, p.kind, p.title, p.body || null, p.url || null, icon, severity,
-    p.entity_type || null, p.entity_id || null, p.actor_user_id || null
-  ).run();
-  const id = Number((res.meta as any)?.last_row_id || 0);
-
-  // Best-effort Web Push — never blocks or throws.
-  // Gated on BOTH the master push switch AND the per-kind push preference.
-  if (env) {
-    const pushKind = pref ? !!pref.push : meta.defaultPush;
-    if (masterPush && pushKind) {
-      try { await pushTo(db, p.user_id); } catch { /* swallow */ }
-    }
+  const pushKind = pref ? !!pref.push : meta.defaultPush;
+  let id = 0;
+  if (masterInApp && inAppKind) {
+    const res = await db.prepare(
+      `INSERT INTO notifications (user_id, kind, title, body, url, icon, severity,
+          entity_type, entity_id, actor_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      p.user_id, p.kind, p.title, p.body || null, p.url || null, icon, severity,
+      p.entity_type || null, p.entity_id || null, p.actor_user_id || null
+    ).run();
+    id = Number((res.meta as any)?.last_row_id || 0);
+  }
+  if (env && masterPush && pushKind) {
+    try {
+      await pushTo(db, p.user_id, p.url || '/');
+    } catch { /* A device delivery failure must not interrupt the original action. */ }
   }
   return id;
 }
@@ -164,13 +132,6 @@ export async function listRecent(db: D1Database, userId: number, limit = 25) {
        LIMIT ?`
   ).bind(userId, limit).all();
   return (r.results as any[]) || [];
-}
-
-export async function getLatestUnread(db: D1Database, userId: number) {
-  return db.prepare(
-    `SELECT * FROM notifications WHERE user_id = ? AND read_at IS NULL
-     ORDER BY created_at DESC LIMIT 1`
-  ).bind(userId).first<any>();
 }
 
 export async function markRead(db: D1Database, userId: number, id: number) {
@@ -255,39 +216,66 @@ export async function getOrCreateVapidKeys(db: D1Database, subject = 'mailto:adm
   const publicB64 = b64urlBytes(rawPub);
   const privateBlob = JSON.stringify(privJwk); // full JWK so we can re-import later
 
-  await db.prepare(`DELETE FROM vapid_keys`).run();  // single-row invariant
+  // A second first-time enrollment can arrive while key generation is in flight.
+  // Let the database keep the first pair so both subscriptions use the same key.
   await db.prepare(
-    `INSERT INTO vapid_keys (public_key, private_key, subject) VALUES (?, ?, ?)`
+    `INSERT INTO vapid_keys (public_key, private_key, subject)
+     SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM vapid_keys)`
   ).bind(publicB64, privateBlob, subject).run();
   const row = await db.prepare(`SELECT * FROM vapid_keys ORDER BY id LIMIT 1`).first<any>();
   return row as VapidRow;
 }
 
-// Send an empty-payload, VAPID-signed push to every subscription of this user.
-// The SW handler responds by calling /api/notifications/latest to fetch the
-// freshest unread notification and show it as a desktop alert.
-export async function pushTo(db: D1Database, userId: number) {
+type PushSubscriptionRow = { id: number; endpoint: string; p256dh: string; auth: string };
+type DeviceMessage = { user: number; path: string; test?: boolean };
+
+export function pushDestination(value: string) {
+  // Only application screens can be opened from a notification.
+  if (!value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f]/.test(value) || value.length > 1024) return '/';
+  const target = new URL(value, 'https://platform.invalid');
+  return /^\/(?:teacher|appraiser|coach|superintendent|admin|reports|profile|pd)(?:\/|$)/.test(target.pathname)
+    ? target.pathname + target.search + target.hash : '/';
+}
+
+async function pushTo(db: D1Database, userId: number, path: string) {
   const subs = await db.prepare(
     `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?`
-  ).bind(userId).all();
-  const rows = (subs.results as any[]) || [];
-  if (rows.length === 0) return;
+  ).bind(userId).all<PushSubscriptionRow>();
+  if (!subs.results?.length) return;
   const vapid = await getOrCreateVapidKeys(db);
-
-  for (const sub of rows) {
+  for (const sub of subs.results) {
     try {
-      const res = await sendEmptyPush(sub.endpoint, vapid);
-      if (res && (res.status === 404 || res.status === 410)) {
-        await db.prepare(`DELETE FROM push_subscriptions WHERE id = ?`).bind(sub.id).run();
-      } else {
-        await db.prepare(`UPDATE push_subscriptions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`)
-          .bind(sub.id).run();
-      }
-    } catch { /* single-device failure never blocks others */ }
+      await deliver(db, sub, vapid, { user: userId, path: pushDestination(path) });
+    } catch { /* One device must not block delivery to another. */ }
   }
 }
 
-async function sendEmptyPush(endpoint: string, vapid: VapidRow): Promise<Response | null> {
+export async function testDevicePush(db: D1Database, userId: number, endpoint: string): Promise<number> {
+  if (!isBrowserPushEndpoint(endpoint)) return 400;
+  const sub = await db.prepare(
+    `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ? AND endpoint = ?`
+  ).bind(userId, endpoint).first<PushSubscriptionRow>();
+  if (!sub) return 404;
+  if (!(await getUserSettings(db, userId)).push_enabled) return 409;
+  return deliver(db, sub, await getOrCreateVapidKeys(db), { user: userId, path: '/profile#notifications', test: true });
+}
+
+async function deliver(db: D1Database, sub: PushSubscriptionRow, vapid: VapidRow, message: DeviceMessage) {
+  if (!isBrowserPushEndpoint(sub.endpoint)) return 400;
+  const response = await sendWebPush(sub, vapid, message);
+  if (response.status === 404 || response.status === 410) {
+    await db.prepare('DELETE FROM push_subscriptions WHERE id = ? AND user_id = ? AND endpoint = ?')
+      .bind(sub.id, message.user, sub.endpoint).run();
+    return 410;
+  }
+  if (!response.ok) return 502;
+  await db.prepare('UPDATE push_subscriptions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+    .bind(sub.id, message.user).run();
+  return 202;
+}
+
+async function sendWebPush(sub: PushSubscriptionRow, vapid: VapidRow, message: DeviceMessage): Promise<Response> {
+  const endpoint = sub.endpoint;
   const u = new URL(endpoint);
   const aud = `${u.protocol}//${u.host}`;
   const exp = Math.floor(Date.now() / 1000) + 12 * 3600;
@@ -307,10 +295,12 @@ async function sendEmptyPush(endpoint: string, vapid: VapidRow): Promise<Respons
   const jwt = `${h}.${p}.${b64urlBytes(sigBytes)}`;
 
   return await fetch(endpoint, {
-    method: 'POST',
+    method: 'POST', redirect: 'error',
+    body: await encryptPush(sub, JSON.stringify(message)),
     headers: {
-      'TTL': '86400',
-      'Content-Length': '0',
+      'TTL': message.test ? '60' : '86400',
+      'Content-Encoding': 'aes128gcm',
+      'Content-Type': 'application/octet-stream',
       'Urgency': 'normal',
       'Authorization': `vapid t=${jwt}, k=${vapid.public_key}`,
     },

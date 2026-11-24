@@ -1,0 +1,3 @@
+/static/sw.js
+  Service-Worker-Allowed: /
+  Cache-Control: no-cache
